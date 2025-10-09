@@ -76,13 +76,32 @@ defmodule ConduitMcp.Transport.SSE do
 
   # SSE endpoint for server-to-client streaming
   get "/sse" do
-    conn
-    |> put_resp_content_type("text/event-stream")
-    |> put_resp_header("cache-control", "no-cache")
-    |> put_resp_header("connection", "keep-alive")
-    |> put_resp_header("x-accel-buffering", "no")
-    |> send_chunked(200)
-    |> send_sse_endpoint_info()
+    # Validate Accept header
+    accept_header = get_req_header(conn, "accept") |> List.first()
+
+    if accept_header && String.contains?(accept_header, "text/event-stream") do
+      Logger.info("New SSE connection established")
+
+      conn
+      |> put_resp_content_type("text/event-stream")
+      |> put_resp_header("cache-control", "no-cache")
+      |> put_resp_header("connection", "keep-alive")
+      |> put_resp_header("x-accel-buffering", "no")
+      |> send_chunked(200)
+      |> send_sse_endpoint_info()
+    else
+      Logger.warning("SSE connection rejected: invalid Accept header")
+
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(
+        406,
+        Jason.encode!(%{
+          error: "Not Acceptable",
+          message: "Accept header must include 'text/event-stream'"
+        })
+      )
+    end
   end
 
   # Message endpoint for client-to-server requests
