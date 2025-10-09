@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2025-10-09
+
+### Added
+- Comprehensive telemetry events for monitoring and metrics
+  - `[:conduit_mcp, :request, :stop]` - All MCP requests with duration and status
+  - `[:conduit_mcp, :tool, :execute]` - Tool executions with duration and outcome
+- Enhanced logging throughout request handling
+- `x-accel-buffering: no` header to SSE transport for nginx proxy compatibility
+- Configurable CORS headers on both transports (origin, methods, headers)
+- Examples for Resources and Prompts in README
+- Documentation for all telemetry events
+
+### Changed
+- Improved error handling and logging in request handler
+- Better error messages with context
+- Updated server version reporting to 0.2.0
+
+### Fixed
+- SSE buffering issues with nginx proxies
+
 ## [0.1.0] - 2025-10-08
 
 ### Added
@@ -40,4 +60,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - VS Code/Cursor integration guide
 - Phoenix integration documentation
 
+[0.2.0]: https://github.com/nyo16/conduit_mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/nyo16/conduit_mcp/releases/tag/v0.1.0

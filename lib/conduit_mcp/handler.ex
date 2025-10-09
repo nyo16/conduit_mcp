@@ -8,23 +8,41 @@ defmodule ConduitMcp.Handler do
 
   @doc """
   Handles an MCP request and returns a JSON-RPC response.
+  Emits telemetry events for monitoring and metrics.
   """
   def handle_request(request, server_module) do
-    cond do
-      Protocol.valid_request?(request) ->
-        handle_method(request, server_module)
+    start_time = System.monotonic_time()
 
-      Protocol.valid_notification?(request) ->
-        handle_notification(request, server_module)
-        :ok
+    result =
+      cond do
+        Protocol.valid_request?(request) ->
+          handle_method(request, server_module)
 
-      true ->
-        Protocol.error_response(
-          Map.get(request, "id"),
-          Protocol.invalid_request(),
-          "Invalid JSON-RPC 2.0 request"
-        )
-    end
+        Protocol.valid_notification?(request) ->
+          handle_notification(request, server_module)
+          :ok
+
+        true ->
+          Protocol.error_response(
+            Map.get(request, "id"),
+            Protocol.invalid_request(),
+            "Invalid JSON-RPC 2.0 request"
+          )
+      end
+
+    duration = System.monotonic_time() - start_time
+
+    :telemetry.execute(
+      [:conduit_mcp, :request, :stop],
+      %{duration: duration},
+      %{
+        method: Map.get(request, "method"),
+        server_module: server_module,
+        status: if(is_map(result) && Map.has_key?(result, "error"), do: :error, else: :ok)
+      }
+    )
+
+    result
   end
 
   defp handle_method(request, server_module) do
@@ -55,17 +73,30 @@ defmodule ConduitMcp.Handler do
         tool_name = Map.get(params, "name")
         tool_params = Map.get(params, "arguments", %{})
 
-        case GenServer.call(server_module, {:call_tool, tool_name, tool_params}) do
-          {:error, error} ->
-            Protocol.error_response(id, error[:code] || -32000, error[:message] || "Tool execution failed")
+        start_time = System.monotonic_time()
 
-          result when is_map(result) ->
-            Protocol.success_response(id, result)
+        result =
+          case GenServer.call(server_module, {:call_tool, tool_name, tool_params}) do
+            {:error, error} ->
+              Protocol.error_response(id, error[:code] || -32000, error[:message] || "Tool execution failed")
 
-          other ->
-            Logger.error("Unexpected result from handle_call_tool: #{inspect(other)}")
-            Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
-        end
+            result when is_map(result) ->
+              Protocol.success_response(id, result)
+
+            other ->
+              Logger.error("Unexpected result from handle_call_tool: #{inspect(other)}")
+              Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
+          end
+
+        duration = System.monotonic_time() - start_time
+
+        :telemetry.execute(
+          [:conduit_mcp, :tool, :execute],
+          %{duration: duration},
+          %{tool_name: tool_name, server_module: server_module, status: if(Map.has_key?(result, "error"), do: :error, else: :ok)}
+        )
+
+        result
 
       "resources/list" ->
         case GenServer.call(server_module, {:list_resources}) do
@@ -158,7 +189,7 @@ defmodule ConduitMcp.Handler do
       "protocolVersion" => Protocol.protocol_version(),
       "serverInfo" => %{
         "name" => "conduit-mcp",
-        "version" => "0.1.0"
+        "version" => "0.2.0"
       },
       "capabilities" => %{
         "tools" => %{},
