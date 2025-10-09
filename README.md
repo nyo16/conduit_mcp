@@ -67,7 +67,70 @@ defmodule MyApp.MCPServer do
 end
 ```
 
-### 3. Run your server
+### 3. Implement additional callbacks (optional)
+
+```elixir
+# Add resources
+@impl true
+def handle_list_resources(state) do
+  resources = [
+    %{
+      "uri" => "file:///config",
+      "name" => "App Configuration",
+      "description" => "Current application configuration",
+      "mimeType" => "application/json"
+    }
+  ]
+  {:reply, %{"resources" => resources}, state}
+end
+
+@impl true
+def handle_read_resource("file:///config", state) do
+  config = Application.get_all_env(:my_app)
+  {:reply, %{
+    "contents" => [%{
+      "uri" => "file:///config",
+      "mimeType" => "application/json",
+      "text" => Jason.encode!(config)
+    }]
+  }, state}
+end
+
+# Add prompts
+@impl true
+def handle_list_prompts(state) do
+  prompts = [
+    %{
+      "name" => "code_review",
+      "description" => "Review code for best practices",
+      "arguments" => [
+        %{
+          "name" => "code",
+          "description" => "Code to review",
+          "required" => true
+        }
+      ]
+    }
+  ]
+  {:reply, %{"prompts" => prompts}, state}
+end
+
+@impl true
+def handle_get_prompt("code_review", %{"code" => code}, state) do
+  messages = [
+    %{
+      "role" => "user",
+      "content" => %{
+        "type" => "text",
+        "text" => "Please review this code:\n\n#{code}"
+      }
+    }
+  ]
+  {:reply, %{"messages" => messages}, state}
+end
+```
+
+### 4. Run your server
 
 See `examples/simple_tools_server/` for a complete working example.
 
