@@ -5,6 +5,21 @@ defmodule ConduitMcp.Transport.SSE do
   Provides two endpoints:
   - GET /sse - Server-Sent Events stream for server-to-client messages
   - POST /message - HTTP endpoint for client-to-server messages
+
+  ## Options
+
+  - `:server_module` (required) - The MCP server module to route requests to
+  - `:cors_origin` - CORS allow-origin header (default: "*")
+  - `:cors_methods` - CORS allow-methods header (default: "GET, POST, OPTIONS")
+  - `:cors_headers` - CORS allow-headers header (default: "content-type, authorization")
+
+  ## Example
+
+      {Bandit,
+       plug: {ConduitMcp.Transport.SSE,
+              server_module: MyApp.MCPServer,
+              cors_origin: "https://myapp.com"},
+       port: 4001}
   """
 
   use Plug.Router
@@ -19,10 +34,15 @@ defmodule ConduitMcp.Transport.SSE do
   plug(:dispatch)
 
   defp add_cors_headers(conn, _opts) do
+    # Get CORS settings from private (set in call/2)
+    cors_origin = conn.private[:cors_origin] || "*"
+    cors_methods = conn.private[:cors_methods] || "GET, POST, OPTIONS"
+    cors_headers = conn.private[:cors_headers] || "content-type, authorization"
+
     conn
-    |> put_resp_header("access-control-allow-origin", "*")
-    |> put_resp_header("access-control-allow-methods", "GET, POST, OPTIONS")
-    |> put_resp_header("access-control-allow-headers", "content-type")
+    |> put_resp_header("access-control-allow-origin", cors_origin)
+    |> put_resp_header("access-control-allow-methods", cors_methods)
+    |> put_resp_header("access-control-allow-headers", cors_headers)
   end
 
   def init(opts) do
@@ -37,8 +57,16 @@ defmodule ConduitMcp.Transport.SSE do
 
   def call(conn, opts) do
     server_module = Keyword.get(opts, :server_module)
-    conn = Plug.Conn.put_private(conn, :server_module, server_module)
-    super(conn, opts)
+    cors_origin = Keyword.get(opts, :cors_origin, "*")
+    cors_methods = Keyword.get(opts, :cors_methods, "GET, POST, OPTIONS")
+    cors_headers = Keyword.get(opts, :cors_headers, "content-type, authorization")
+
+    conn
+    |> Plug.Conn.put_private(:server_module, server_module)
+    |> Plug.Conn.put_private(:cors_origin, cors_origin)
+    |> Plug.Conn.put_private(:cors_methods, cors_methods)
+    |> Plug.Conn.put_private(:cors_headers, cors_headers)
+    |> super(opts)
   end
 
   # CORS preflight
@@ -136,11 +164,5 @@ defmodule ConduitMcp.Transport.SSE do
         # Client disconnected
         conn
     end
-  end
-
-  defp get_server_module(_conn) do
-    # Get server module from application config
-    Application.get_env(:conduit_mcp, :server_module) ||
-      raise "server_module not configured"
   end
 end
