@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "simple-tools": {
+      "command": "elixir",
+      "args": [
+        "/Users/niko/Source/conduit_mcp/examples/simple_tools_server/run.exs"
+      ],
+      "env": {
+        "PORT": "4001",
+        "TRANSPORT": "streamable_http"
+      }
+    }
+  }
+}

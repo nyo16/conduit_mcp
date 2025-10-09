@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "simple-tools": {
+      "url": "http://localhost:4001/",
+      "transport": {
+        "type": "http"
+      },
+      "description": "Simple MCP server with echo and reverse_string tools",
+      "disabled": false
+    }
+  }
+}
