@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2025-10-28
+
+### Added
+- Comprehensive test suite with 109 tests across all modules
+  - Protocol module tests (100% coverage)
+  - Handler module tests with telemetry validation
+  - Server behavior tests with lifecycle testing
+  - StreamableHTTP transport tests (93.5% coverage)
+  - SSE transport tests (85.4% coverage)
+- Test infrastructure
+  - TestServer for testing MCP server behavior
+  - TelemetryTestHelper for validating telemetry events
+- Test coverage reporting via ExCoveralls
+  - Overall coverage: 82.1%
+  - Configured coverage tooling in mix.exs
+- Production-ready testing infrastructure
+
+### Changed
+- Simplified README for better clarity and professionalism
+  - Removed emoticons and verbose sections
+  - Added installation instructions at top
+  - Featured Phoenix integration example prominently
+  - More concise and professional documentation
+- Improved test organization with proper fixtures and helpers
+
+### Documentation
+- Streamlined README from 300+ to ~230 lines
+- Improved example clarity
+- Better separation of concerns in documentation
+
 ## [0.2.0] - 2025-10-09
 
 ### Added
@@ -60,5 +90,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - VS Code/Cursor integration guide
 - Phoenix integration documentation
 
+[0.3.0]: https://github.com/nyo16/conduit_mcp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/nyo16/conduit_mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/nyo16/conduit_mcp/releases/tag/v0.1.0
