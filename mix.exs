@@ -73,7 +73,7 @@ defmodule ConduitMcp.MixProject do
 
   defp docs do
     [
-      main: "readme",
+      main: "ConduitMcp",
       source_ref: "v#{@version}",
       source_url: @source_url,
       extras: [

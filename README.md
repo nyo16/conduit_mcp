@@ -154,7 +154,7 @@ def start(_type, _args) do
 end
 ```
 
-See [examples/phoenix_mcp/](examples/phoenix_mcp/) for a complete working example with authentication.
+See the [Phoenix Integration Example](examples/phoenix_mcp/README.md) for a complete working example with authentication.
 
 ## Client Configuration
 
@@ -215,7 +215,6 @@ curl -X POST http://localhost:4001/ \
 
 ## Documentation
 
-- [Implementation Guide](elixir_mcp_implementation_guide.md)
 - [Simple Server Example](examples/simple_tools_server/README.md)
 - [Phoenix Integration Example](examples/phoenix_mcp/README.md)
 - [MCP Specification](https://modelcontextprotocol.io/specification/)
