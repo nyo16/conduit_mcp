@@ -118,10 +118,13 @@ defmodule ConduitMcp.Plugs.Auth do
   end
 
   def call(conn, %{strategy: :bearer_token} = opts) do
-    with [auth_header] <- get_req_header(conn, "authorization"),
-         "Bearer " <> token <- auth_header do
-      verify_credential(conn, token, opts)
-    else
+    case get_req_header(conn, "authorization") do
+      ["Bearer " <> token] ->
+        verify_credential(conn, token, opts)
+
+      ["bearer " <> token] ->
+        verify_credential(conn, token, opts)
+
       _ ->
         unauthorized(conn, "Missing or invalid Authorization header")
     end
@@ -140,10 +143,13 @@ defmodule ConduitMcp.Plugs.Auth do
   end
 
   def call(conn, %{strategy: :function} = opts) do
-    with [auth_header] <- get_req_header(conn, "authorization"),
-         "Bearer " <> token <- auth_header do
-      verify_credential(conn, token, opts)
-    else
+    case get_req_header(conn, "authorization") do
+      ["Bearer " <> token] ->
+        verify_credential(conn, token, opts)
+
+      ["bearer " <> token] ->
+        verify_credential(conn, token, opts)
+
       _ ->
         unauthorized(conn, "Missing or invalid Authorization header")
     end

@@ -26,6 +26,38 @@ defmodule ConduitMcp.Plugs.AuthTest do
     end
   end
 
+  describe "CORS preflight (OPTIONS)" do
+    test "OPTIONS requests bypass authentication" do
+      opts = Auth.init(strategy: :bearer_token, token: "secret")
+
+      conn = conn(:options, "/")
+      # No authorization header
+
+      result = Auth.call(conn, opts)
+
+      refute result.halted
+      assert result.status == nil
+    end
+
+    test "OPTIONS bypass works with any strategy" do
+      # API key strategy
+      opts = Auth.init(strategy: :api_key, api_key: "key")
+      conn = conn(:options, "/")
+
+      result = Auth.call(conn, opts)
+
+      refute result.halted
+
+      # Custom function strategy
+      opts2 = Auth.init(strategy: :function, verify: fn _ -> {:error, "fail"} end)
+      conn2 = conn(:options, "/")
+
+      result2 = Auth.call(conn2, opts2)
+
+      refute result2.halted
+    end
+  end
+
   describe "bearer token strategy - static token" do
     setup do
       opts = Auth.init(strategy: :bearer_token, token: "secret-token-123")
@@ -36,6 +68,19 @@ defmodule ConduitMcp.Plugs.AuthTest do
       conn =
         conn(:get, "/")
         |> put_req_header("authorization", "Bearer secret-token-123")
+
+      result = Auth.call(conn, opts)
+
+      refute result.halted
+      assert result.assigns[:current_user] == %{authenticated: true}
+    end
+
+    test "accepts lowercase 'bearer' prefix" do
+      opts = Auth.init(strategy: :bearer_token, token: "test-token")
+
+      conn =
+        conn(:get, "/")
+        |> put_req_header("authorization", "bearer test-token")
 
       result = Auth.call(conn, opts)
 
@@ -283,6 +328,45 @@ defmodule ConduitMcp.Plugs.AuthTest do
       verify_fn = fn _token -> :unexpected_return end
 
       opts = Auth.init(strategy: :function, verify: verify_fn)
+
+      conn =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer token")
+
+      result = Auth.call(conn, opts)
+
+      assert result.halted
+      assert result.status == 401
+    end
+
+    test "bearer_token strategy without token configured fails" do
+      opts = Auth.init(strategy: :bearer_token)  # No token provided
+
+      conn =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer any-token")
+
+      result = Auth.call(conn, opts)
+
+      assert result.halted
+      assert result.status == 401
+    end
+
+    test "api_key strategy without api_key configured fails" do
+      opts = Auth.init(strategy: :api_key)  # No api_key provided
+
+      conn =
+        conn(:get, "/")
+        |> put_req_header("x-api-key", "any-key")
+
+      result = Auth.call(conn, opts)
+
+      assert result.halted
+      assert result.status == 401
+    end
+
+    test "function strategy without verify function fails" do
+      opts = Auth.init(strategy: :function)  # No verify function
 
       conn =
         conn(:get, "/")
