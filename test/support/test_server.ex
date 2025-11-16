@@ -6,7 +6,7 @@ defmodule ConduitMcp.TestServer do
 
   @impl true
   def mcp_init(opts) do
-    state = %{
+    config = %{
       tools: [
         %{
           "name" => "echo",
@@ -40,65 +40,63 @@ defmodule ConduitMcp.TestServer do
           "name" => "greeting",
           "description" => "A greeting prompt"
         }
-      ],
-      call_count: 0
+      ]
     }
 
-    {:ok, Map.merge(state, Map.new(opts))}
+    {:ok, Map.merge(config, Map.new(opts))}
   end
 
   @impl true
-  def handle_list_tools(state) do
-    {:reply, %{"tools" => state.tools}, state}
+  def handle_list_tools(config) do
+    {:ok, %{"tools" => config.tools}}
   end
 
   @impl true
-  def handle_call_tool("echo", %{"message" => msg}, state) do
+  def handle_call_tool("echo", %{"message" => msg}, _config) do
     result = %{
       "content" => [
         %{"type" => "text", "text" => msg}
       ]
     }
 
-    new_state = Map.update!(state, :call_count, &(&1 + 1))
-    {:reply, result, new_state}
+    {:ok, result}
   end
 
-  def handle_call_tool("fail", _params, state) do
-    {:error, %{code: -32000, message: "Tool execution failed"}, state}
+  def handle_call_tool("fail", _params, _config) do
+    {:error, %{"code" => -32000, "message" => "Tool execution failed"}}
   end
 
-  def handle_call_tool(_name, _params, state) do
-    {:error, %{code: -32601, message: "Tool not found"}, state}
-  end
-
-  @impl true
-  def handle_list_resources(state) do
-    {:reply, %{"resources" => state.resources}, state}
+  def handle_call_tool(_name, _params, _config) do
+    {:error, %{"code" => -32601, "message" => "Tool not found"}}
   end
 
   @impl true
-  def handle_read_resource("test://resource1", state) do
+  def handle_list_resources(config) do
+    {:ok, %{"resources" => config.resources}}
+  end
+
+  @impl true
+  def handle_read_resource("test://resource1", _config) do
     result = %{
       "contents" => [
         %{"uri" => "test://resource1", "mimeType" => "text/plain", "text" => "Test content"}
       ]
     }
 
-    {:reply, result, state}
+    {:ok, result}
   end
 
-  def handle_read_resource(_uri, state) do
-    {:error, %{code: -32601, message: "Resource not found"}, state}
-  end
-
-  @impl true
-  def handle_list_prompts(state) do
-    {:reply, %{"prompts" => state.prompts}, state}
+  def handle_read_resource(_uri, _config) do
+    {:error, %{"code" => -32601, "message" => "Resource not found"}}
   end
 
   @impl true
-  def handle_get_prompt("greeting", args, state) do
+  def handle_list_prompts(config) do
+    {:ok, %{"prompts" => config.prompts}}
+  end
+
+  @impl true
+  def handle_get_prompt("greeting", args, _config) do
     name = Map.get(args, "name", "World")
 
     result = %{
@@ -110,10 +108,10 @@ defmodule ConduitMcp.TestServer do
       ]
     }
 
-    {:reply, result, state}
+    {:ok, result}
   end
 
-  def handle_get_prompt(_name, _args, state) do
-    {:error, %{code: -32601, message: "Prompt not found"}, state}
+  def handle_get_prompt(_name, _args, _config) do
+    {:error, %{"code" => -32601, "message" => "Prompt not found"}}
   end
 end

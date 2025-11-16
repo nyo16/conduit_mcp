@@ -40,17 +40,17 @@ defmodule PhoenixMcp.MCPServer do
       }
     ]
 
-    state = %{tools: tools}
-    {:ok, state}
+    config = %{tools: tools}
+    {:ok, config}
   end
 
   @impl true
-  def handle_list_tools(state) do
-    {:reply, %{"tools" => state.tools}, state}
+  def handle_list_tools(config) do
+    {:ok, %{"tools" => config.tools}}
   end
 
   @impl true
-  def handle_call_tool("echo", %{"message" => message}, state) do
+  def handle_call_tool("echo", %{"message" => message}, _config) do
     result = %{
       "content" => [
         %{
@@ -60,11 +60,11 @@ defmodule PhoenixMcp.MCPServer do
       ]
     }
 
-    {:reply, result, state}
+    {:ok, result}
   end
 
   @impl true
-  def handle_call_tool("reverse_string", %{"text" => text}, state) do
+  def handle_call_tool("reverse_string", %{"text" => text}, _config) do
     reversed = String.reverse(text)
 
     result = %{
@@ -76,16 +76,16 @@ defmodule PhoenixMcp.MCPServer do
       ]
     }
 
-    {:reply, result, state}
+    {:ok, result}
   end
 
   @impl true
-  def handle_call_tool(tool_name, _params, state) do
+  def handle_call_tool(tool_name, _params, _config) do
     error = %{
-      code: -32602,
-      message: "Unknown tool: #{tool_name}"
+      "code" => -32602,
+      "message" => "Unknown tool: #{tool_name}"
     }
 
-    {:error, error, state}
+    {:error, error}
   end
 end
