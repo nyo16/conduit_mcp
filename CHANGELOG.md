@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] - 2025-01-16
+
+### Added
+- **Comprehensive authentication system**
+  - `ConduitMcp.Plugs.Auth` - Flexible authentication plug
+  - Multiple strategies: bearer_token, api_key, function (custom)
+  - Support for anonymous functions and MFA tuples
+  - Configurable assign key for authenticated user
+  - CORS preflight bypass (OPTIONS requests skip auth)
+  - Works with both StreamableHTTP and SSE transports
+- **Extended telemetry coverage**
+  - `[:conduit_mcp, :resource, :read]` - Resource read operations
+  - `[:conduit_mcp, :prompt, :get]` - Prompt retrieval operations
+  - `[:conduit_mcp, :auth, :verify]` - Authentication verification
+  - All events include duration, status, and relevant metadata
+- **Authentication examples**
+  - Static bearer token authentication
+  - Static API key authentication
+  - Database token lookup examples
+  - JWT verification examples
+  - Custom verification function patterns
+  - Phoenix integration examples
+
+### Changed
+- Transport modules now support `:auth` option for authentication
+- Auth configured directly in transport options (no separate pipeline needed)
+- Phoenix example updated with multiple auth strategy examples
+- Simple tools server supports environment-based auth (`AUTH_ENABLED`, `AUTH_TOKEN`)
+
+### Documentation
+- Complete authentication guide in README
+- 7 different auth strategy examples
+- Integration examples for database/JWT verification
+- Tool handler examples accessing authenticated user
+- Comprehensive telemetry documentation for all events
+- Metrics collection examples with Telemetry.Metrics
+- Performance alerting examples
+
+### Tests
+- 20 auth plug unit tests (all strategies, error cases)
+- 8 auth integration tests with transport layer
+- 16 telemetry tests covering all event types
+- 148 total tests, all passing
+
 ## [0.4.0] - 2025-01-16
 
 ### Changed (Breaking)
@@ -138,6 +182,7 @@ See README.md for detailed migration instructions from v0.3.x to v0.4.0
 - VS Code/Cursor integration guide
 - Phoenix integration documentation
 
+[0.4.5]: https://github.com/nyo16/conduit_mcp/compare/v0.4.0...v0.4.5
 [0.4.0]: https://github.com/nyo16/conduit_mcp/compare/v0.3.1...v0.4.0
 [0.3.0]: https://github.com/nyo16/conduit_mcp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/nyo16/conduit_mcp/compare/v0.1.0...v0.2.0
