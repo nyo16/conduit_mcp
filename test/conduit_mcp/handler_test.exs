@@ -24,7 +24,7 @@ defmodule ConduitMcp.HandlerTest do
       assert response["id"] == 1
       assert response["result"]["protocolVersion"] == "2025-06-18"
       assert response["result"]["serverInfo"]["name"] == "conduit-mcp"
-      assert response["result"]["serverInfo"]["version"] == "0.4.5"
+      assert response["result"]["serverInfo"]["version"] == "0.4.6"
       assert response["result"]["capabilities"]["tools"] == %{}
       assert response["result"]["capabilities"]["resources"] == %{}
       assert response["result"]["capabilities"]["prompts"] == %{}

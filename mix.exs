@@ -1,7 +1,7 @@
 defmodule ConduitMcp.MixProject do
   use Mix.Project
 
-  @version "0.4.5"
+  @version "0.4.6"
   @source_url "https://github.com/nyo16/conduit_mcp"
 
   def project do
@@ -78,12 +78,9 @@ defmodule ConduitMcp.MixProject do
       source_url: @source_url,
       extras: [
         "README.md",
-        "CHANGELOG.md",
-        "examples/simple_tools_server/README.md",
-        "examples/phoenix_mcp/README.md"
+        "CHANGELOG.md"
       ],
       groups_for_extras: [
-        Examples: ~r/examples\//,
         Changelog: ["CHANGELOG.md"]
       ]
     ]

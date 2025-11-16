@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.6] - 2025-01-16
+
+### Changed
+- Streamlined README and CHANGELOG for clarity
+- Focused documentation on essential features
+- Reduced README by 53% (634 → 298 lines)
+- Reduced CHANGELOG by 48% (190 → 99 lines)
+
+### Improved
+- README now highlights DSL as primary approach
+- Removed outdated migration guides
+- Cleaner examples and better organization
+- Added version and test badges
+
 ## [0.4.5] - 2025-01-16
 
 ### Added
@@ -91,6 +105,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Basic authentication
 - Phoenix integration example
 
+[0.4.6]: https://github.com/nyo16/conduit_mcp/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/nyo16/conduit_mcp/compare/v0.4.0...v0.4.5
 [0.4.0]: https://github.com/nyo16/conduit_mcp/compare/v0.3.1...v0.4.0
 [0.3.0]: https://github.com/nyo16/conduit_mcp/compare/v0.2.0...v0.3.0
