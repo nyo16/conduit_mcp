@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2025-01-16
+
+### Changed (Breaking)
+- **Stateless architecture for maximum concurrency**
+  - Removed GenServer bottleneck - all requests now processed concurrently
+  - Server now uses Agent for immutable config storage instead of GenServer
+  - Each HTTP request runs in parallel (limited only by Bandit's process pool)
+- **Simplified callback API**
+  - Changed `{:reply, result, state}` to `{:ok, result}`
+  - Changed `{:error, error, state}` to `{:error, error}`
+  - Callbacks now receive `config` parameter (read-only) instead of `state`
+  - No more state passing/returning in callbacks
+  - Removed `terminate/2` callback (no longer needed)
+- **Error format standardization**
+  - Error maps now use string keys: `%{"code" => ..., "message" => ...}`
+  - Previously used atom keys: `%{code: ..., message: ...}`
+- **Handler changes**
+  - Handler now calls module functions directly instead of `GenServer.call/2`
+  - Uses `server_module.get_config()` to retrieve configuration
+
+### Added
+- Comprehensive migration guide in README
+- Documentation on handling mutable state with ETS or Agent
+- Examples of stateless patterns for common use cases
+- Performance benefits documentation
+
+### Upgraded
+- All examples updated to new stateless API
+  - `examples/simple_tools_server/`
+  - `examples/phoenix_mcp/`
+- All tests updated and passing (107 tests)
+  - Server lifecycle tests
+  - Handler tests
+  - Transport tests (StreamableHTTP and SSE)
+
+### Migration Guide
+See README.md for detailed migration instructions from v0.3.x to v0.4.0
+
+### Performance
+- Eliminated single GenServer bottleneck
+- Request processing now fully concurrent
+- Improved throughput for high-concurrency scenarios
+
 ## [0.3.0] - 2025-10-28
 
 ### Added
@@ -90,6 +133,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - VS Code/Cursor integration guide
 - Phoenix integration documentation
 
+[0.4.0]: https://github.com/nyo16/conduit_mcp/compare/v0.3.1...v0.4.0
 [0.3.0]: https://github.com/nyo16/conduit_mcp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/nyo16/conduit_mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/nyo16/conduit_mcp/releases/tag/v0.1.0

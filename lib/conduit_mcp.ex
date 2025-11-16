@@ -14,35 +14,36 @@ defmodule ConduitMcp do
 
         @impl true
         def mcp_init(_opts) do
-          tools = [
-            %{
-              "name" => "greet",
-              "description" => "Greet someone",
-              "inputSchema" => %{
-                "type" => "object",
-                "properties" => %{
-                  "name" => %{"type" => "string"}
-                },
-                "required" => ["name"]
+          config = %{
+            tools: [
+              %{
+                "name" => "greet",
+                "description" => "Greet someone",
+                "inputSchema" => %{
+                  "type" => "object",
+                  "properties" => %{
+                    "name" => %{"type" => "string"}
+                  },
+                  "required" => ["name"]
+                }
               }
-            }
-          ]
-          {:ok, %{tools: tools}}
+            ]
+          }
+          {:ok, config}
         end
 
         @impl true
-        def handle_list_tools(state) do
-          {:reply, %{"tools" => state.tools}, state}
+        def handle_list_tools(config) do
+          {:ok, %{"tools" => config.tools}}
         end
 
         @impl true
-        def handle_call_tool("greet", %{"name" => name}, state) do
-          result = %{
+        def handle_call_tool("greet", %{"name" => name}, _config) do
+          {:ok, %{
             "content" => [
               %{"type" => "text", "text" => "Hello, \#{name}!"}
             ]
-          }
-          {:reply, result, state}
+          }}
         end
       end
 

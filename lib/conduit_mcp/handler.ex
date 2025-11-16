@@ -60,9 +60,14 @@ defmodule ConduitMcp.Handler do
         Protocol.success_response(id, %{})
 
       "tools/list" ->
-        case GenServer.call(server_module, {:list_tools}) do
-          result when is_map(result) ->
+        config = server_module.get_config()
+
+        case server_module.handle_list_tools(config) do
+          {:ok, result} when is_map(result) ->
             Protocol.success_response(id, result)
+
+          {:error, error} ->
+            Protocol.error_response(id, error["code"] || -32000, error["message"] || "Failed to list tools")
 
           other ->
             Logger.error("Unexpected result from handle_list_tools: #{inspect(other)}")
@@ -72,16 +77,17 @@ defmodule ConduitMcp.Handler do
       "tools/call" ->
         tool_name = Map.get(params, "name")
         tool_params = Map.get(params, "arguments", %{})
+        config = server_module.get_config()
 
         start_time = System.monotonic_time()
 
         result =
-          case GenServer.call(server_module, {:call_tool, tool_name, tool_params}) do
-            {:error, error} ->
-              Protocol.error_response(id, error[:code] || -32000, error[:message] || "Tool execution failed")
+          case server_module.handle_call_tool(tool_name, tool_params, config) do
+            {:ok, tool_result} when is_map(tool_result) ->
+              Protocol.success_response(id, tool_result)
 
-            result when is_map(result) ->
-              Protocol.success_response(id, result)
+            {:error, error} ->
+              Protocol.error_response(id, error["code"] || -32000, error["message"] || "Tool execution failed")
 
             other ->
               Logger.error("Unexpected result from handle_call_tool: #{inspect(other)}")
@@ -99,9 +105,14 @@ defmodule ConduitMcp.Handler do
         result
 
       "resources/list" ->
-        case GenServer.call(server_module, {:list_resources}) do
-          result when is_map(result) ->
+        config = server_module.get_config()
+
+        case server_module.handle_list_resources(config) do
+          {:ok, result} when is_map(result) ->
             Protocol.success_response(id, result)
+
+          {:error, error} ->
+            Protocol.error_response(id, error["code"] || -32000, error["message"] || "Failed to list resources")
 
           other ->
             Logger.error("Unexpected result from handle_list_resources: #{inspect(other)}")
@@ -110,13 +121,14 @@ defmodule ConduitMcp.Handler do
 
       "resources/read" ->
         uri = Map.get(params, "uri")
+        config = server_module.get_config()
 
-        case GenServer.call(server_module, {:read_resource, uri}) do
-          {:error, error} ->
-            Protocol.error_response(id, error[:code] || -32000, error[:message] || "Resource read failed")
-
-          result when is_map(result) ->
+        case server_module.handle_read_resource(uri, config) do
+          {:ok, result} when is_map(result) ->
             Protocol.success_response(id, result)
+
+          {:error, error} ->
+            Protocol.error_response(id, error["code"] || -32000, error["message"] || "Resource read failed")
 
           other ->
             Logger.error("Unexpected result from handle_read_resource: #{inspect(other)}")
@@ -124,9 +136,14 @@ defmodule ConduitMcp.Handler do
         end
 
       "prompts/list" ->
-        case GenServer.call(server_module, {:list_prompts}) do
-          result when is_map(result) ->
+        config = server_module.get_config()
+
+        case server_module.handle_list_prompts(config) do
+          {:ok, result} when is_map(result) ->
             Protocol.success_response(id, result)
+
+          {:error, error} ->
+            Protocol.error_response(id, error["code"] || -32000, error["message"] || "Failed to list prompts")
 
           other ->
             Logger.error("Unexpected result from handle_list_prompts: #{inspect(other)}")
@@ -136,13 +153,14 @@ defmodule ConduitMcp.Handler do
       "prompts/get" ->
         prompt_name = Map.get(params, "name")
         prompt_args = Map.get(params, "arguments", %{})
+        config = server_module.get_config()
 
-        case GenServer.call(server_module, {:get_prompt, prompt_name, prompt_args}) do
-          {:error, error} ->
-            Protocol.error_response(id, error[:code] || -32000, error[:message] || "Prompt get failed")
-
-          result when is_map(result) ->
+        case server_module.handle_get_prompt(prompt_name, prompt_args, config) do
+          {:ok, result} when is_map(result) ->
             Protocol.success_response(id, result)
+
+          {:error, error} ->
+            Protocol.error_response(id, error["code"] || -32000, error["message"] || "Prompt get failed")
 
           other ->
             Logger.error("Unexpected result from handle_get_prompt: #{inspect(other)}")
@@ -189,7 +207,7 @@ defmodule ConduitMcp.Handler do
       "protocolVersion" => Protocol.protocol_version(),
       "serverInfo" => %{
         "name" => "conduit-mcp",
-        "version" => "0.3.0"
+        "version" => "0.4.0"
       },
       "capabilities" => %{
         "tools" => %{},

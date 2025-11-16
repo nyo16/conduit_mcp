@@ -7,20 +7,20 @@ defmodule ConduitMcp.ServerTest do
     test "starts with start_link/1" do
       {:ok, pid} = TestServer.start_link([])
       assert Process.alive?(pid)
-      GenServer.stop(pid)
+      Agent.stop(pid)
     end
 
     test "initializes with mcp_init options" do
       {:ok, pid} = TestServer.start_link(custom_key: "custom_value")
-      state = :sys.get_state(pid)
-      assert state.custom_key == "custom_value"
-      GenServer.stop(pid)
+      config = Agent.get(pid, & &1)
+      assert config.custom_key == "custom_value"
+      Agent.stop(pid)
     end
 
     test "registers with module name" do
       {:ok, _pid} = TestServer.start_link([])
       assert Process.whereis(TestServer) != nil
-      GenServer.stop(TestServer)
+      Agent.stop(TestServer)
     end
   end
 
@@ -31,7 +31,8 @@ defmodule ConduitMcp.ServerTest do
     end
 
     test "returns tools list" do
-      result = GenServer.call(TestServer, {:list_tools})
+      config = TestServer.get_config()
+      {:ok, result} = TestServer.handle_list_tools(config)
       assert is_map(result)
       assert Map.has_key?(result, "tools")
       assert is_list(result["tools"])
@@ -39,7 +40,8 @@ defmodule ConduitMcp.ServerTest do
     end
 
     test "tools have required fields" do
-      result = GenServer.call(TestServer, {:list_tools})
+      config = TestServer.get_config()
+      {:ok, result} = TestServer.handle_list_tools(config)
       tool = hd(result["tools"])
       assert Map.has_key?(tool, "name")
       assert Map.has_key?(tool, "description")
@@ -54,33 +56,24 @@ defmodule ConduitMcp.ServerTest do
     end
 
     test "executes tool successfully" do
-      result = GenServer.call(TestServer, {:call_tool, "echo", %{"message" => "hello"}})
+      config = TestServer.get_config()
+      {:ok, result} = TestServer.handle_call_tool("echo", %{"message" => "hello"}, config)
       assert is_map(result)
       assert result["content"] == [%{"type" => "text", "text" => "hello"}]
     end
 
     test "returns error for failing tool" do
-      result = GenServer.call(TestServer, {:call_tool, "fail", %{}})
-      assert {:error, error} = result
-      assert error.code == -32000
-      assert error.message == "Tool execution failed"
+      config = TestServer.get_config()
+      {:error, error} = TestServer.handle_call_tool("fail", %{}, config)
+      assert error["code"] == -32000
+      assert error["message"] == "Tool execution failed"
     end
 
     test "returns error for unknown tool" do
-      result = GenServer.call(TestServer, {:call_tool, "unknown", %{}})
-      assert {:error, error} = result
-      assert error.code == -32601
-      assert error.message == "Tool not found"
-    end
-
-    test "updates state on successful execution" do
-      initial_state = :sys.get_state(TestServer)
-      initial_count = initial_state.call_count
-
-      GenServer.call(TestServer, {:call_tool, "echo", %{"message" => "test"}})
-
-      new_state = :sys.get_state(TestServer)
-      assert new_state.call_count == initial_count + 1
+      config = TestServer.get_config()
+      {:error, error} = TestServer.handle_call_tool("unknown", %{}, config)
+      assert error["code"] == -32601
+      assert error["message"] == "Tool not found"
     end
   end
 
@@ -91,7 +84,8 @@ defmodule ConduitMcp.ServerTest do
     end
 
     test "returns resources list" do
-      result = GenServer.call(TestServer, {:list_resources})
+      config = TestServer.get_config()
+      {:ok, result} = TestServer.handle_list_resources(config)
       assert is_map(result)
       assert Map.has_key?(result, "resources")
       assert is_list(result["resources"])
@@ -99,7 +93,8 @@ defmodule ConduitMcp.ServerTest do
     end
 
     test "resources have required fields" do
-      result = GenServer.call(TestServer, {:list_resources})
+      config = TestServer.get_config()
+      {:ok, result} = TestServer.handle_list_resources(config)
       resource = hd(result["resources"])
       assert Map.has_key?(resource, "uri")
       assert Map.has_key?(resource, "name")
@@ -113,17 +108,18 @@ defmodule ConduitMcp.ServerTest do
     end
 
     test "reads resource successfully" do
-      result = GenServer.call(TestServer, {:read_resource, "test://resource1"})
+      config = TestServer.get_config()
+      {:ok, result} = TestServer.handle_read_resource("test://resource1", config)
       assert is_map(result)
       assert Map.has_key?(result, "contents")
       assert is_list(result["contents"])
     end
 
     test "returns error for unknown resource" do
-      result = GenServer.call(TestServer, {:read_resource, "test://unknown"})
-      assert {:error, error} = result
-      assert error.code == -32601
-      assert error.message == "Resource not found"
+      config = TestServer.get_config()
+      {:error, error} = TestServer.handle_read_resource("test://unknown", config)
+      assert error["code"] == -32601
+      assert error["message"] == "Resource not found"
     end
   end
 
@@ -134,7 +130,8 @@ defmodule ConduitMcp.ServerTest do
     end
 
     test "returns prompts list" do
-      result = GenServer.call(TestServer, {:list_prompts})
+      config = TestServer.get_config()
+      {:ok, result} = TestServer.handle_list_prompts(config)
       assert is_map(result)
       assert Map.has_key?(result, "prompts")
       assert is_list(result["prompts"])
@@ -142,7 +139,8 @@ defmodule ConduitMcp.ServerTest do
     end
 
     test "prompts have required fields" do
-      result = GenServer.call(TestServer, {:list_prompts})
+      config = TestServer.get_config()
+      {:ok, result} = TestServer.handle_list_prompts(config)
       prompt = hd(result["prompts"])
       assert Map.has_key?(prompt, "name")
       assert Map.has_key?(prompt, "description")
@@ -156,7 +154,8 @@ defmodule ConduitMcp.ServerTest do
     end
 
     test "gets prompt successfully with arguments" do
-      result = GenServer.call(TestServer, {:get_prompt, "greeting", %{"name" => "Alice"}})
+      config = TestServer.get_config()
+      {:ok, result} = TestServer.handle_get_prompt("greeting", %{"name" => "Alice"}, config)
       assert is_map(result)
       assert Map.has_key?(result, "messages")
       assert is_list(result["messages"])
@@ -165,23 +164,17 @@ defmodule ConduitMcp.ServerTest do
     end
 
     test "gets prompt with default arguments" do
-      result = GenServer.call(TestServer, {:get_prompt, "greeting", %{}})
+      config = TestServer.get_config()
+      {:ok, result} = TestServer.handle_get_prompt("greeting", %{}, config)
       message = hd(result["messages"])
       assert message["content"]["text"] == "Hello, World!"
     end
 
     test "returns error for unknown prompt" do
-      result = GenServer.call(TestServer, {:get_prompt, "unknown", %{}})
-      assert {:error, error} = result
-      assert error.code == -32601
-      assert error.message == "Prompt not found"
-    end
-  end
-
-  describe "terminate callback" do
-    test "calls terminate on stop" do
-      {:ok, pid} = TestServer.start_link([])
-      assert :ok == GenServer.stop(pid)
+      config = TestServer.get_config()
+      {:error, error} = TestServer.handle_get_prompt("unknown", %{}, config)
+      assert error["code"] == -32601
+      assert error["message"] == "Prompt not found"
     end
   end
 
@@ -195,30 +188,31 @@ defmodule ConduitMcp.ServerTest do
       end
 
       @impl true
-      def handle_list_tools(state) do
-        {:reply, %{"tools" => []}, state}
+      def handle_list_tools(_config) do
+        {:ok, %{"tools" => []}}
       end
 
       @impl true
-      def handle_call_tool(_name, _params, state) do
-        {:error, %{code: -32601, message: "No tools available"}, state}
+      def handle_call_tool(_name, _params, _config) do
+        {:error, %{"code" => -32601, "message" => "No tools available"}}
       end
     end
 
     test "minimal server can start and respond" do
       {:ok, pid} = MinimalServer.start_link([])
+      config = MinimalServer.get_config()
 
-      result = GenServer.call(MinimalServer, {:list_tools})
+      {:ok, result} = MinimalServer.handle_list_tools(config)
       assert result == %{"tools" => []}
 
       # Default implementations should work
-      resources_result = GenServer.call(MinimalServer, {:list_resources})
-      assert resources_result[:resources] == []
+      {:ok, resources_result} = MinimalServer.handle_list_resources(config)
+      assert resources_result["resources"] == []
 
-      prompts_result = GenServer.call(MinimalServer, {:list_prompts})
-      assert prompts_result[:prompts] == []
+      {:ok, prompts_result} = MinimalServer.handle_list_prompts(config)
+      assert prompts_result["prompts"] == []
 
-      GenServer.stop(pid)
+      Agent.stop(pid)
     end
   end
 end
