@@ -29,7 +29,10 @@ defmodule PhoenixMcp.Telemetry do
   defp attach_conduit_mcp_handlers do
     events = [
       [:conduit_mcp, :request, :stop],
-      [:conduit_mcp, :tool, :execute]
+      [:conduit_mcp, :tool, :execute],
+      [:conduit_mcp, :resource, :read],
+      [:conduit_mcp, :prompt, :get],
+      [:conduit_mcp, :auth, :verify]
     ]
 
     :telemetry.attach_many(
@@ -75,6 +78,52 @@ defmodule PhoenixMcp.Telemetry do
     # MyApp.Monitoring.track_tool_execution(metadata.tool_name, duration_ms)
   end
 
+  # Handle resource read events
+  def handle_event([:conduit_mcp, :resource, :read], measurements, metadata, _config) do
+    duration_ms = System.convert_time_unit(measurements.duration, :native, :millisecond)
+
+    require Logger
+
+    Logger.info("Resource Read",
+      uri: metadata.uri,
+      status: metadata.status,
+      duration_ms: duration_ms
+    )
+  end
+
+  # Handle prompt retrieval events
+  def handle_event([:conduit_mcp, :prompt, :get], measurements, metadata, _config) do
+    duration_ms = System.convert_time_unit(measurements.duration, :native, :millisecond)
+
+    require Logger
+
+    Logger.info("Prompt Retrieved",
+      prompt: metadata.prompt_name,
+      status: metadata.status,
+      duration_ms: duration_ms
+    )
+  end
+
+  # Handle authentication events
+  def handle_event([:conduit_mcp, :auth, :verify], measurements, metadata, _config) do
+    duration_ms = System.convert_time_unit(measurements.duration, :native, :millisecond)
+
+    require Logger
+
+    if metadata.status == :error do
+      Logger.warning("Auth Failed",
+        strategy: metadata.strategy,
+        reason: metadata.reason,
+        duration_ms: duration_ms
+      )
+    else
+      Logger.debug("Auth Success",
+        strategy: metadata.strategy,
+        duration_ms: duration_ms
+      )
+    end
+  end
+
   # Metrics for Phoenix LiveDashboard
   def metrics do
     [
@@ -118,6 +167,44 @@ defmodule PhoenixMcp.Telemetry do
       counter("conduit_mcp.tool.execute.count",
         tags: [:tool_name, :status],
         description: "Tool execution count"
+      ),
+
+      # Resource metrics
+      counter("conduit_mcp.resource.read.count",
+        tags: [:status],
+        description: "Resource read operations"
+      ),
+
+      summary("conduit_mcp.resource.read.duration",
+        unit: {:native, :millisecond},
+        description: "Resource read duration"
+      ),
+
+      # Prompt metrics
+      counter("conduit_mcp.prompt.get.count",
+        tags: [:prompt_name, :status],
+        description: "Prompt retrieval count"
+      ),
+
+      summary("conduit_mcp.prompt.get.duration",
+        unit: {:native, :millisecond},
+        tags: [:prompt_name],
+        description: "Prompt retrieval duration"
+      ),
+
+      # Authentication metrics
+      counter("conduit_mcp.auth.verify.count",
+        tags: [:strategy, :status],
+        description: "Authentication attempts"
+      ),
+
+      distribution("conduit_mcp.auth.verify.duration",
+        unit: {:native, :millisecond},
+        tags: [:strategy],
+        reporter_options: [
+          buckets: [1, 10, 50, 100, 500]
+        ],
+        description: "Auth verification duration"
       ),
 
       # VM Metrics

@@ -161,18 +161,47 @@ defmodule ConduitMcp.Plugs.Auth do
   end
 
   defp verify_credential(conn, credential, opts) do
-    case do_verify(credential, opts) do
-      {:ok, user} ->
-        assign_user(conn, user, opts.assign_as)
+    start_time = System.monotonic_time()
 
-      {:error, reason} ->
-        Logger.warning("Authentication failed: #{inspect(reason)}")
-        unauthorized(conn, "Authentication failed")
+    result =
+      case do_verify(credential, opts) do
+        {:ok, user} ->
+          duration = System.monotonic_time() - start_time
 
-      other ->
-        Logger.error("Invalid verify function return: #{inspect(other)}")
-        unauthorized(conn, "Server configuration error")
-    end
+          :telemetry.execute(
+            [:conduit_mcp, :auth, :verify],
+            %{duration: duration},
+            %{strategy: opts.strategy, status: :ok}
+          )
+
+          assign_user(conn, user, opts.assign_as)
+
+        {:error, reason} ->
+          duration = System.monotonic_time() - start_time
+
+          :telemetry.execute(
+            [:conduit_mcp, :auth, :verify],
+            %{duration: duration},
+            %{strategy: opts.strategy, status: :error, reason: reason}
+          )
+
+          Logger.warning("Authentication failed: #{inspect(reason)}")
+          unauthorized(conn, "Authentication failed")
+
+        other ->
+          duration = System.monotonic_time() - start_time
+
+          :telemetry.execute(
+            [:conduit_mcp, :auth, :verify],
+            %{duration: duration},
+            %{strategy: opts.strategy, status: :error, reason: :invalid_return}
+          )
+
+          Logger.error("Invalid verify function return: #{inspect(other)}")
+          unauthorized(conn, "Server configuration error")
+      end
+
+    result
   end
 
   defp do_verify(credential, %{strategy: :bearer_token, token: expected_token}) when not is_nil(expected_token) do

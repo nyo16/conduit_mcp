@@ -117,17 +117,30 @@ defmodule ConduitMcp.Handler do
       "resources/read" ->
         uri = Map.get(params, "uri")
 
-        case server_module.handle_read_resource(conn, uri) do
-          {:ok, result} when is_map(result) ->
-            Protocol.success_response(id, result)
+        start_time = System.monotonic_time()
 
-          {:error, error} ->
-            Protocol.error_response(id, error["code"] || -32000, error["message"] || "Resource read failed")
+        result =
+          case server_module.handle_read_resource(conn, uri) do
+            {:ok, resource_result} when is_map(resource_result) ->
+              Protocol.success_response(id, resource_result)
 
-          other ->
-            Logger.error("Unexpected result from handle_read_resource: #{inspect(other)}")
-            Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
-        end
+            {:error, error} ->
+              Protocol.error_response(id, error["code"] || -32000, error["message"] || "Resource read failed")
+
+            other ->
+              Logger.error("Unexpected result from handle_read_resource: #{inspect(other)}")
+              Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
+          end
+
+        duration = System.monotonic_time() - start_time
+
+        :telemetry.execute(
+          [:conduit_mcp, :resource, :read],
+          %{duration: duration},
+          %{uri: uri, server_module: server_module, status: if(Map.has_key?(result, "error"), do: :error, else: :ok)}
+        )
+
+        result
 
       "prompts/list" ->
         case server_module.handle_list_prompts(conn) do
@@ -146,17 +159,30 @@ defmodule ConduitMcp.Handler do
         prompt_name = Map.get(params, "name")
         prompt_args = Map.get(params, "arguments", %{})
 
-        case server_module.handle_get_prompt(conn, prompt_name, prompt_args) do
-          {:ok, result} when is_map(result) ->
-            Protocol.success_response(id, result)
+        start_time = System.monotonic_time()
 
-          {:error, error} ->
-            Protocol.error_response(id, error["code"] || -32000, error["message"] || "Prompt get failed")
+        result =
+          case server_module.handle_get_prompt(conn, prompt_name, prompt_args) do
+            {:ok, prompt_result} when is_map(prompt_result) ->
+              Protocol.success_response(id, prompt_result)
 
-          other ->
-            Logger.error("Unexpected result from handle_get_prompt: #{inspect(other)}")
-            Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
-        end
+            {:error, error} ->
+              Protocol.error_response(id, error["code"] || -32000, error["message"] || "Prompt get failed")
+
+            other ->
+              Logger.error("Unexpected result from handle_get_prompt: #{inspect(other)}")
+              Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
+          end
+
+        duration = System.monotonic_time() - start_time
+
+        :telemetry.execute(
+          [:conduit_mcp, :prompt, :get],
+          %{duration: duration},
+          %{prompt_name: prompt_name, server_module: server_module, status: if(Map.has_key?(result, "error"), do: :error, else: :ok)}
+        )
+
+        result
 
       _ ->
         Protocol.error_response(id, Protocol.method_not_found(), "Method not found: #{method}")

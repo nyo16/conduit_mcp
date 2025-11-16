@@ -76,6 +76,90 @@ defmodule ConduitMcp.Telemetry do
         nil
       )
 
+  ### Resource Events
+
+  #### `[:conduit_mcp, :resource, :read]`
+
+  Emitted when a resource is read via the `resources/read` method.
+
+  **Measurements:**
+
+    * `:duration` (integer) - Resource read duration in native time units
+
+  **Metadata:**
+
+    * `:uri` (String.t) - URI of the resource that was read
+    * `:server_module` (module) - The MCP server module
+    * `:status` (:ok | :error) - Whether the read succeeded or failed
+
+  **Example:**
+
+      :telemetry.attach(
+        "track-resource-reads",
+        [:conduit_mcp, :resource, :read],
+        fn _event, measurements, metadata, _config ->
+          duration_ms = System.convert_time_unit(measurements.duration, :native, :millisecond)
+          Logger.info("Resource read: uri=\#{metadata.uri} duration=\#{duration_ms}ms")
+        end,
+        nil
+      )
+
+  ### Prompt Events
+
+  #### `[:conduit_mcp, :prompt, :get]`
+
+  Emitted when a prompt is retrieved via the `prompts/get` method.
+
+  **Measurements:**
+
+    * `:duration` (integer) - Prompt retrieval duration in native time units
+
+  **Metadata:**
+
+    * `:prompt_name` (String.t) - Name of the prompt that was retrieved
+    * `:server_module` (module) - The MCP server module
+    * `:status` (:ok | :error) - Whether the prompt retrieval succeeded
+
+  **Example:**
+
+      :telemetry.attach(
+        "track-prompt-usage",
+        [:conduit_mcp, :prompt, :get],
+        fn _event, _measurements, metadata, _config ->
+          Logger.info("Prompt requested: \#{metadata.prompt_name}")
+        end,
+        nil
+      )
+
+  ### Authentication Events
+
+  #### `[:conduit_mcp, :auth, :verify]`
+
+  Emitted when authentication verification is performed.
+
+  **Measurements:**
+
+    * `:duration` (integer) - Authentication verification duration in native time units
+
+  **Metadata:**
+
+    * `:strategy` (:bearer_token | :api_key | :function) - Auth strategy used
+    * `:status` (:ok | :error) - Whether authentication succeeded
+    * `:reason` (any) - Failure reason (only present when status is :error)
+
+  **Example:**
+
+      :telemetry.attach(
+        "track-auth-failures",
+        [:conduit_mcp, :auth, :verify],
+        fn _event, _measurements, metadata, _config ->
+          if metadata.status == :error do
+            Logger.warning("Auth failed: strategy=\#{metadata.strategy} reason=\#{inspect(metadata.reason)}")
+          end
+        end,
+        nil
+      )
+
   ## Common Use Cases
 
   ### Logging All MCP Activity
@@ -86,7 +170,10 @@ defmodule ConduitMcp.Telemetry do
         def attach_handlers do
           events = [
             [:conduit_mcp, :request, :stop],
-            [:conduit_mcp, :tool, :execute]
+            [:conduit_mcp, :tool, :execute],
+            [:conduit_mcp, :resource, :read],
+            [:conduit_mcp, :prompt, :get],
+            [:conduit_mcp, :auth, :verify]
           ]
 
           :telemetry.attach_many(
@@ -108,6 +195,30 @@ defmodule ConduitMcp.Telemetry do
         def handle_event([:conduit_mcp, :tool, :execute], measurements, metadata, _config) do
           Logger.info("Tool executed",
             tool: metadata.tool_name,
+            status: metadata.status,
+            duration_ms: convert_duration(measurements.duration)
+          )
+        end
+
+        def handle_event([:conduit_mcp, :resource, :read], measurements, metadata, _config) do
+          Logger.info("Resource read",
+            uri: metadata.uri,
+            status: metadata.status,
+            duration_ms: convert_duration(measurements.duration)
+          )
+        end
+
+        def handle_event([:conduit_mcp, :prompt, :get], measurements, metadata, _config) do
+          Logger.info("Prompt retrieved",
+            prompt: metadata.prompt_name,
+            status: metadata.status,
+            duration_ms: convert_duration(measurements.duration)
+          )
+        end
+
+        def handle_event([:conduit_mcp, :auth, :verify], measurements, metadata, _config) do
+          Logger.info("Auth verification",
+            strategy: metadata.strategy,
             status: metadata.status,
             duration_ms: convert_duration(measurements.duration)
           )
@@ -162,6 +273,44 @@ defmodule ConduitMcp.Telemetry do
               unit: {:native, :millisecond},
               tags: [:tool_name],
               description: "Tool execution duration"
+            ),
+
+            # Resource read count
+            counter("conduit_mcp.resource.read.count",
+              tags: [:status],
+              description: "Resource read operations"
+            ),
+
+            # Resource read duration
+            distribution("conduit_mcp.resource.read.duration",
+              unit: {:native, :millisecond},
+              description: "Resource read duration"
+            ),
+
+            # Prompt retrieval count
+            counter("conduit_mcp.prompt.get.count",
+              tags: [:prompt_name, :status],
+              description: "Prompt retrieval count"
+            ),
+
+            # Prompt retrieval duration
+            summary("conduit_mcp.prompt.get.duration",
+              unit: {:native, :millisecond},
+              tags: [:prompt_name],
+              description: "Prompt retrieval duration"
+            ),
+
+            # Auth verification count
+            counter("conduit_mcp.auth.verify.count",
+              tags: [:strategy, :status],
+              description: "Authentication attempts"
+            ),
+
+            # Auth verification duration
+            distribution("conduit_mcp.auth.verify.duration",
+              unit: {:native, :millisecond},
+              tags: [:strategy],
+              description: "Authentication verification duration"
             )
           ]
         end
@@ -204,14 +353,20 @@ defmodule ConduitMcp.Telemetry do
       iex> ConduitMcp.Telemetry.events()
       [
         [:conduit_mcp, :request, :stop],
-        [:conduit_mcp, :tool, :execute]
+        [:conduit_mcp, :tool, :execute],
+        [:conduit_mcp, :resource, :read],
+        [:conduit_mcp, :prompt, :get],
+        [:conduit_mcp, :auth, :verify]
       ]
   """
   @spec events() :: [[:conduit_mcp, ...]]
   def events do
     [
       [:conduit_mcp, :request, :stop],
-      [:conduit_mcp, :tool, :execute]
+      [:conduit_mcp, :tool, :execute],
+      [:conduit_mcp, :resource, :read],
+      [:conduit_mcp, :prompt, :get],
+      [:conduit_mcp, :auth, :verify]
     ]
   end
 
@@ -273,6 +428,39 @@ defmodule ConduitMcp.Telemetry do
 
     Logger.debug(
       "Tool executed: tool=#{metadata.tool_name} status=#{metadata.status} duration=#{duration_ms}ms"
+    )
+  end
+
+  defp handle_event([:conduit_mcp, :resource, :read], measurements, metadata, _config) do
+    duration_ms = System.convert_time_unit(measurements.duration, :native, :millisecond)
+
+    require Logger
+
+    Logger.debug(
+      "Resource read: uri=#{metadata.uri} status=#{metadata.status} duration=#{duration_ms}ms"
+    )
+  end
+
+  defp handle_event([:conduit_mcp, :prompt, :get], measurements, metadata, _config) do
+    duration_ms = System.convert_time_unit(measurements.duration, :native, :millisecond)
+
+    require Logger
+
+    Logger.debug(
+      "Prompt retrieved: prompt=#{metadata.prompt_name} status=#{metadata.status} duration=#{duration_ms}ms"
+    )
+  end
+
+  defp handle_event([:conduit_mcp, :auth, :verify], measurements, metadata, _config) do
+    duration_ms = System.convert_time_unit(measurements.duration, :native, :millisecond)
+
+    require Logger
+
+    level = if metadata.status == :ok, do: :debug, else: :warning
+
+    Logger.log(
+      level,
+      "Auth verification: strategy=#{metadata.strategy} status=#{metadata.status} duration=#{duration_ms}ms"
     )
   end
 end
