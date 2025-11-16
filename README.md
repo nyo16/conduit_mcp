@@ -316,6 +316,7 @@ end
   - No GenServer, no Agent, no process overhead
   - No supervision tree required
   - Maximum concurrency - limited only by Bandit's process pool
+- **Flexible authentication** - Bearer tokens, API keys, custom verification
 - Dual transport support (Streamable HTTP and SSE)
 - JSON-RPC 2.0 compliant
 - Support for tools, resources, and prompts
@@ -324,6 +325,128 @@ end
 - Phoenix integration support
 - Telemetry events for monitoring
 - Production ready with comprehensive test coverage
+
+## Authentication
+
+ConduitMCP includes a flexible authentication plug supporting multiple strategies:
+
+### Development (No Auth)
+
+```elixir
+{Bandit,
+ plug: {ConduitMcp.Transport.StreamableHTTP,
+        server_module: MyApp.MCPServer,
+        auth: [enabled: false]},
+ port: 4001}
+```
+
+### Static Bearer Token
+
+```elixir
+{Bandit,
+ plug: {ConduitMcp.Transport.StreamableHTTP,
+        server_module: MyApp.MCPServer,
+        auth: [
+          strategy: :bearer_token,
+          token: System.get_env("MCP_SECRET_TOKEN")
+        ]},
+ port: 4001}
+```
+
+### Static API Key
+
+```elixir
+{Bandit,
+ plug: {ConduitMcp.Transport.StreamableHTTP,
+        server_module: MyApp.MCPServer,
+        auth: [
+          strategy: :api_key,
+          api_key: "your-api-key",
+          header: "x-api-key"  # Optional, defaults to "x-api-key"
+        ]},
+ port: 4001}
+```
+
+### Custom Verification Function
+
+```elixir
+{Bandit,
+ plug: {ConduitMcp.Transport.StreamableHTTP,
+        server_module: MyApp.MCPServer,
+        auth: [
+          strategy: :function,
+          verify: fn token ->
+            case MyApp.Auth.verify_token(token) do
+              {:ok, user} -> {:ok, user}
+              _ -> {:error, "Invalid token"}
+            end
+          end,
+          assign_as: :current_user  # Optional, defaults to :current_user
+        ]},
+ port: 4001}
+```
+
+### Database Token Lookup
+
+```elixir
+{Bandit,
+ plug: {ConduitMcp.Transport.StreamableHTTP,
+        server_module: MyApp.MCPServer,
+        auth: [
+          strategy: :function,
+          verify: fn token ->
+            case MyApp.Repo.get_by(ApiToken, token: token, active: true) do
+              %ApiToken{user: user} -> {:ok, user}
+              nil -> {:error, "Invalid or expired token"}
+            end
+          end
+        ]},
+ port: 4001}
+```
+
+### MFA (Module, Function, Args)
+
+```elixir
+{Bandit,
+ plug: {ConduitMcp.Transport.StreamableHTTP,
+        server_module: MyApp.MCPServer,
+        auth: [
+          strategy: :function,
+          verify: {MyApp.Auth, :verify_mcp_token, []}
+        ]},
+ port: 4001}
+
+# In MyApp.Auth module:
+def verify_mcp_token(token) do
+  # Your verification logic
+  {:ok, user} | {:error, reason}
+end
+```
+
+### Using Authenticated User in Tools
+
+```elixir
+defmodule MyApp.MCPServer do
+  use ConduitMcp.Server
+
+  @impl true
+  def handle_call_tool(conn, "get_profile", _params) do
+    # Access authenticated user from conn.assigns
+    case conn.assigns[:current_user] do
+      nil ->
+        {:error, %{"code" => -32000, "message" => "Not authenticated"}}
+
+      user ->
+        {:ok, %{
+          "content" => [%{
+            "type" => "text",
+            "text" => "User: #{user.name}, Email: #{user.email}"
+          }]
+        }}
+    end
+  end
+end
+```
 
 ## Testing
 

@@ -14,19 +14,6 @@ defmodule PhoenixMcpWeb.Router do
     plug :accepts, ["json"]
   end
 
-  # MCP pipeline - NO JSON parsing! MCP transport handles it
-  pipeline :mcp do
-    # Option 1: No auth (development only!)
-    plug PhoenixMcpWeb.Plugs.MCPAuth, enabled: false
-
-    # Option 2: Static bearer token (uncomment and set token)
-    # plug PhoenixMcpWeb.Plugs.MCPAuth, token: System.get_env("MCP_AUTH_TOKEN") || "your-secret-token"
-
-    # Option 3: Custom verification function (uncomment and implement)
-    # plug PhoenixMcpWeb.Plugs.MCPAuth,
-    #   verify_token: &PhoenixMcp.Auth.verify_mcp_token/1
-  end
-
   scope "/", PhoenixMcpWeb do
     pipe_through :browser
 
@@ -34,15 +21,46 @@ defmodule PhoenixMcpWeb.Router do
   end
 
   # MCP endpoints - integrated into Phoenix router
+  # Authentication is configured directly in the transport options
   scope "/mcp" do
-    pipe_through :mcp
-
-    # Forward to MCP Streamable HTTP transport
+    # Forward to MCP Streamable HTTP transport with auth
     forward "/", ConduitMcp.Transport.StreamableHTTP,
-      server_module: PhoenixMcp.MCPServer
+      server_module: PhoenixMcp.MCPServer,
+      auth: [
+        # Option 1: No auth (development only!)
+        enabled: false
+
+        # Option 2: Static bearer token (uncomment to use)
+        # enabled: true,
+        # strategy: :bearer_token,
+        # token: System.get_env("MCP_AUTH_TOKEN") || "your-secret-token"
+
+        # Option 3: Static API key (uncomment to use)
+        # enabled: true,
+        # strategy: :api_key,
+        # api_key: "your-api-key",
+        # header: "x-api-key"
+
+        # Option 4: Custom verification function (uncomment to use)
+        # enabled: true,
+        # strategy: :function,
+        # verify: &PhoenixMcp.Auth.verify_token/1,
+        # assign_as: :current_user
+
+        # Option 5: Database token lookup (uncomment to use)
+        # enabled: true,
+        # strategy: :function,
+        # verify: fn token ->
+        #   case PhoenixMcp.Accounts.get_user_by_token(token) do
+        #     %User{} = user -> {:ok, user}
+        #     nil -> {:error, "Invalid token"}
+        #   end
+        # end
+      ]
 
     # Alternative: Use SSE transport (uncomment to use)
     # forward "/", ConduitMcp.Transport.SSE,
-    #   server_module: PhoenixMcp.MCPServer
+    #   server_module: PhoenixMcp.MCPServer,
+    #   auth: [enabled: false]
   end
 end
