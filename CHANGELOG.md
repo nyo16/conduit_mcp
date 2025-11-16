@@ -8,35 +8,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.0] - 2025-01-16
 
 ### Changed (Breaking)
-- **Stateless architecture for maximum concurrency**
-  - Removed GenServer bottleneck - all requests now processed concurrently
-  - Server now uses Agent for immutable config storage instead of GenServer
+- **Pure stateless architecture - just compiled functions!**
+  - Removed GenServer and Agent - no process overhead at all
+  - Server is now just a module with pure functions
+  - No supervision tree required
   - Each HTTP request runs in parallel (limited only by Bandit's process pool)
 - **Simplified callback API**
+  - Removed `mcp_init/1` - use module attributes instead (e.g., `@tools`)
   - Changed `{:reply, result, state}` to `{:ok, result}`
   - Changed `{:error, error, state}` to `{:error, error}`
-  - Callbacks now receive `config` parameter (read-only) instead of `state`
+  - Callbacks now receive `conn` (Plug.Conn) as first parameter for request context
   - No more state passing/returning in callbacks
   - Removed `terminate/2` callback (no longer needed)
+  - Parameter order changed: callbacks now receive `conn` first
 - **Error format standardization**
   - Error maps now use string keys: `%{"code" => ..., "message" => ...}`
   - Previously used atom keys: `%{code: ..., message: ...}`
 - **Handler changes**
-  - Handler now calls module functions directly instead of `GenServer.call/2`
-  - Uses `server_module.get_config()` to retrieve configuration
+  - Handler calls module functions directly with conn parameter
+  - Transport layers pass Plug.Conn to handler for request context
 
 ### Added
-- Comprehensive migration guide in README
-- Documentation on handling mutable state with ETS or Agent
-- Examples of stateless patterns for common use cases
+- Comprehensive migration guide in README with before/after examples
+- Documentation on handling mutable state with ETS, Agent, or databases
+- Examples of using connection context for authentication
 - Performance benefits documentation
+- Connection context access in all callbacks
 
 ### Upgraded
-- All examples updated to new stateless API
-  - `examples/simple_tools_server/`
-  - `examples/phoenix_mcp/`
-- All tests updated and passing (107 tests)
-  - Server lifecycle tests
+- All examples updated to pure stateless API
+  - `examples/simple_tools_server/` - uses module attributes
+  - `examples/phoenix_mcp/` - uses module attributes
+- All tests updated and passing (104 tests)
+  - Tests now fully async (no process dependencies)
   - Handler tests
   - Transport tests (StreamableHTTP and SSE)
 
@@ -44,9 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 See README.md for detailed migration instructions from v0.3.x to v0.4.0
 
 ### Performance
-- Eliminated single GenServer bottleneck
-- Request processing now fully concurrent
+- Eliminated all process overhead - pure function calls
+- Request processing fully concurrent with zero serialization
 - Improved throughput for high-concurrency scenarios
+- Compile-time optimization of module attributes
 
 ## [0.3.0] - 2025-10-28
 

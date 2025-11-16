@@ -10,50 +10,44 @@ defmodule Examples.SimpleToolsServer do
 
   use ConduitMcp.Server
 
-  @impl true
-  def mcp_init(_opts) do
-    tools = [
-      %{
-        "name" => "echo",
-        "description" => "Echoes back the input message",
-        "inputSchema" => %{
-          "type" => "object",
-          "properties" => %{
-            "message" => %{
-              "type" => "string",
-              "description" => "The message to echo back"
-            }
-          },
-          "required" => ["message"]
-        }
-      },
-      %{
-        "name" => "reverse_string",
-        "description" => "Reverses a string",
-        "inputSchema" => %{
-          "type" => "object",
-          "properties" => %{
-            "text" => %{
-              "type" => "string",
-              "description" => "The text to reverse"
-            }
-          },
-          "required" => ["text"]
-        }
+  @tools [
+    %{
+      "name" => "echo",
+      "description" => "Echoes back the input message",
+      "inputSchema" => %{
+        "type" => "object",
+        "properties" => %{
+          "message" => %{
+            "type" => "string",
+            "description" => "The message to echo back"
+          }
+        },
+        "required" => ["message"]
       }
-    ]
+    },
+    %{
+      "name" => "reverse_string",
+      "description" => "Reverses a string",
+      "inputSchema" => %{
+        "type" => "object",
+        "properties" => %{
+          "text" => %{
+            "type" => "string",
+            "description" => "The text to reverse"
+          }
+        },
+        "required" => ["text"]
+      }
+    }
+  ]
 
-    config = %{tools: tools}
-    {:ok, config}
+  @impl true
+  def handle_list_tools(_conn) do
+    {:ok, %{"tools" => @tools}}
   end
 
   @impl true
-  def handle_list_tools(config) do
-    {:ok, %{"tools" => config.tools}}
-  end
-
-  @impl true
-  def handle_call_tool("echo", %{"message" => message}, _config) do
+  def handle_call_tool(_conn, "echo", %{"message" => message}) do
     result = %{
       "content" => [
         %{
@@ -67,7 +61,7 @@ defmodule Examples.SimpleToolsServer do
   end
 
   @impl true
-  def handle_call_tool("reverse_string", %{"text" => text}, _config) do
+  def handle_call_tool(_conn, "reverse_string", %{"text" => text}) do
     reversed = String.reverse(text)
 
     result = %{
@@ -83,7 +77,7 @@ defmodule Examples.SimpleToolsServer do
   end
 
   @impl true
-  def handle_call_tool(tool_name, _params, _config) do
+  def handle_call_tool(_conn, tool_name, _params) do
     error = %{
       "code" => -32602,
       "message" => "Unknown tool: #{tool_name}"

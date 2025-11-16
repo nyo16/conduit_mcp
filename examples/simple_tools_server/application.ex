@@ -21,10 +21,8 @@ defmodule Examples.SimpleToolsServer.Application do
       end
 
     children = [
-      # Start the example server
-      {Examples.SimpleToolsServer, []},
-
       # Start the HTTP server with chosen transport
+      # No need to start the server module - it's just functions!
       {Bandit, plug: plug_module, port: port}
     ]
 

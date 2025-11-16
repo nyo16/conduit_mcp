@@ -59,33 +59,27 @@ See the migration guide below for details.
 defmodule MyApp.MCPServer do
   use ConduitMcp.Server
 
-  @impl true
-  def mcp_init(_opts) do
-    config = %{
-      tools: [
-        %{
-          "name" => "greet",
-          "description" => "Greet someone",
-          "inputSchema" => %{
-            "type" => "object",
-            "properties" => %{
-              "name" => %{"type" => "string"}
-            },
-            "required" => ["name"]
-          }
-        }
-      ]
+  @tools [
+    %{
+      "name" => "greet",
+      "description" => "Greet someone",
+      "inputSchema" => %{
+        "type" => "object",
+        "properties" => %{
+          "name" => %{"type" => "string"}
+        },
+        "required" => ["name"]
+      }
     }
-    {:ok, config}
+  ]
+
+  @impl true
+  def handle_list_tools(_conn) do
+    {:ok, %{"tools" => @tools}}
   end
 
   @impl true
-  def handle_list_tools(config) do
-    {:ok, %{"tools" => config.tools}}
-  end
-
-  @impl true
-  def handle_call_tool("greet", %{"name" => name}, _config) do
+  def handle_call_tool(_conn, "greet", %{"name" => name}) do
     {:ok, %{
       "content" => [%{"type" => "text", "text" => "Hello, #{name}!"}]
     }}
@@ -97,7 +91,7 @@ Start the server:
 
 ```elixir
 children = [
-  {MyApp.MCPServer, []},
+  # No need to start the server module - it's just functions!
   {Bandit,
    plug: {ConduitMcp.Transport.StreamableHTTP, server_module: MyApp.MCPServer},
    port: 4001}
@@ -115,33 +109,27 @@ Add MCP endpoints directly to your Phoenix application:
 defmodule MyApp.MCPServer do
   use ConduitMcp.Server
 
-  @impl true
-  def mcp_init(_opts) do
-    config = %{
-      tools: [
-        %{
-          "name" => "get_user",
-          "description" => "Get user information from database",
-          "inputSchema" => %{
-            "type" => "object",
-            "properties" => %{
-              "user_id" => %{"type" => "string"}
-            },
-            "required" => ["user_id"]
-          }
-        }
-      ]
+  @tools [
+    %{
+      "name" => "get_user",
+      "description" => "Get user information from database",
+      "inputSchema" => %{
+        "type" => "object",
+        "properties" => %{
+          "user_id" => %{"type" => "string"}
+        },
+        "required" => ["user_id"]
+      }
     }
-    {:ok, config}
+  ]
+
+  @impl true
+  def handle_list_tools(_conn) do
+    {:ok, %{"tools" => @tools}}
   end
 
   @impl true
-  def handle_list_tools(config) do
-    {:ok, %{"tools" => config.tools}}
-  end
-
-  @impl true
-  def handle_call_tool("get_user", %{"user_id" => id}, _config) do
+  def handle_call_tool(_conn, "get_user", %{"user_id" => id}) do
     user = MyApp.Accounts.get_user(id)
     {:ok, %{
       "content" => [%{"type" => "text", "text" => "User: #{user.name}"}]
@@ -171,19 +159,7 @@ defmodule MyAppWeb.Router do
 end
 ```
 
-Add server to your application supervision tree:
-
-```elixir
-# lib/my_app/application.ex
-def start(_type, _args) do
-  children = [
-    MyApp.MCPServer,
-    MyAppWeb.Endpoint
-  ]
-
-  Supervisor.start_link(children, strategy: :one_for_one)
-end
-```
+That's it! No need to add the server to your supervision tree - it's just a module with functions.
 
 See the [Phoenix Integration Example](examples/phoenix_mcp/README.md) for a complete working example with authentication.
 
@@ -220,60 +196,130 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ## Migration Guide (v0.3.x → v0.4.0)
 
-Update your callback return values:
+Update your callback signatures and return values:
 
 | Callback | v0.3.x | v0.4.0 |
 |----------|--------|--------|
-| `handle_list_tools/1` | `{:reply, result, state}` | `{:ok, result}` |
-| `handle_call_tool/3` | `{:reply, result, state}` or `{:error, error, state}` | `{:ok, result}` or `{:error, error}` |
-| `handle_list_resources/1` | `{:reply, result, state}` | `{:ok, result}` |
-| `handle_read_resource/2` | `{:reply, result, state}` or `{:error, error, state}` | `{:ok, result}` or `{:error, error}` |
-| `handle_list_prompts/1` | `{:reply, result, state}` | `{:ok, result}` |
-| `handle_get_prompt/3` | `{:reply, result, state}` or `{:error, error, state}` | `{:ok, result}` or `{:error, error}` |
+| `mcp_init/1` | Required | Removed (use module attributes instead) |
+| `handle_list_tools/1` | `handle_list_tools(config)` → `{:reply, result, config}` | `handle_list_tools(conn)` → `{:ok, result}` |
+| `handle_call_tool/3` | `handle_call_tool(name, params, config)` → `{:reply, result, config}` | `handle_call_tool(conn, name, params)` → `{:ok, result}` |
+| `handle_list_resources/1` | `handle_list_resources(config)` → `{:reply, result, config}` | `handle_list_resources(conn)` → `{:ok, result}` |
+| `handle_read_resource/2` | `handle_read_resource(uri, config)` → `{:reply, result, config}` | `handle_read_resource(conn, uri)` → `{:ok, result}` |
+| `handle_list_prompts/1` | `handle_list_prompts(config)` → `{:reply, result, config}` | `handle_list_prompts(conn)` → `{:ok, result}` |
+| `handle_get_prompt/3` | `handle_get_prompt(name, args, config)` → `{:reply, result, config}` | `handle_get_prompt(conn, name, args)` → `{:ok, result}` |
 
 **Key changes:**
-1. Rename `state` to `config` (both are the same - just clearer naming)
-2. Change `{:reply, result, state}` to `{:ok, result}`
-3. Change `{:error, error, state}` to `{:error, error}`
-4. Error maps now use string keys: `%{"code" => -32000, "message" => "..."}` instead of atoms
+1. No more `mcp_init/1` - use module attributes like `@tools` instead
+2. Callbacks receive `conn` (Plug.Conn) as first parameter instead of config
+3. Change `{:reply, result, state}` to `{:ok, result}`
+4. Change `{:error, error, state}` to `{:error, error}`
+5. Error maps now use string keys: `%{"code" => -32000, "message" => "..."}` instead of atoms
+6. **Remove server from supervision tree** - it's just functions now!
+
+**Example Migration:**
+
+```elixir
+# v0.3.x
+defmodule MyApp.MCPServer do
+  use ConduitMcp.Server
+
+  @impl true
+  def mcp_init(_opts) do
+    {:ok, %{tools: [...]}}
+  end
+
+  @impl true
+  def handle_list_tools(config) do
+    {:reply, %{"tools" => config.tools}, config}
+  end
+
+  @impl true
+  def handle_call_tool("echo", %{"msg" => msg}, config) do
+    {:reply, %{"content" => [...]}, config}
+  end
+end
+
+# Supervision tree
+children = [
+  {MyApp.MCPServer, []},  # ← Remove this!
+  {Bandit, ...}
+]
+
+# v0.4.0
+defmodule MyApp.MCPServer do
+  use ConduitMcp.Server
+
+  @tools [...]  # Define as module attribute
+
+  @impl true
+  def handle_list_tools(_conn) do
+    {:ok, %{"tools" => @tools}}
+  end
+
+  @impl true
+  def handle_call_tool(_conn, "echo", %{"msg" => msg}) do
+    {:ok, %{"content" => [...]}}
+  end
+end
+
+# Supervision tree
+children = [
+  {Bandit, ...}  # Just Bandit!
+]
+```
 
 **Handling Mutable State**
 
 If you need mutable state (e.g., counters, caches), use external mechanisms:
 
 ```elixir
-# Option 1: ETS
-def mcp_init(_opts) do
-  :ets.new(:my_counter, [:set, :public, :named_table])
-  :ets.insert(:my_counter, {:count, 0})
-  {:ok, %{tools: [...]}}
-end
-
-def handle_call_tool("count", _params, config) do
+# Option 1: ETS (fastest for concurrent reads/writes)
+def handle_call_tool(_conn, "increment", _params) do
   :ets.update_counter(:my_counter, :count, 1)
-  count = :ets.lookup(:my_counter, :count) |> hd() |> elem(1)
+  count = :ets.lookup_element(:my_counter, :count, 2)
   {:ok, %{"content" => [%{"type" => "text", "text" => "Count: #{count}"}]}}
 end
 
-# Option 2: Agent
-def mcp_init(_opts) do
-  {:ok, _} = Agent.start_link(fn -> 0 end, name: :my_counter)
-  {:ok, %{tools: [...]}}
+# Option 2: Agent/GenServer (for complex state)
+def handle_call_tool(_conn, "get_cache", %{"key" => key}) do
+  value = MyApp.Cache.get(key)
+  {:ok, %{"content" => [%{"type" => "text", "text" => value}]}}
 end
 
-def handle_call_tool("count", _params, config) do
-  count = Agent.get_and_update(:my_counter, fn c -> {c + 1, c + 1} end)
-  {:ok, %{"content" => [%{"type" => "text", "text" => "Count: #{count}"}]}}
+# Option 3: Database (for persistent state)
+def handle_call_tool(_conn, "save_data", %{"data" => data}) do
+  MyApp.Repo.insert(%Data{value: data})
+  {:ok, %{"content" => [%{"type" => "text", "text" => "Saved!"}]}}
+end
+```
+
+**Using Connection Context:**
+
+The `conn` parameter provides access to request context:
+
+```elixir
+def handle_call_tool(conn, "private_data", _params) do
+  # Access authentication info
+  user_id = conn.assigns[:user_id]
+
+  # Check headers
+  auth = Plug.Conn.get_req_header(conn, "authorization")
+
+  {:ok, %{"content" => [%{"type" => "text", "text" => "User: #{user_id}"}]}}
 end
 ```
 
 ## Features
 
 - Full MCP specification 2025-06-18 implementation
-- **Stateless architecture for maximum concurrency**
+- **Pure stateless architecture - just compiled functions!**
+  - No GenServer, no Agent, no process overhead
+  - No supervision tree required
+  - Maximum concurrency - limited only by Bandit's process pool
 - Dual transport support (Streamable HTTP and SSE)
 - JSON-RPC 2.0 compliant
 - Support for tools, resources, and prompts
+- Connection context access for authentication/headers
 - Configurable CORS and authentication
 - Phoenix integration support
 - Telemetry events for monitoring

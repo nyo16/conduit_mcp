@@ -1,38 +1,12 @@
 defmodule ConduitMcp.ServerTest do
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   alias ConduitMcp.TestServer
 
-  describe "server lifecycle" do
-    test "starts with start_link/1" do
-      {:ok, pid} = TestServer.start_link([])
-      assert Process.alive?(pid)
-      Agent.stop(pid)
-    end
-
-    test "initializes with mcp_init options" do
-      {:ok, pid} = TestServer.start_link(custom_key: "custom_value")
-      config = Agent.get(pid, & &1)
-      assert config.custom_key == "custom_value"
-      Agent.stop(pid)
-    end
-
-    test "registers with module name" do
-      {:ok, _pid} = TestServer.start_link([])
-      assert Process.whereis(TestServer) != nil
-      Agent.stop(TestServer)
-    end
-  end
-
   describe "handle_list_tools callback" do
-    setup do
-      {:ok, _pid} = start_supervised({TestServer, []})
-      :ok
-    end
-
     test "returns tools list" do
-      config = TestServer.get_config()
-      {:ok, result} = TestServer.handle_list_tools(config)
+      conn = %Plug.Conn{}
+      {:ok, result} = TestServer.handle_list_tools(conn)
       assert is_map(result)
       assert Map.has_key?(result, "tools")
       assert is_list(result["tools"])
@@ -40,8 +14,8 @@ defmodule ConduitMcp.ServerTest do
     end
 
     test "tools have required fields" do
-      config = TestServer.get_config()
-      {:ok, result} = TestServer.handle_list_tools(config)
+      conn = %Plug.Conn{}
+      {:ok, result} = TestServer.handle_list_tools(conn)
       tool = hd(result["tools"])
       assert Map.has_key?(tool, "name")
       assert Map.has_key?(tool, "description")
@@ -50,42 +24,32 @@ defmodule ConduitMcp.ServerTest do
   end
 
   describe "handle_call_tool callback" do
-    setup do
-      {:ok, _pid} = start_supervised({TestServer, []})
-      :ok
-    end
-
     test "executes tool successfully" do
-      config = TestServer.get_config()
-      {:ok, result} = TestServer.handle_call_tool("echo", %{"message" => "hello"}, config)
+      conn = %Plug.Conn{}
+      {:ok, result} = TestServer.handle_call_tool(conn, "echo", %{"message" => "hello"})
       assert is_map(result)
       assert result["content"] == [%{"type" => "text", "text" => "hello"}]
     end
 
     test "returns error for failing tool" do
-      config = TestServer.get_config()
-      {:error, error} = TestServer.handle_call_tool("fail", %{}, config)
+      conn = %Plug.Conn{}
+      {:error, error} = TestServer.handle_call_tool(conn, "fail", %{})
       assert error["code"] == -32000
       assert error["message"] == "Tool execution failed"
     end
 
     test "returns error for unknown tool" do
-      config = TestServer.get_config()
-      {:error, error} = TestServer.handle_call_tool("unknown", %{}, config)
+      conn = %Plug.Conn{}
+      {:error, error} = TestServer.handle_call_tool(conn, "unknown", %{})
       assert error["code"] == -32601
       assert error["message"] == "Tool not found"
     end
   end
 
   describe "handle_list_resources callback" do
-    setup do
-      {:ok, _pid} = start_supervised({TestServer, []})
-      :ok
-    end
-
     test "returns resources list" do
-      config = TestServer.get_config()
-      {:ok, result} = TestServer.handle_list_resources(config)
+      conn = %Plug.Conn{}
+      {:ok, result} = TestServer.handle_list_resources(conn)
       assert is_map(result)
       assert Map.has_key?(result, "resources")
       assert is_list(result["resources"])
@@ -93,8 +57,8 @@ defmodule ConduitMcp.ServerTest do
     end
 
     test "resources have required fields" do
-      config = TestServer.get_config()
-      {:ok, result} = TestServer.handle_list_resources(config)
+      conn = %Plug.Conn{}
+      {:ok, result} = TestServer.handle_list_resources(conn)
       resource = hd(result["resources"])
       assert Map.has_key?(resource, "uri")
       assert Map.has_key?(resource, "name")
@@ -102,36 +66,26 @@ defmodule ConduitMcp.ServerTest do
   end
 
   describe "handle_read_resource callback" do
-    setup do
-      {:ok, _pid} = start_supervised({TestServer, []})
-      :ok
-    end
-
     test "reads resource successfully" do
-      config = TestServer.get_config()
-      {:ok, result} = TestServer.handle_read_resource("test://resource1", config)
+      conn = %Plug.Conn{}
+      {:ok, result} = TestServer.handle_read_resource(conn, "test://resource1")
       assert is_map(result)
       assert Map.has_key?(result, "contents")
       assert is_list(result["contents"])
     end
 
     test "returns error for unknown resource" do
-      config = TestServer.get_config()
-      {:error, error} = TestServer.handle_read_resource("test://unknown", config)
+      conn = %Plug.Conn{}
+      {:error, error} = TestServer.handle_read_resource(conn, "test://unknown")
       assert error["code"] == -32601
       assert error["message"] == "Resource not found"
     end
   end
 
   describe "handle_list_prompts callback" do
-    setup do
-      {:ok, _pid} = start_supervised({TestServer, []})
-      :ok
-    end
-
     test "returns prompts list" do
-      config = TestServer.get_config()
-      {:ok, result} = TestServer.handle_list_prompts(config)
+      conn = %Plug.Conn{}
+      {:ok, result} = TestServer.handle_list_prompts(conn)
       assert is_map(result)
       assert Map.has_key?(result, "prompts")
       assert is_list(result["prompts"])
@@ -139,8 +93,8 @@ defmodule ConduitMcp.ServerTest do
     end
 
     test "prompts have required fields" do
-      config = TestServer.get_config()
-      {:ok, result} = TestServer.handle_list_prompts(config)
+      conn = %Plug.Conn{}
+      {:ok, result} = TestServer.handle_list_prompts(conn)
       prompt = hd(result["prompts"])
       assert Map.has_key?(prompt, "name")
       assert Map.has_key?(prompt, "description")
@@ -148,14 +102,9 @@ defmodule ConduitMcp.ServerTest do
   end
 
   describe "handle_get_prompt callback" do
-    setup do
-      {:ok, _pid} = start_supervised({TestServer, []})
-      :ok
-    end
-
     test "gets prompt successfully with arguments" do
-      config = TestServer.get_config()
-      {:ok, result} = TestServer.handle_get_prompt("greeting", %{"name" => "Alice"}, config)
+      conn = %Plug.Conn{}
+      {:ok, result} = TestServer.handle_get_prompt(conn, "greeting", %{"name" => "Alice"})
       assert is_map(result)
       assert Map.has_key?(result, "messages")
       assert is_list(result["messages"])
@@ -164,15 +113,15 @@ defmodule ConduitMcp.ServerTest do
     end
 
     test "gets prompt with default arguments" do
-      config = TestServer.get_config()
-      {:ok, result} = TestServer.handle_get_prompt("greeting", %{}, config)
+      conn = %Plug.Conn{}
+      {:ok, result} = TestServer.handle_get_prompt(conn, "greeting", %{})
       message = hd(result["messages"])
       assert message["content"]["text"] == "Hello, World!"
     end
 
     test "returns error for unknown prompt" do
-      config = TestServer.get_config()
-      {:error, error} = TestServer.handle_get_prompt("unknown", %{}, config)
+      conn = %Plug.Conn{}
+      {:error, error} = TestServer.handle_get_prompt(conn, "unknown", %{})
       assert error["code"] == -32601
       assert error["message"] == "Prompt not found"
     end
@@ -183,36 +132,28 @@ defmodule ConduitMcp.ServerTest do
       use ConduitMcp.Server
 
       @impl true
-      def mcp_init(_opts) do
-        {:ok, %{}}
-      end
-
-      @impl true
-      def handle_list_tools(_config) do
+      def handle_list_tools(_conn) do
         {:ok, %{"tools" => []}}
       end
 
       @impl true
-      def handle_call_tool(_name, _params, _config) do
+      def handle_call_tool(_conn, _name, _params) do
         {:error, %{"code" => -32601, "message" => "No tools available"}}
       end
     end
 
-    test "minimal server can start and respond" do
-      {:ok, pid} = MinimalServer.start_link([])
-      config = MinimalServer.get_config()
+    test "minimal server can respond" do
+      conn = %Plug.Conn{}
 
-      {:ok, result} = MinimalServer.handle_list_tools(config)
+      {:ok, result} = MinimalServer.handle_list_tools(conn)
       assert result == %{"tools" => []}
 
       # Default implementations should work
-      {:ok, resources_result} = MinimalServer.handle_list_resources(config)
+      {:ok, resources_result} = MinimalServer.handle_list_resources(conn)
       assert resources_result["resources"] == []
 
-      {:ok, prompts_result} = MinimalServer.handle_list_prompts(config)
+      {:ok, prompts_result} = MinimalServer.handle_list_prompts(conn)
       assert prompts_result["prompts"] == []
-
-      Agent.stop(pid)
     end
   end
 end

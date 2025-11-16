@@ -10,13 +10,13 @@ defmodule ConduitMcp.Handler do
   Handles an MCP request and returns a JSON-RPC response.
   Emits telemetry events for monitoring and metrics.
   """
-  def handle_request(request, server_module) do
+  def handle_request(request, server_module, conn \\ %Plug.Conn{}) do
     start_time = System.monotonic_time()
 
     result =
       cond do
         Protocol.valid_request?(request) ->
-          handle_method(request, server_module)
+          handle_method(request, server_module, conn)
 
         Protocol.valid_notification?(request) ->
           handle_notification(request, server_module)
@@ -45,7 +45,7 @@ defmodule ConduitMcp.Handler do
     result
   end
 
-  defp handle_method(request, server_module) do
+  defp handle_method(request, server_module, conn) do
     method = Map.get(request, "method")
     id = Map.get(request, "id")
     params = Map.get(request, "params", %{})
@@ -60,9 +60,7 @@ defmodule ConduitMcp.Handler do
         Protocol.success_response(id, %{})
 
       "tools/list" ->
-        config = server_module.get_config()
-
-        case server_module.handle_list_tools(config) do
+        case server_module.handle_list_tools(conn) do
           {:ok, result} when is_map(result) ->
             Protocol.success_response(id, result)
 
@@ -77,12 +75,11 @@ defmodule ConduitMcp.Handler do
       "tools/call" ->
         tool_name = Map.get(params, "name")
         tool_params = Map.get(params, "arguments", %{})
-        config = server_module.get_config()
 
         start_time = System.monotonic_time()
 
         result =
-          case server_module.handle_call_tool(tool_name, tool_params, config) do
+          case server_module.handle_call_tool(conn, tool_name, tool_params) do
             {:ok, tool_result} when is_map(tool_result) ->
               Protocol.success_response(id, tool_result)
 
@@ -105,9 +102,7 @@ defmodule ConduitMcp.Handler do
         result
 
       "resources/list" ->
-        config = server_module.get_config()
-
-        case server_module.handle_list_resources(config) do
+        case server_module.handle_list_resources(conn) do
           {:ok, result} when is_map(result) ->
             Protocol.success_response(id, result)
 
@@ -121,9 +116,8 @@ defmodule ConduitMcp.Handler do
 
       "resources/read" ->
         uri = Map.get(params, "uri")
-        config = server_module.get_config()
 
-        case server_module.handle_read_resource(uri, config) do
+        case server_module.handle_read_resource(conn, uri) do
           {:ok, result} when is_map(result) ->
             Protocol.success_response(id, result)
 
@@ -136,9 +130,7 @@ defmodule ConduitMcp.Handler do
         end
 
       "prompts/list" ->
-        config = server_module.get_config()
-
-        case server_module.handle_list_prompts(config) do
+        case server_module.handle_list_prompts(conn) do
           {:ok, result} when is_map(result) ->
             Protocol.success_response(id, result)
 
@@ -153,9 +145,8 @@ defmodule ConduitMcp.Handler do
       "prompts/get" ->
         prompt_name = Map.get(params, "name")
         prompt_args = Map.get(params, "arguments", %{})
-        config = server_module.get_config()
 
-        case server_module.handle_get_prompt(prompt_name, prompt_args, config) do
+        case server_module.handle_get_prompt(conn, prompt_name, prompt_args) do
           {:ok, result} when is_map(result) ->
             Protocol.success_response(id, result)
 

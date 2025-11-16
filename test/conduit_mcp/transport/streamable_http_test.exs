@@ -1,5 +1,5 @@
 defmodule ConduitMcp.Transport.StreamableHTTPTest do
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
   import Plug.Test
   import Plug.Conn
 
@@ -7,11 +7,6 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
   alias ConduitMcp.TestServer
 
   @opts StreamableHTTP.init(server_module: TestServer)
-
-  setup do
-    {:ok, _pid} = start_supervised({TestServer, []})
-    :ok
-  end
 
   describe "initialization" do
     test "requires server_module option" do

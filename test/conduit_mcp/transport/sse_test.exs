@@ -1,5 +1,5 @@
 defmodule ConduitMcp.Transport.SSETest do
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
   import Plug.Test
   import Plug.Conn
 
@@ -7,11 +7,6 @@ defmodule ConduitMcp.Transport.SSETest do
   alias ConduitMcp.TestServer
 
   @opts SSE.init(server_module: TestServer)
-
-  setup do
-    {:ok, _pid} = start_supervised({TestServer, []})
-    :ok
-  end
 
   describe "initialization" do
     test "requires server_module option" do

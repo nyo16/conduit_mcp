@@ -94,7 +94,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
       params when is_map(params) ->
         Logger.debug("Received request: #{inspect(params)}")
 
-        response = Handler.handle_request(params, server_module)
+        response = Handler.handle_request(params, server_module, conn)
 
         case response do
           :ok ->
