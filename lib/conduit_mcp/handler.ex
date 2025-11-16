@@ -75,7 +75,6 @@ defmodule ConduitMcp.Handler do
       "tools/call" ->
         tool_name = Map.get(params, "name")
         tool_params = Map.get(params, "arguments", %{})
-        config = server_module.get_config()
 
         start_time = System.monotonic_time()
 
@@ -117,7 +116,6 @@ defmodule ConduitMcp.Handler do
 
       "resources/read" ->
         uri = Map.get(params, "uri")
-        config = server_module.get_config()
 
         case server_module.handle_read_resource(conn, uri) do
           {:ok, result} when is_map(result) ->
@@ -147,7 +145,6 @@ defmodule ConduitMcp.Handler do
       "prompts/get" ->
         prompt_name = Map.get(params, "name")
         prompt_args = Map.get(params, "arguments", %{})
-        config = server_module.get_config()
 
         case server_module.handle_get_prompt(conn, prompt_name, prompt_args) do
           {:ok, result} when is_map(result) ->
