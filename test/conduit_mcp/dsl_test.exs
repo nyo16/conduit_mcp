@@ -36,6 +36,23 @@ defmodule ConduitMcp.DSLTest do
       handle __MODULE__, :double_value
     end
 
+    tool "with_capture", "Tool using function capture" do
+      param :value, :number, "A number", required: true
+
+      handle &__MODULE__.triple_value/2
+    end
+
+    tool "with_boolean", "Tool with boolean parameter" do
+      param :enabled, :boolean, "Enable feature", required: true
+      param :count, :integer, "Item count", default: 0
+
+      handle fn _conn, params ->
+        enabled = params["enabled"]
+        count = params["count"] || 0
+        text("Enabled: #{enabled}, Count: #{count}")
+      end
+    end
+
     # TODO: Add nested object support in future version
     # tool "nested_object", "Tool with nested object" do
     #   param :user, :object, "User data", required: true do
@@ -45,9 +62,13 @@ defmodule ConduitMcp.DSLTest do
     #   handle fn _conn, params -> text("User: #{params["user"]["name"]}") end
     # end
 
-    # MFA handler implementation
+    # MFA handler implementations
     def double_value(_conn, %{"value" => val}) do
       text("Result: #{val * 2}")
+    end
+
+    def triple_value(_conn, %{"value" => val}) do
+      text("Result: #{val * 3}")
     end
 
     # Prompt examples
@@ -100,7 +121,7 @@ defmodule ConduitMcp.DSLTest do
 
       tools = result["tools"]
       assert is_list(tools)
-      assert length(tools) == 4  # simple, with_enum, with_default, with_mfa
+      assert length(tools) == 6  # simple, with_enum, with_default, with_mfa, with_capture, with_boolean
 
       # Check simple tool
       simple_tool = Enum.find(tools, fn t -> t["name"] == "simple" end)
@@ -108,6 +129,32 @@ defmodule ConduitMcp.DSLTest do
       assert simple_tool["inputSchema"]["type"] == "object"
       assert simple_tool["inputSchema"]["properties"]["message"]["type"] == "string"
       assert simple_tool["inputSchema"]["required"] == ["message"]
+    end
+
+    test "handles boolean and integer types correctly" do
+      conn = %Plug.Conn{}
+      {:ok, result} = DSLTestServer.handle_list_tools(conn)
+
+      bool_tool = Enum.find(result["tools"], fn t -> t["name"] == "with_boolean" end)
+      assert bool_tool["inputSchema"]["properties"]["enabled"]["type"] == "boolean"
+      assert bool_tool["inputSchema"]["properties"]["count"]["type"] == "integer"
+      assert bool_tool["inputSchema"]["properties"]["count"]["default"] == 0
+      assert bool_tool["inputSchema"]["required"] == ["enabled"]
+    end
+
+    test "generates correct required fields list" do
+      conn = %Plug.Conn{}
+      {:ok, result} = DSLTestServer.handle_list_tools(conn)
+
+      # Tool with multiple required params
+      simple_tool = Enum.find(result["tools"], fn t -> t["name"] == "simple" end)
+      assert simple_tool["inputSchema"]["required"] == ["message"]
+
+      # Tool with no required params
+      default_tool = Enum.find(result["tools"], fn t -> t["name"] == "with_default" end)
+      # Should have no required field or empty list
+      refute Map.has_key?(default_tool["inputSchema"], "required") or
+             default_tool["inputSchema"]["required"] == []
     end
 
     test "handles enum parameters correctly" do
@@ -145,6 +192,27 @@ defmodule ConduitMcp.DSLTest do
       {:ok, result} = DSLTestServer.handle_call_tool(conn, "with_mfa", %{"value" => 21})
 
       assert result["content"] == [%{"type" => "text", "text" => "Result: 42"}]
+    end
+
+    test "executes tool with function capture handler" do
+      conn = %Plug.Conn{}
+      {:ok, result} = DSLTestServer.handle_call_tool(conn, "with_capture", %{"value" => 10})
+
+      assert result["content"] == [%{"type" => "text", "text" => "Result: 30"}]
+    end
+
+    test "executes tool with boolean and integer parameters" do
+      conn = %Plug.Conn{}
+      {:ok, result} = DSLTestServer.handle_call_tool(conn, "with_boolean", %{"enabled" => true, "count" => 5})
+
+      assert result["content"] == [%{"type" => "text", "text" => "Enabled: true, Count: 5"}]
+    end
+
+    test "executes tool with boolean using default value" do
+      conn = %Plug.Conn{}
+      {:ok, result} = DSLTestServer.handle_call_tool(conn, "with_boolean", %{"enabled" => false})
+
+      assert result["content"] == [%{"type" => "text", "text" => "Enabled: false, Count: 0"}]
     end
 
     # TODO: Test nested objects when implemented
@@ -478,7 +546,7 @@ defmodule ConduitMcp.DSLTest do
     end
   end
 
-  describe "edge cases" do
+  describe "edge cases and parameter types" do
     test "tool with no parameters" do
       defmodule NoParamsServer do
         use ConduitMcp.Server
@@ -512,6 +580,70 @@ defmodule ConduitMcp.DSLTest do
       {:ok, result} = EmptyServer.handle_list_tools(conn)
 
       assert result["tools"] == []
+    end
+
+    test "all parameter types generate correct schemas" do
+      defmodule TypesServer do
+        use ConduitMcp.Server
+
+        tool "all_types", "Tool with all param types" do
+          param :str, :string, "A string"
+          param :num, :number, "A number"
+          param :int, :integer, "An integer"
+          param :bool, :boolean, "A boolean"
+
+          handle fn _conn, _p -> text("ok") end
+        end
+      end
+
+      conn = %Plug.Conn{}
+      {:ok, result} = TypesServer.handle_list_tools(conn)
+
+      tool = hd(result["tools"])
+      props = tool["inputSchema"]["properties"]
+
+      assert props["str"]["type"] == "string"
+      assert props["num"]["type"] == "number"
+      assert props["int"]["type"] == "integer"
+      assert props["bool"]["type"] == "boolean"
+    end
+
+    test "tool with multiple required parameters" do
+      defmodule MultiRequiredServer do
+        use ConduitMcp.Server
+
+        tool "multi", "Multiple required params" do
+          param :first, :string, "First", required: true
+          param :second, :number, "Second", required: true
+          param :third, :string, "Third"
+
+          handle fn _conn, _p -> text("ok") end
+        end
+      end
+
+      conn = %Plug.Conn{}
+      {:ok, result} = MultiRequiredServer.handle_list_tools(conn)
+
+      tool = hd(result["tools"])
+      required = tool["inputSchema"]["required"]
+
+      assert length(required) == 2
+      assert "first" in required
+      assert "second" in required
+      refute "third" in required
+    end
+
+    test "enum validation appears in schema" do
+      conn = %Plug.Conn{}
+      {:ok, result} = DSLTestServer.handle_list_tools(conn)
+
+      enum_tool = Enum.find(result["tools"], fn t -> t["name"] == "with_enum" end)
+      enum_values = enum_tool["inputSchema"]["properties"]["action"]["enum"]
+
+      assert length(enum_values) == 3
+      assert "start" in enum_values
+      assert "stop" in enum_values
+      assert "restart" in enum_values
     end
   end
 end
