@@ -11,6 +11,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   - `:cors_origin` - CORS allow-origin header (default: "*")
   - `:cors_methods` - CORS allow-methods header (default: "GET, POST, OPTIONS")
   - `:cors_headers` - CORS allow-headers header (default: "content-type, authorization")
+  - `:auth` - Authentication plug configuration (optional)
 
   ## Example
 
@@ -20,6 +21,29 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
               cors_origin: "https://myapp.com",
               cors_methods: "POST, OPTIONS",
               cors_headers: "content-type"},
+       port: 4001}
+
+  ## With Authentication
+
+      {Bandit,
+       plug: {ConduitMcp.Transport.StreamableHTTP,
+              server_module: MyApp.MCPServer,
+              auth: [
+                enabled: true,
+                strategy: :bearer_token,
+                token: "my-secret-token"
+              ]},
+       port: 4001}
+
+  Or with custom verification:
+
+      {Bandit,
+       plug: {ConduitMcp.Transport.StreamableHTTP,
+              server_module: MyApp.MCPServer,
+              auth: [
+                strategy: :function,
+                verify: &MyApp.Auth.verify_token/1
+              ]},
        port: 4001}
   """
 
@@ -32,6 +56,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   plug(:add_cors_headers)
   plug(:match)
   plug(Plug.Parsers, parsers: [:json], json_decoder: Jason)
+  plug(:maybe_authenticate)
   plug(:dispatch)
 
   defp add_cors_headers(conn, _opts) do
@@ -44,6 +69,18 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     |> put_resp_header("access-control-allow-origin", cors_origin)
     |> put_resp_header("access-control-allow-methods", cors_methods)
     |> put_resp_header("access-control-allow-headers", cors_headers)
+  end
+
+  defp maybe_authenticate(conn, _opts) do
+    case conn.private[:auth_config] do
+      nil ->
+        # No auth configured
+        conn
+
+      auth_opts ->
+        # Apply auth plug
+        ConduitMcp.Plugs.Auth.call(conn, ConduitMcp.Plugs.Auth.init(auth_opts))
+    end
   end
 
   def init(opts) do
@@ -61,12 +98,14 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     cors_origin = Keyword.get(opts, :cors_origin, "*")
     cors_methods = Keyword.get(opts, :cors_methods, "GET, POST, OPTIONS")
     cors_headers = Keyword.get(opts, :cors_headers, "content-type, authorization")
+    auth_config = Keyword.get(opts, :auth)
 
     conn
     |> Plug.Conn.put_private(:server_module, server_module)
     |> Plug.Conn.put_private(:cors_origin, cors_origin)
     |> Plug.Conn.put_private(:cors_methods, cors_methods)
     |> Plug.Conn.put_private(:cors_headers, cors_headers)
+    |> Plug.Conn.put_private(:auth_config, auth_config)
     |> super(opts)
   end
 
@@ -94,7 +133,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
       params when is_map(params) ->
         Logger.debug("Received request: #{inspect(params)}")
 
-        response = Handler.handle_request(params, server_module)
+        response = Handler.handle_request(params, server_module, conn)
 
         case response do
           :ok ->

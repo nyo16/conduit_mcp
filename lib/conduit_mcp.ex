@@ -12,37 +12,32 @@ defmodule ConduitMcp do
       defmodule MyApp.MCPServer do
         use ConduitMcp.Server
 
-        @impl true
-        def mcp_init(_opts) do
-          tools = [
-            %{
-              "name" => "greet",
-              "description" => "Greet someone",
-              "inputSchema" => %{
-                "type" => "object",
-                "properties" => %{
-                  "name" => %{"type" => "string"}
-                },
-                "required" => ["name"]
-              }
+        @tools [
+          %{
+            "name" => "greet",
+            "description" => "Greet someone",
+            "inputSchema" => %{
+              "type" => "object",
+              "properties" => %{
+                "name" => %{"type" => "string"}
+              },
+              "required" => ["name"]
             }
-          ]
-          {:ok, %{tools: tools}}
+          }
+        ]
+
+        @impl true
+        def handle_list_tools(_conn) do
+          {:ok, %{"tools" => @tools}}
         end
 
         @impl true
-        def handle_list_tools(state) do
-          {:reply, %{"tools" => state.tools}, state}
-        end
-
-        @impl true
-        def handle_call_tool("greet", %{"name" => name}, state) do
-          result = %{
+        def handle_call_tool(_conn, "greet", %{"name" => name}) do
+          {:ok, %{
             "content" => [
               %{"type" => "text", "text" => "Hello, \#{name}!"}
             ]
-          }
-          {:reply, result, state}
+          }}
         end
       end
 
@@ -59,7 +54,7 @@ defmodule ConduitMcp do
   ### Streamable HTTP (Recommended)
 
       children = [
-        {MyApp.MCPServer, []},
+        # No need to start the server module - it's just functions!
         {Bandit,
          plug: {ConduitMcp.Transport.StreamableHTTP,
                 server_module: MyApp.MCPServer},
@@ -69,7 +64,7 @@ defmodule ConduitMcp do
   ### SSE (Legacy)
 
       children = [
-        {MyApp.MCPServer, []},
+        # No need to start the server module - it's just functions!
         {Bandit,
          plug: {ConduitMcp.Transport.SSE,
                 server_module: MyApp.MCPServer},

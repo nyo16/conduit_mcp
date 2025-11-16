@@ -1,15 +1,9 @@
 defmodule ConduitMcp.HandlerTest do
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   alias ConduitMcp.Handler
   alias ConduitMcp.Protocol
   alias ConduitMcp.TestServer
-
-  setup do
-    # Start the test server for each test
-    {:ok, _pid} = start_supervised({TestServer, []})
-    :ok
-  end
 
   describe "handle_request/2 with valid requests" do
     test "handles initialize request" do

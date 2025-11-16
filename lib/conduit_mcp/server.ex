@@ -7,13 +7,11 @@ defmodule ConduitMcp.Server do
 
   ## Changes in v0.4.0
 
-  The server is now stateless by design for maximum concurrency:
-  - No GenServer bottleneck - all requests are handled concurrently
-  - Config is initialized once and stored immutably
-  - Callbacks no longer receive/return state
+  The server is now fully stateless - just pure compiled functions:
+  - No GenServer, no Agent, no process overhead
+  - No supervision tree required
+  - Callbacks receive the Plug.Conn for request context
   - Each HTTP request runs in parallel (limited only by Bandit's process pool)
-
-  If you need mutable state, use external mechanisms like ETS, Agents, or databases.
 
   ## Example
 
@@ -21,9 +19,9 @@ defmodule ConduitMcp.Server do
         use ConduitMcp.Server
 
         @impl true
-        def mcp_init(_opts) do
-          config = %{
-            tools: [
+        def handle_list_tools(_conn) do
+          {:ok, %{
+            "tools" => [
               %{
                 "name" => "echo",
                 "description" => "Echo back the input",
@@ -36,23 +34,54 @@ defmodule ConduitMcp.Server do
                 }
               }
             ]
-          }
-          {:ok, config}
+          }}
         end
 
         @impl true
-        def handle_list_tools(config) do
-          {:ok, %{"tools" => config.tools}}
-        end
-
-        @impl true
-        def handle_call_tool("echo", %{"message" => msg}, _config) do
+        def handle_call_tool(_conn, "echo", %{"message" => msg}) do
           {:ok, %{"content" => [%{"type" => "text", "text" => msg}]}}
         end
       end
+
+  Then in your router/supervision tree, just pass the module:
+
+      {Bandit,
+       plug: {ConduitMcp.Transport.StreamableHTTP, server_module: MyApp.MCPServer},
+       port: 4001}
+
+  ## Using Connection Context
+
+  The `conn` parameter allows access to request metadata:
+
+      def handle_call_tool(conn, "private_data", _params) do
+        # Check authentication
+        user_id = conn.assigns[:user_id]
+
+        # Access headers
+        auth_header = Plug.Conn.get_req_header(conn, "authorization")
+
+        {:ok, %{"content" => [%{"type" => "text", "text" => "Data for \#{user_id}"}]}}
+      end
+
+  ## Mutable State
+
+  If you need mutable state, use external mechanisms:
+
+      # Option 1: ETS
+      def handle_call_tool(_conn, "increment", _params) do
+        :ets.update_counter(:my_counter, :count, 1)
+        count = :ets.lookup_element(:my_counter, :count, 2)
+        {:ok, %{"content" => [%{"type" => "text", "text" => "Count: \#{count}"}]}}
+      end
+
+      # Option 2: Agent/GenServer
+      def handle_call_tool(_conn, "get_cache", %{"key" => key}) do
+        value = MyApp.Cache.get(key)
+        {:ok, %{"content" => [%{"type" => "text", "text" => value}]}}
+      end
   """
 
-  @type config :: any()
+  @type conn :: Plug.Conn.t()
   @type tool_name :: String.t()
   @type tool_params :: map()
   @type uri :: String.t()
@@ -60,46 +89,39 @@ defmodule ConduitMcp.Server do
   @type prompt_args :: map()
 
   @doc """
-  Initialize the MCP server with options.
-  Called when the server starts. Returns configuration that will be
-  stored and passed to all handler callbacks.
-  """
-  @callback mcp_init(opts :: keyword()) :: {:ok, config()} | {:error, any()}
-
-  @doc """
   Handle listing available tools.
   """
-  @callback handle_list_tools(config()) ::
+  @callback handle_list_tools(conn()) ::
               {:ok, %{optional(String.t()) => any()}} | {:error, map()}
 
   @doc """
   Handle tool execution.
   """
-  @callback handle_call_tool(tool_name(), tool_params(), config()) ::
+  @callback handle_call_tool(conn(), tool_name(), tool_params()) ::
               {:ok, result :: map()} | {:error, error :: map()}
 
   @doc """
   Handle listing available resources.
   """
-  @callback handle_list_resources(config()) ::
+  @callback handle_list_resources(conn()) ::
               {:ok, %{optional(String.t()) => any()}} | {:error, map()}
 
   @doc """
   Handle reading a resource.
   """
-  @callback handle_read_resource(uri(), config()) ::
+  @callback handle_read_resource(conn(), uri()) ::
               {:ok, content :: map()} | {:error, error :: map()}
 
   @doc """
   Handle listing available prompts.
   """
-  @callback handle_list_prompts(config()) ::
+  @callback handle_list_prompts(conn()) ::
               {:ok, %{optional(String.t()) => any()}} | {:error, map()}
 
   @doc """
   Handle getting a prompt.
   """
-  @callback handle_get_prompt(prompt_name(), prompt_args(), config()) ::
+  @callback handle_get_prompt(conn(), prompt_name(), prompt_args()) ::
               {:ok, messages :: map()} | {:error, error :: map()}
 
   @optional_callbacks [
@@ -115,63 +137,28 @@ defmodule ConduitMcp.Server do
     quote do
       @behaviour ConduitMcp.Server
 
-      @doc """
-      Starts the server and initializes configuration.
-      Config is stored in an Agent for concurrent read access.
-      """
-      def start_link(opts \\ []) do
-        Agent.start_link(
-          fn ->
-            case __MODULE__.mcp_init(opts) do
-              {:ok, config} ->
-                config
-
-              {:error, reason} ->
-                raise "Failed to initialize #{__MODULE__}: #{inspect(reason)}"
-            end
-          end,
-          name: __MODULE__
-        )
-      end
-
-      @doc """
-      Gets the current configuration.
-      """
-      def get_config do
-        Agent.get(__MODULE__, & &1)
-      end
-
-      def child_spec(opts) do
-        %{
-          id: __MODULE__,
-          start: {__MODULE__, :start_link, [opts]},
-          type: :worker,
-          restart: :permanent
-        }
-      end
-
       # Default implementations
-      def handle_list_tools(_config) do
+      def handle_list_tools(_conn) do
         {:ok, %{"tools" => []}}
       end
 
-      def handle_call_tool(_name, _params, _config) do
+      def handle_call_tool(_conn, _name, _params) do
         {:error, %{"code" => -32601, "message" => "Tool not found"}}
       end
 
-      def handle_list_resources(_config) do
+      def handle_list_resources(_conn) do
         {:ok, %{"resources" => []}}
       end
 
-      def handle_read_resource(_uri, _config) do
+      def handle_read_resource(_conn, _uri) do
         {:error, %{"code" => -32601, "message" => "Resource not found"}}
       end
 
-      def handle_list_prompts(_config) do
+      def handle_list_prompts(_conn) do
         {:ok, %{"prompts" => []}}
       end
 
-      def handle_get_prompt(_name, _args, _config) do
+      def handle_get_prompt(_conn, _name, _args) do
         {:error, %{"code" => -32601, "message" => "Prompt not found"}}
       end
 
