@@ -254,20 +254,42 @@ examples/simple_tools_server/
 
 To add your own tools, modify `server.ex`:
 
-1. Add tool definition to the `init/1` callback
+1. Add tool definition to the `@tools` module attribute
 2. Implement the tool logic in `handle_call_tool/3`
 
 Example:
 
 ```elixir
-@impl true
-def handle_call_tool("my_tool", %{"param" => value}, state) do
-  result = %{
-    "content" => [
-      %{"type" => "text", "text" => "Result: #{value}"}
-    ]
-  }
-  {:reply, result, state}
+defmodule Examples.SimpleToolsServer do
+  use ConduitMcp.Server
+
+  @tools [
+    %{
+      "name" => "my_tool",
+      "description" => "My custom tool",
+      "inputSchema" => %{
+        "type" => "object",
+        "properties" => %{
+          "param" => %{"type" => "string", "description" => "Input parameter"}
+        },
+        "required" => ["param"]
+      }
+    }
+  ]
+
+  @impl true
+  def handle_list_tools(_conn) do
+    {:ok, %{"tools" => @tools}}
+  end
+
+  @impl true
+  def handle_call_tool(_conn, "my_tool", %{"param" => value}) do
+    {:ok, %{
+      "content" => [
+        %{"type" => "text", "text" => "Result: #{value}"}
+      ]
+    }}
+  end
 end
 ```
 

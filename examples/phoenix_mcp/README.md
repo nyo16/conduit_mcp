@@ -62,23 +62,25 @@ curl -X POST http://localhost:4000/mcp/ \
 
 ### Authentication Options
 
-Edit `lib/phoenix_mcp_web/router.ex` to configure authentication:
+Authentication is configured directly in the transport options in `lib/phoenix_mcp_web/router.ex`:
 
 #### Option 1: No Authentication (Development Only)
 
 ```elixir
-pipeline :mcp do
-  plug PhoenixMcpWeb.Plugs.MCPAuth, enabled: false
-end
+forward "/mcp", ConduitMcp.Transport.StreamableHTTP,
+  server_module: PhoenixMcp.MCPServer,
+  auth: [enabled: false]
 ```
 
 #### Option 2: Static Bearer Token
 
 ```elixir
-pipeline :mcp do
-  plug PhoenixMcpWeb.Plugs.MCPAuth,
+forward "/mcp", ConduitMcp.Transport.StreamableHTTP,
+  server_module: PhoenixMcp.MCPServer,
+  auth: [
+    strategy: :bearer_token,
     token: System.get_env("MCP_AUTH_TOKEN") || "your-secret-token"
-end
+  ]
 ```
 
 **Usage:**
@@ -92,23 +94,45 @@ curl -X POST http://localhost:4000/mcp/ \
 #### Option 3: Custom Verification Function
 
 ```elixir
-# First, implement your verification function
+# First, implement your verification function in lib/phoenix_mcp/auth.ex
 defmodule PhoenixMcp.Auth do
-  def verify_mcp_token(token) do
+  def verify_token(token) do
     # Your custom logic here
-    if valid_token?(token) do
-      {:ok, %{user_id: "123", scopes: ["tools:read"]}}
-    else
-      :error
+    case MyApp.Repo.get_by(ApiToken, token: token) do
+      %ApiToken{user: user} -> {:ok, user}
+      nil -> {:error, "Invalid token"}
     end
   end
 end
 
-# Then use it in the pipeline
-pipeline :mcp do
-  plug PhoenixMcpWeb.Plugs.MCPAuth,
-    verify_token: &PhoenixMcp.Auth.verify_mcp_token/1
-end
+# Then use it in the router
+forward "/mcp", ConduitMcp.Transport.StreamableHTTP,
+  server_module: PhoenixMcp.MCPServer,
+  auth: [
+    strategy: :function,
+    verify: &PhoenixMcp.Auth.verify_token/1,
+    assign_as: :current_user
+  ]
+```
+
+#### Option 4: API Key Authentication
+
+```elixir
+forward "/mcp", ConduitMcp.Transport.StreamableHTTP,
+  server_module: PhoenixMcp.MCPServer,
+  auth: [
+    strategy: :api_key,
+    api_key: "your-api-key",
+    header: "x-api-key"
+  ]
+```
+
+**Usage:**
+```bash
+curl -X POST http://localhost:4000/mcp/ \
+  -H 'X-API-Key: your-api-key' \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 ```
 
 ### Transport Options
@@ -165,8 +189,10 @@ forward "/", ConduitMcp.Transport.StreamableHTTP,
 Edit `lib/phoenix_mcp/mcp_server.ex`:
 
 ```elixir
-def mcp_init(_opts) do
-  tools = [
+defmodule PhoenixMcp.MCPServer do
+  use ConduitMcp.Server
+
+  @tools [
     # ... existing tools ...
     %{
       "name" => "get_user",
@@ -174,13 +200,17 @@ def mcp_init(_opts) do
       "inputSchema" => %{
         "type" => "object",
         "properties" => %{
-          "user_id" => %{"type": "string"}
+          "user_id" => %{"type" => "string"}
         },
         "required" => ["user_id"]
       }
     }
   ]
-  {:ok, %{tools: tools}}
+
+  @impl true
+  def handle_list_tools(_conn) do
+    {:ok, %{"tools" => @tools}}
+  end
 end
 ```
 
@@ -188,16 +218,15 @@ end
 
 ```elixir
 @impl true
-def handle_call_tool("get_user", %{"user_id" => id}, state) do
+def handle_call_tool(_conn, "get_user", %{"user_id" => id}) do
   # Access your Phoenix app context
   user = PhoenixMcp.Accounts.get_user(id)
 
-  result = %{
+  {:ok, %{
     "content" => [
       %{"type" => "text", "text" => "User: #{user.name}"}
     ]
-  }
-  {:reply, result, state}
+  }}
 end
 ```
 
@@ -234,13 +263,26 @@ With authentication:
 
 ### 1. Enable Authentication
 
-Uncomment and configure bearer token in `router.ex`:
+Configure authentication directly in transport options in `router.ex`:
 
 ```elixir
-pipeline :mcp do
-  plug PhoenixMcpWeb.Plugs.MCPAuth,
+forward "/mcp", ConduitMcp.Transport.StreamableHTTP,
+  server_module: PhoenixMcp.MCPServer,
+  auth: [
+    strategy: :bearer_token,
     token: System.get_env("MCP_AUTH_TOKEN")
-end
+  ]
+```
+
+Or use custom verification:
+
+```elixir
+forward "/mcp", ConduitMcp.Transport.StreamableHTTP,
+  server_module: PhoenixMcp.MCPServer,
+  auth: [
+    strategy: :function,
+    verify: &PhoenixMcp.Auth.verify_token/1
+  ]
 ```
 
 ### 2. Configure CORS
@@ -248,9 +290,13 @@ end
 Restrict CORS to your domains:
 
 ```elixir
-forward "/", ConduitMcp.Transport.StreamableHTTP,
+forward "/mcp", ConduitMcp.Transport.StreamableHTTP,
   server_module: PhoenixMcp.MCPServer,
-  cors_origin: "https://your-app.com"
+  cors_origin: "https://your-app.com",
+  auth: [
+    strategy: :bearer_token,
+    token: System.get_env("MCP_AUTH_TOKEN")
+  ]
 ```
 
 ### 3. Set Environment Variables
@@ -266,12 +312,12 @@ MIX_ENV=prod mix phx.server
 ```
 lib/
 ├── phoenix_mcp/
-│   ├── application.ex           # Starts MCP server in supervision tree
-│   └── mcp_server.ex            # MCP tools implementation
+│   ├── application.ex           # Phoenix application
+│   ├── mcp_server.ex            # MCP tools implementation (stateless)
+│   ├── auth.ex                  # Example auth verification functions
+│   └── telemetry.ex             # Telemetry handlers and metrics
 └── phoenix_mcp_web/
-    ├── router.ex                # Routes /mcp/ to MCP transport
-    └── plugs/
-        └── mcp_auth.ex          # Bearer token authentication
+    └── router.ex                # Routes /mcp/ to MCP transport with auth
 ```
 
 ## Available Tools
@@ -343,21 +389,23 @@ config :phoenix_mcp, PhoenixMcpWeb.Endpoint,
 
 ### JSON Parsing Errors
 
-Make sure the MCP pipeline does NOT include JSON parsing - the MCP transport handles it:
+The MCP transport handles JSON parsing automatically - no pipeline configuration needed:
 
 ```elixir
-pipeline :mcp do
-  # Only auth, no :accepts or JSON parsing!
-  plug PhoenixMcpWeb.Plugs.MCPAuth, enabled: false
+# In router.ex - no pipeline needed!
+scope "/mcp" do
+  forward "/", ConduitMcp.Transport.StreamableHTTP,
+    server_module: PhoenixMcp.MCPServer,
+    auth: [enabled: false]
 end
 ```
 
 ### Authentication 401 Errors
 
 Check that:
-1. Auth is disabled for development (`enabled: false`)
-2. Or you're sending the correct bearer token
-3. Token verification function returns `{:ok, metadata}` not just `:ok`
+1. Auth is configured correctly in transport options (`auth: [enabled: false]` for dev)
+2. You're sending the correct bearer token or API key
+3. Custom verification function returns `{:ok, user}` or `{:error, reason}`
 
 ## Next Steps
 

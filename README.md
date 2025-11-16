@@ -9,7 +9,7 @@ Add to your `mix.exs`:
 ```elixir
 def deps do
   [
-    {:conduit_mcp, "~> 0.4.0"}
+    {:conduit_mcp, "~> 0.4.5"}
   ]
 end
 ```
