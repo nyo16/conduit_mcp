@@ -8,179 +8,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.5] - 2025-01-16
 
 ### Added
-- **Comprehensive authentication system**
-  - `ConduitMcp.Plugs.Auth` - Flexible authentication plug
-  - Multiple strategies: bearer_token, api_key, function (custom)
-  - Support for anonymous functions and MFA tuples
-  - Configurable assign key for authenticated user
-  - CORS preflight bypass (OPTIONS requests skip auth)
-  - Works with both StreamableHTTP and SSE transports
-- **Extended telemetry coverage**
-  - `[:conduit_mcp, :resource, :read]` - Resource read operations
-  - `[:conduit_mcp, :prompt, :get]` - Prompt retrieval operations
-  - `[:conduit_mcp, :auth, :verify]` - Authentication verification
-  - All events include duration, status, and relevant metadata
-- **Authentication examples**
-  - Static bearer token authentication
-  - Static API key authentication
-  - Database token lookup examples
-  - JWT verification examples
-  - Custom verification function patterns
-  - Phoenix integration examples
+- **Clean DSL for defining MCP servers**
+  - `tool`, `prompt`, `resource` macros for declarative definitions
+  - Automatic JSON Schema generation from parameters
+  - Helper functions: `text()`, `json()`, `error()`, `system()`, `user()`, `assistant()`
+  - Support for inline functions, MFA handlers, and function captures
+  - Parameter features: enums, defaults, required fields, type validation
+- **Flexible authentication system**
+  - `ConduitMcp.Plugs.Auth` with 5 strategies
+  - Bearer token, API key, custom function, MFA, database lookup
+  - CORS preflight bypass, configurable assign key
+  - Case-insensitive bearer token support
+- **Extended telemetry**
+  - `[:conduit_mcp, :resource, :read]` - Resource operations
+  - `[:conduit_mcp, :prompt, :get]` - Prompt operations
+  - `[:conduit_mcp, :auth, :verify]` - Authentication
+  - Complete observability for all MCP operations
 
 ### Changed
-- Transport modules now support `:auth` option for authentication
-- Auth configured directly in transport options (no separate pipeline needed)
-- Phoenix example updated with multiple auth strategy examples
-- Simple tools server supports environment-based auth (`AUTH_ENABLED`, `AUTH_TOKEN`)
-
-### Documentation
-- Complete authentication guide in README
-- 7 different auth strategy examples
-- Integration examples for database/JWT verification
-- Tool handler examples accessing authenticated user
-- Comprehensive telemetry documentation for all events
-- Metrics collection examples with Telemetry.Metrics
-- Performance alerting examples
+- Examples updated to use DSL (simple_tools_server, phoenix_mcp)
+- Transport modules support `:auth` option
+- Auth configured per-transport (no separate pipeline needed)
+- Documentation streamlined to focus on DSL
 
 ### Tests
-- 20 auth plug unit tests (all strategies, error cases)
-- 8 auth integration tests with transport layer
-- 16 telemetry tests covering all event types
-- 148 total tests, all passing
+- 36 DSL tests (tools, prompts, resources, helpers, schema builder)
+- 26 auth plug tests (all strategies, error handling, CORS)
+- 16 telemetry tests
+- 193 total tests, all passing
 
 ## [0.4.0] - 2025-01-16
 
 ### Changed (Breaking)
-- **Pure stateless architecture - just compiled functions!**
-  - Removed GenServer and Agent - no process overhead at all
-  - Server is now just a module with pure functions
+- **Pure stateless architecture**
+  - Removed GenServer and Agent - zero process overhead
+  - Server is just a module with pure functions
   - No supervision tree required
-  - Each HTTP request runs in parallel (limited only by Bandit's process pool)
+  - Maximum concurrency (limited only by Bandit)
 - **Simplified callback API**
-  - Removed `mcp_init/1` - use module attributes instead (e.g., `@tools`)
-  - Changed `{:reply, result, state}` to `{:ok, result}`
-  - Changed `{:error, error, state}` to `{:error, error}`
-  - Callbacks now receive `conn` (Plug.Conn) as first parameter for request context
-  - No more state passing/returning in callbacks
-  - Removed `terminate/2` callback (no longer needed)
-  - Parameter order changed: callbacks now receive `conn` first
-- **Error format standardization**
-  - Error maps now use string keys: `%{"code" => ..., "message" => ...}`
-  - Previously used atom keys: `%{code: ..., message: ...}`
-- **Handler changes**
-  - Handler calls module functions directly with conn parameter
-  - Transport layers pass Plug.Conn to handler for request context
-
-### Added
-- Comprehensive migration guide in README with before/after examples
-- Documentation on handling mutable state with ETS, Agent, or databases
-- Examples of using connection context for authentication
-- Performance benefits documentation
-- Connection context access in all callbacks
-
-### Upgraded
-- All examples updated to pure stateless API
-  - `examples/simple_tools_server/` - uses module attributes
-  - `examples/phoenix_mcp/` - uses module attributes
-- All tests updated and passing (104 tests)
-  - Tests now fully async (no process dependencies)
-  - Handler tests
-  - Transport tests (StreamableHTTP and SSE)
-
-### Migration Guide
-See README.md for detailed migration instructions from v0.3.x to v0.4.0
+  - Removed `mcp_init/1`
+  - Changed `{:reply, result, state}` → `{:ok, result}`
+  - Callbacks receive `conn` (Plug.Conn) as first parameter
+  - No more state passing/returning
+  - Error maps use string keys
+- **Handler updates**
+  - Calls module functions directly (no GenServer.call)
+  - Transport layers pass Plug.Conn for request context
 
 ### Performance
-- Eliminated all process overhead - pure function calls
-- Request processing fully concurrent with zero serialization
-- Improved throughput for high-concurrency scenarios
-- Compile-time optimization of module attributes
+- Zero process overhead - pure function calls
+- Full concurrent request processing
+- No serialization bottleneck
 
 ## [0.3.0] - 2025-10-28
 
 ### Added
-- Comprehensive test suite with 109 tests across all modules
-  - Protocol module tests (100% coverage)
-  - Handler module tests with telemetry validation
-  - Server behavior tests with lifecycle testing
-  - StreamableHTTP transport tests (93.5% coverage)
-  - SSE transport tests (85.4% coverage)
-- Test infrastructure
-  - TestServer for testing MCP server behavior
-  - TelemetryTestHelper for validating telemetry events
-- Test coverage reporting via ExCoveralls
-  - Overall coverage: 82.1%
-  - Configured coverage tooling in mix.exs
-- Production-ready testing infrastructure
+- Comprehensive test suite (109 tests, 82% coverage)
+- Test infrastructure (TestServer, TelemetryTestHelper)
+- ExCoveralls integration
 
 ### Changed
-- Simplified README for better clarity and professionalism
-  - Removed emoticons and verbose sections
-  - Added installation instructions at top
-  - Featured Phoenix integration example prominently
-  - More concise and professional documentation
-- Improved test organization with proper fixtures and helpers
-
-### Documentation
-- Streamlined README from 300+ to ~230 lines
-- Improved example clarity
-- Better separation of concerns in documentation
+- Simplified and professionalized README
 
 ## [0.2.0] - 2025-10-09
 
 ### Added
-- Comprehensive telemetry events for monitoring and metrics
-  - `[:conduit_mcp, :request, :stop]` - All MCP requests with duration and status
-  - `[:conduit_mcp, :tool, :execute]` - Tool executions with duration and outcome
-- Enhanced logging throughout request handling
-- `x-accel-buffering: no` header to SSE transport for nginx proxy compatibility
-- Configurable CORS headers on both transports (origin, methods, headers)
-- Examples for Resources and Prompts in README
-- Documentation for all telemetry events
-
-### Changed
-- Improved error handling and logging in request handler
-- Better error messages with context
-- Updated server version reporting to 0.2.0
+- Telemetry events (`[:conduit_mcp, :request, :stop]`, `[:conduit_mcp, :tool, :execute]`)
+- Configurable CORS headers
+- Enhanced logging
 
 ### Fixed
-- SSE buffering issues with nginx proxies
+- SSE buffering with nginx proxies
 
 ## [0.1.0] - 2025-10-08
 
 ### Added
-- Initial release of ConduitMCP
-- Core MCP protocol implementation (specification version 2025-06-18)
-- `ConduitMcp.Server` behaviour for building MCP servers
-- `ConduitMcp.Protocol` module with JSON-RPC 2.0 support
-- `ConduitMcp.Handler` for request routing
-- `ConduitMcp.Transport.StreamableHTTP` - Modern HTTP transport
-- `ConduitMcp.Transport.SSE` - Server-Sent Events transport
-- Configurable CORS headers on both transports
-- Support for Tools primitive (list and call)
-- Basic support for Resources and Prompts primitives
-- Example: Simple standalone MCP server with echo and reverse_string tools
-- Example: Phoenix integration showing MCP embedded in Phoenix router
-- Configurable bearer token authentication plug for Phoenix
-- Comprehensive documentation and testing guides
-- Test scripts for validation
-
-### Features
-- MCP specification 2025-06-18 compliance
-- Dual transport support (Streamable HTTP and SSE)
-- GenServer-based server implementation
-- CORS configuration per transport
-- Authentication plug with multiple strategies
-- Phoenix router integration support
-- Working examples with documentation
-
-### Documentation
-- README with quick start guide
-- Implementation guide based on MCP specification
-- Example server READMEs with curl examples
-- VS Code/Cursor integration guide
-- Phoenix integration documentation
+- Initial release
+- MCP specification 2025-06-18 implementation
+- `ConduitMcp.Server` behaviour
+- StreamableHTTP and SSE transports
+- Tools, resources, and prompts support
+- Basic authentication
+- Phoenix integration example
 
 [0.4.5]: https://github.com/nyo16/conduit_mcp/compare/v0.4.0...v0.4.5
 [0.4.0]: https://github.com/nyo16/conduit_mcp/compare/v0.3.1...v0.4.0
