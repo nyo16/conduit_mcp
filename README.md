@@ -53,11 +53,41 @@ See the migration guide below for details.
 
 ## Quick Start
 
-### Standalone Server
+### Standalone Server (Using DSL)
 
 ```elixir
 defmodule MyApp.MCPServer do
   use ConduitMcp.Server
+
+  tool "greet", "Greet someone" do
+    param :name, :string, "Person's name", required: true
+    param :style, :string, "Greeting style", enum: ["formal", "casual"]
+
+    handle fn _conn, params ->
+      name = params["name"]
+      style = params["style"] || "casual"
+      greeting = if style == "formal", do: "Good day", else: "Hey"
+      text("#{greeting}, #{name}!")
+    end
+  end
+
+  tool "calculate", "Perform calculations" do
+    param :operation, :string, "Math operation", enum: ~w(add sub mul div), required: true
+    param :a, :number, "First number", required: true
+    param :b, :number, "Second number", required: true
+
+    handle MyMath, :calculate  # MFA: calculate(conn, params)
+  end
+end
+```
+
+### Manual Style (Advanced)
+
+If you prefer manual control, disable the DSL:
+
+```elixir
+defmodule MyApp.MCPServer do
+  use ConduitMcp.Server, dsl: false
 
   @tools [
     %{
@@ -109,31 +139,22 @@ Add MCP endpoints directly to your Phoenix application:
 defmodule MyApp.MCPServer do
   use ConduitMcp.Server
 
-  @tools [
-    %{
-      "name" => "get_user",
-      "description" => "Get user information from database",
-      "inputSchema" => %{
-        "type" => "object",
-        "properties" => %{
-          "user_id" => %{"type" => "string"}
-        },
-        "required" => ["user_id"]
-      }
-    }
-  ]
+  alias MyApp.Accounts
 
-  @impl true
-  def handle_list_tools(_conn) do
-    {:ok, %{"tools" => @tools}}
+  tool "get_user", "Get user information from database" do
+    param :user_id, :string, "User ID", required: true
+
+    handle fn _conn, %{"user_id" => id} ->
+      user = Accounts.get_user(id)
+      json(%{id: user.id, name: user.name, email: user.email})
+    end
   end
 
-  @impl true
-  def handle_call_tool(_conn, "get_user", %{"user_id" => id}) do
-    user = MyApp.Accounts.get_user(id)
-    {:ok, %{
-      "content" => [%{"type" => "text", "text" => "User: #{user.name}"}]
-    }}
+  tool "search_users", "Search for users" do
+    param :query, :string, "Search query", required: true
+    param :limit, :number, "Max results", default: 10
+
+    handle Accounts, :search_users
   end
 end
 ```
@@ -312,6 +333,11 @@ end
 ## Features
 
 - Full MCP specification 2025-06-18 implementation
+- **Clean DSL for defining tools, prompts, and resources**
+  - Declarative tool definitions with automatic schema generation
+  - Parameter validation with enums, defaults, and required fields
+  - Helper functions (text, json, error, system, user, assistant)
+  - Support for inline functions and MFA handlers
 - **Pure stateless architecture - just compiled functions!**
   - No GenServer, no Agent, no process overhead
   - No supervision tree required
@@ -325,6 +351,134 @@ end
 - Phoenix integration support
 - Telemetry events for monitoring
 - Production ready with comprehensive test coverage
+
+## DSL Guide
+
+The DSL provides a clean, declarative way to define MCP servers:
+
+### Basic Tool
+
+```elixir
+tool "echo", "Echoes back the input" do
+  param :message, :string, "Message to echo", required: true
+
+  handle fn _conn, %{"message" => msg} ->
+    text(msg)
+  end
+end
+```
+
+### Tool with Enums and Defaults
+
+```elixir
+tool "greet", "Greet someone" do
+  param :name, :string, "Name to greet", required: true
+  param :style, :string, "Greeting style", enum: ["formal", "casual"], default: "casual"
+
+  handle fn _conn, params ->
+    style = params["style"]
+    greeting = if style == "formal", do: "Good day", else: "Hey"
+    text("#{greeting}, #{params["name"]}!")
+  end
+end
+```
+
+### Tool with MFA Handler
+
+```elixir
+tool "calculate", "Math operations" do
+  param :op, :string, "Operation", enum: ~w(add sub mul div), required: true
+  param :a, :number, "First number", required: true
+  param :b, :number, "Second number", required: true
+
+  handle MyMath, :calculate  # Will call MyMath.calculate(conn, params)
+end
+
+# In MyMath module:
+def calculate(_conn, %{"op" => "add", "a" => a, "b" => b}), do: text("Result: #{a + b}")
+def calculate(_conn, %{"op" => "sub", "a" => a, "b" => b}), do: text("Result: #{a - b}")
+# ...
+```
+
+### Prompts
+
+```elixir
+prompt "code_review", "Code review assistant" do
+  arg :code, :string, "Code to review", required: true
+  arg :language, :string, "Programming language", default: "elixir"
+
+  get fn _conn, args ->
+    lang = args["language"] || "elixir"
+    [
+      system("You are an expert #{lang} code reviewer"),
+      user("Please review this code:\n#{args["code"]}")
+    ]
+  end
+end
+```
+
+### Resources
+
+```elixir
+resource "user://{id}" do
+  description "User profile information"
+  mime_type "application/json"
+
+  read fn _conn, params, _opts ->
+    user = MyApp.Users.get!(params["id"])
+    json(user)
+  end
+end
+
+resource "docs://readme" do
+  mime_type "text/markdown"
+
+  read fn _conn, _params, _opts ->
+    text(File.read!("README.md"))
+  end
+end
+```
+
+### Helper Functions
+
+The DSL includes helpers for common response types:
+
+```elixir
+# Text response
+text("Hello, world!")
+# => {:ok, %{"content" => [%{"type" => "text", "text" => "Hello, world!"}]}}
+
+# JSON response
+json(%{status: "ok", count: 42})
+# => {:ok, %{"content" => [%{"type" => "text", "text" => "{\"status\":\"ok\",\"count\":42}"}]}}
+
+# Error response
+error("Not found")
+# => {:error, %{"code" => -32000, "message" => "Not found"}}
+
+error("Invalid params", -32602)
+# => {:error, %{"code" => -32602, "message" => "Invalid params"}}
+
+# Prompt messages
+system("You are a helpful assistant")
+user("What is 2+2?")
+assistant("2+2 equals 4")
+```
+
+### Using Connection Context
+
+Access authentication and request data through the `conn` parameter:
+
+```elixir
+tool "get_profile", "Get user profile" do
+  handle fn conn, _params ->
+    case conn.assigns[:current_user] do
+      nil -> error("Not authenticated")
+      user -> json(%{id: user.id, name: user.name, email: user.email})
+    end
+  end
+end
+```
 
 ## Authentication
 

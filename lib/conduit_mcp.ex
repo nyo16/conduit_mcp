@@ -12,32 +12,20 @@ defmodule ConduitMcp do
       defmodule MyApp.MCPServer do
         use ConduitMcp.Server
 
-        @tools [
-          %{
-            "name" => "greet",
-            "description" => "Greet someone",
-            "inputSchema" => %{
-              "type" => "object",
-              "properties" => %{
-                "name" => %{"type" => "string"}
-              },
-              "required" => ["name"]
-            }
-          }
-        ]
+        tool "greet", "Greet someone" do
+          param :name, :string, "Name to greet", required: true
 
-        @impl true
-        def handle_list_tools(_conn) do
-          {:ok, %{"tools" => @tools}}
+          handle fn _conn, %{"name" => name} ->
+            text("Hello, \#{name}!")
+          end
         end
 
-        @impl true
-        def handle_call_tool(_conn, "greet", %{"name" => name}) do
-          {:ok, %{
-            "content" => [
-              %{"type" => "text", "text" => "Hello, \#{name}!"}
-            ]
-          }}
+        tool "calculate", "Math operations" do
+          param :op, :string, "Operation", enum: ~w(add sub mul div), required: true
+          param :a, :number, "First number", required: true
+          param :b, :number, "Second number", required: true
+
+          handle MyMath, :calculate
         end
       end
 

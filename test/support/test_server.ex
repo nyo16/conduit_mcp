@@ -1,8 +1,10 @@
 defmodule ConduitMcp.TestServer do
   @moduledoc """
   Test MCP server for unit tests.
+
+  Uses manual implementation (dsl: false) to test the non-DSL path.
   """
-  use ConduitMcp.Server
+  use ConduitMcp.Server, dsl: false
 
   @tools [
     %{

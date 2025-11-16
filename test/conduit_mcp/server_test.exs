@@ -129,7 +129,7 @@ defmodule ConduitMcp.ServerTest do
 
   describe "minimal server implementation" do
     defmodule MinimalServer do
-      use ConduitMcp.Server
+      use ConduitMcp.Server, dsl: false
 
       @impl true
       def handle_list_tools(_conn) do

@@ -3,86 +3,26 @@ defmodule Examples.SimpleToolsServer do
   Example MCP server with simple tools: echo and reverse_string.
 
   This server demonstrates:
-  - Defining tools with input schemas
-  - Handling tool calls
-  - Returning structured responses
+  - Using the ConduitMcp.Server DSL for clean tool definitions
+  - Handling tool calls with inline functions
+  - Returning structured responses using helpers (text/1)
   """
 
   use ConduitMcp.Server
 
-  @tools [
-    %{
-      "name" => "echo",
-      "description" => "Echoes back the input message",
-      "inputSchema" => %{
-        "type" => "object",
-        "properties" => %{
-          "message" => %{
-            "type" => "string",
-            "description" => "The message to echo back"
-          }
-        },
-        "required" => ["message"]
-      }
-    },
-    %{
-      "name" => "reverse_string",
-      "description" => "Reverses a string",
-      "inputSchema" => %{
-        "type" => "object",
-        "properties" => %{
-          "text" => %{
-            "type" => "string",
-            "description" => "The text to reverse"
-          }
-        },
-        "required" => ["text"]
-      }
-    }
-  ]
+  tool "echo", "Echoes back the input message" do
+    param :message, :string, "The message to echo back", required: true
 
-  @impl true
-  def handle_list_tools(_conn) do
-    {:ok, %{"tools" => @tools}}
+    handle fn _conn, %{"message" => message} ->
+      text(message)
+    end
   end
 
-  @impl true
-  def handle_call_tool(_conn, "echo", %{"message" => message}) do
-    result = %{
-      "content" => [
-        %{
-          "type" => "text",
-          "text" => message
-        }
-      ]
-    }
+  tool "reverse_string", "Reverses a string" do
+    param :text, :string, "The text to reverse", required: true
 
-    {:ok, result}
-  end
-
-  @impl true
-  def handle_call_tool(_conn, "reverse_string", %{"text" => text}) do
-    reversed = String.reverse(text)
-
-    result = %{
-      "content" => [
-        %{
-          "type" => "text",
-          "text" => reversed
-        }
-      ]
-    }
-
-    {:ok, result}
-  end
-
-  @impl true
-  def handle_call_tool(_conn, tool_name, _params) do
-    error = %{
-      "code" => -32602,
-      "message" => "Unknown tool: #{tool_name}"
-    }
-
-    {:error, error}
+    handle fn _conn, %{"text" => text} ->
+      text(String.reverse(text))
+    end
   end
 end

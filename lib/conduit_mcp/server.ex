@@ -13,28 +13,50 @@ defmodule ConduitMcp.Server do
   - Callbacks receive the Plug.Conn for request context
   - Each HTTP request runs in parallel (limited only by Bandit's process pool)
 
-  ## Example
+  ## Example (Using DSL - Recommended)
 
       defmodule MyApp.MCPServer do
         use ConduitMcp.Server
 
+        tool "echo", "Echo back the input" do
+          param :message, :string, "Message to echo", required: true
+
+          handle fn _conn, %{"message" => msg} ->
+            text(msg)
+          end
+        end
+
+        tool "calculate", "Perform calculations" do
+          param :operation, :string, "Math operation", enum: ~w(add sub mul div), required: true
+          param :a, :number, "First number", required: true
+          param :b, :number, "Second number", required: true
+
+          handle MyMath, :calculate
+        end
+      end
+
+  ## Example (Manual - Advanced)
+
+      defmodule MyApp.MCPServer do
+        use ConduitMcp.Server, dsl: false  # Disable DSL
+
+        @tools [
+          %{
+            "name" => "echo",
+            "description" => "Echo back the input",
+            "inputSchema" => %{
+              "type" => "object",
+              "properties" => %{
+                "message" => %{"type" => "string", "description" => "Message to echo"}
+              },
+              "required" => ["message"]
+            }
+          }
+        ]
+
         @impl true
         def handle_list_tools(_conn) do
-          {:ok, %{
-            "tools" => [
-              %{
-                "name" => "echo",
-                "description" => "Echo back the input",
-                "inputSchema" => %{
-                  "type" => "object",
-                  "properties" => %{
-                    "message" => %{"type" => "string", "description" => "Message to echo"}
-                  },
-                  "required" => ["message"]
-                }
-              }
-            ]
-          }}
+          {:ok, %{"tools" => @tools}}
         end
 
         @impl true
@@ -43,7 +65,7 @@ defmodule ConduitMcp.Server do
         end
       end
 
-  Then in your router/supervision tree, just pass the module:
+  Then in your supervision tree, just pass the module:
 
       {Bandit,
        plug: {ConduitMcp.Transport.StreamableHTTP, server_module: MyApp.MCPServer},
@@ -133,41 +155,50 @@ defmodule ConduitMcp.Server do
     handle_get_prompt: 3
   ]
 
-  defmacro __using__(_opts) do
-    quote do
-      @behaviour ConduitMcp.Server
+  defmacro __using__(opts) do
+    use_dsl = Keyword.get(opts, :dsl, true)
 
-      # Default implementations
-      def handle_list_tools(_conn) do
-        {:ok, %{"tools" => []}}
+    if use_dsl do
+      quote do
+        @behaviour ConduitMcp.Server
+        use ConduitMcp.DSL
       end
+    else
+      quote do
+        @behaviour ConduitMcp.Server
 
-      def handle_call_tool(_conn, _name, _params) do
-        {:error, %{"code" => -32601, "message" => "Tool not found"}}
+        # Default implementations for manual mode
+        def handle_list_tools(_conn) do
+          {:ok, %{"tools" => []}}
+        end
+
+        def handle_call_tool(_conn, _name, _params) do
+          {:error, %{"code" => -32601, "message" => "Tool not found"}}
+        end
+
+        def handle_list_resources(_conn) do
+          {:ok, %{"resources" => []}}
+        end
+
+        def handle_read_resource(_conn, _uri) do
+          {:error, %{"code" => -32601, "message" => "Resource not found"}}
+        end
+
+        def handle_list_prompts(_conn) do
+          {:ok, %{"prompts" => []}}
+        end
+
+        def handle_get_prompt(_conn, _name, _args) do
+          {:error, %{"code" => -32601, "message" => "Prompt not found"}}
+        end
+
+        defoverridable handle_list_tools: 1,
+                       handle_call_tool: 3,
+                       handle_list_resources: 1,
+                       handle_read_resource: 2,
+                       handle_list_prompts: 1,
+                       handle_get_prompt: 3
       end
-
-      def handle_list_resources(_conn) do
-        {:ok, %{"resources" => []}}
-      end
-
-      def handle_read_resource(_conn, _uri) do
-        {:error, %{"code" => -32601, "message" => "Resource not found"}}
-      end
-
-      def handle_list_prompts(_conn) do
-        {:ok, %{"prompts" => []}}
-      end
-
-      def handle_get_prompt(_conn, _name, _args) do
-        {:error, %{"code" => -32601, "message" => "Prompt not found"}}
-      end
-
-      defoverridable handle_list_tools: 1,
-                     handle_call_tool: 3,
-                     handle_list_resources: 1,
-                     handle_read_resource: 2,
-                     handle_list_prompts: 1,
-                     handle_get_prompt: 3
     end
   end
 end
