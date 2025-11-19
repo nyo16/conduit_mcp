@@ -438,6 +438,27 @@ defmodule ConduitMcp.DSLTest do
       assert {:ok, %{"key" => "value", "count" => 42}} = Jason.decode(json_str)
     end
 
+    test "raw/1 returns data directly without MCP wrapping" do
+      import ConduitMcp.DSL.Helpers
+
+      result = raw(%{status: "ok", count: 42})
+      assert result == {:ok, %{status: "ok", count: 42}}
+    end
+
+    test "raw/1 works with simple values" do
+      import ConduitMcp.DSL.Helpers
+
+      result = raw("simple string")
+      assert result == {:ok, "simple string"}
+    end
+
+    test "raw/1 works with lists" do
+      import ConduitMcp.DSL.Helpers
+
+      result = raw([1, 2, 3])
+      assert result == {:ok, [1, 2, 3]}
+    end
+
     test "error/1 creates error response" do
       import ConduitMcp.DSL.Helpers
 

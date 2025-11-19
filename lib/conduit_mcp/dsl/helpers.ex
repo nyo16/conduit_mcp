@@ -9,6 +9,7 @@ defmodule ConduitMcp.DSL.Helpers do
 
   - `text/1` - Returns a text content response
   - `json/1` - Returns JSON-encoded text content
+  - `raw/1` - Returns raw data directly (bypasses MCP content wrapping)
   - `error/1` or `error/2` - Returns an error response
   - `image/1` - Returns an image content response
 
@@ -27,6 +28,10 @@ defmodule ConduitMcp.DSL.Helpers do
       # JSON response
       json(%{status: "ok", count: 42})
       # => {:ok, %{"content" => [%{"type" => "text", "text" => "{\\"status\\":\\"ok\\",\\"count\\":42}"}]}}
+
+      # Raw response (bypasses MCP wrapping)
+      raw(%{status: "ok", count: 42})
+      # => {:ok, %{"status" => "ok", "count" => 42}}
 
       # Error response
       error("Not found")
@@ -83,6 +88,32 @@ defmodule ConduitMcp.DSL.Helpers do
           "text" => Jason.encode!(unquote(data))
         }]
       }}
+    end
+  end
+
+  @doc """
+  Returns raw data directly without MCP content wrapping.
+
+  This bypasses the standard MCP content structure and returns the data
+  as-is. Useful for debugging or special cases where you need direct
+  JSON output without the content array wrapper.
+
+  **Warning**: This breaks MCP compatibility and should only be used
+  for debugging or non-MCP endpoints.
+
+  ## Example
+
+      def handle_call_tool(_conn, "debug_user", %{"id" => id}) do
+        user = MyApp.Users.get!(id)
+        raw(%{id: user.id, name: user.name, email: user.email})
+      end
+
+      # Returns: {:ok, %{"id" => 123, "name" => "John", "email" => "john@example.com"}}
+      # Instead of: {:ok, %{"content" => [%{"type" => "text", "text" => "{\\"id\\":123,...}"}]}}
+  """
+  defmacro raw(data) do
+    quote do
+      {:ok, unquote(data)}
     end
   end
 

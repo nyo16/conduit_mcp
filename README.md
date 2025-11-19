@@ -79,6 +79,7 @@ end
 **Helper functions available:**
 - `text(string)` - Text response
 - `json(data)` - JSON response
+- `raw(data)` - Raw data response (bypasses MCP wrapping, for debugging)
 - `error(message)` or `error(message, code)` - Error response
 - `system(content)`, `user(content)`, `assistant(content)` - Prompt messages
 
