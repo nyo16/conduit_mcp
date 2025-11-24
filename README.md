@@ -2,8 +2,8 @@
 
 An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) specification. Build MCP servers to expose tools, resources, and prompts to LLM applications.
 
-[![Tests](https://img.shields.io/badge/tests-193%20passing-brightgreen)]()
-[![Version](https://img.shields.io/badge/version-0.4.7-blue)]()
+[![Tests](https://img.shields.io/badge/tests-229%20passing-brightgreen)]()
+[![Version](https://img.shields.io/badge/version-0.5.0-blue)]()
 
 ## Features
 
@@ -19,7 +19,7 @@ An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcont
 ```elixir
 def deps do
   [
-    {:conduit_mcp, "~> 0.4.7"}
+    {:conduit_mcp, "~> 0.5.0"}
   ]
 end
 ```
@@ -293,7 +293,7 @@ Add `:prom_ex` to your dependencies:
 ```elixir
 def deps do
   [
-    {:conduit_mcp, "~> 0.4.7"},
+    {:conduit_mcp, "~> 0.5.0"},
     {:prom_ex, "~> 1.11"}
   ]
 end

@@ -5,6 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2025-11-24
+
+### Added
+
+- **Resource URI parameter extraction** - Complete implementation
+  - Extracts parameters from URI templates (e.g., `"user://{id}"` → `"user://123"` → `%{"id" => "123"}`)
+  - Supports multiple parameters (e.g., `"user://{id}/posts/{post_id}"`)
+  - Uses proper regex escaping with placeholder tokens
+  - Returns `{:ok, params}` on match or `:no_match` otherwise
+  - Full implementation in `ConduitMcp.DSL.extract_uri_params/2`
+  - Resolves TODO from previous versions
+
+- **PromEx plugin** for Prometheus monitoring
+  - Optional integration via `{:prom_ex, "~> 1.11", optional: true}`
+  - Conditional compilation (only loads if PromEx available)
+  - 10 production-ready metrics (5 counters + 5 histograms)
+  - Monitors all ConduitMCP operations: requests, tools, resources, prompts, auth
+  - Optimized histogram buckets per operation type
+  - Low cardinality design with string normalization
+  - Comprehensive documentation with PromQL query examples
+  - Alert rule examples included
+  - Zero runtime overhead when not enabled
+
+### Improved
+
+- **Test coverage** expanded significantly
+  - 33 new tests added (21 for core features, 12 for PromEx)
+  - Resource URI parameter extraction: 11 new tests
+  - Prompt functionality: 4 new tests
+  - Tool functionality: 6 new tests
+  - PromEx plugin: 12 new tests
+  - **Total: 229 tests, all passing**
+
+- **Documentation** enhanced
+  - Added comprehensive Prometheus Metrics section to README
+  - 190+ lines of PromEx plugin documentation
+  - PromQL query cookbook with examples
+  - Alert rule templates
+  - Complete metric reference
+
+### Fixed
+
+- Version consistency across all files (updated from 0.4.6 to 0.4.7, now 0.5.0)
+- Removed repository artifacts:
+  - Deleted `erl_crash.dump` (4.9 MB)
+  - Deleted `conduit_mcp-0.4.0.tar` and `conduit_mcp-0.4.6.tar`
+- Updated test badge count (193 → 229 passing)
+
+### Breaking Changes
+
+None - This release is fully backward compatible.
+
 ## [0.4.7] - 2025-11-19
 
 ### Added

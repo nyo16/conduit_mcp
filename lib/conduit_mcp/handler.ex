@@ -224,7 +224,7 @@ defmodule ConduitMcp.Handler do
       "protocolVersion" => Protocol.protocol_version(),
       "serverInfo" => %{
         "name" => "conduit-mcp",
-        "version" => "0.4.7"
+        "version" => "0.5.0"
       },
       "capabilities" => %{
         "tools" => %{},
