@@ -42,6 +42,9 @@ defmodule ConduitMcp.MixProject do
       {:plug, "~> 1.15"},
       {:bandit, "~> 1.5"},
 
+      # Optional: Prometheus metrics via PromEx
+      {:prom_ex, "~> 1.11", optional: true},
+
       # Development
       {:ex_doc, "~> 0.31", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false},

@@ -282,6 +282,121 @@ Example handler:
 )
 ```
 
+## Prometheus Metrics
+
+ConduitMCP includes an optional PromEx plugin for Prometheus monitoring.
+
+### Installation
+
+Add `:prom_ex` to your dependencies:
+
+```elixir
+def deps do
+  [
+    {:conduit_mcp, "~> 0.4.7"},
+    {:prom_ex, "~> 1.11"}
+  ]
+end
+```
+
+### Setup
+
+Add the ConduitMCP plugin to your PromEx configuration:
+
+```elixir
+defmodule MyApp.PromEx do
+  use PromEx, otp_app: :my_app
+
+  @impl true
+  def plugins do
+    [
+      PromEx.Plugins.Application,
+      PromEx.Plugins.Beam,
+      {ConduitMcp.PromEx, otp_app: :my_app}
+    ]
+  end
+
+  @impl true
+  def dashboard_assigns do
+    [
+      datasource_id: "prometheus",
+      default_selected_interval: "30s"
+    ]
+  end
+end
+```
+
+Add to your supervision tree:
+
+```elixir
+def start(_type, _args) do
+  children = [
+    MyApp.PromEx,
+    # ... other children ...
+  ]
+
+  Supervisor.start_link(children, strategy: :one_for_one)
+end
+```
+
+### Metrics Available
+
+All metrics are prefixed with `{otp_app}_conduit_mcp_`:
+
+**Request Metrics:**
+- `request_total{method, status}` - Total MCP requests
+- `request_duration_milliseconds{method, status}` - Request duration distribution
+
+**Tool Metrics:**
+- `tool_execution_total{tool_name, status}` - Total tool executions
+- `tool_duration_milliseconds{tool_name, status}` - Tool execution duration
+
+**Resource Metrics:**
+- `resource_read_total{status}` - Total resource reads
+- `resource_read_duration_milliseconds{status}` - Read duration
+
+**Prompt Metrics:**
+- `prompt_get_total{prompt_name, status}` - Total prompt retrievals
+- `prompt_get_duration_milliseconds{prompt_name, status}` - Retrieval duration
+
+**Auth Metrics:**
+- `auth_verify_total{strategy, status}` - Total auth attempts
+- `auth_verify_duration_milliseconds{strategy, status}` - Verification duration
+
+### Example PromQL Queries
+
+**Request rate by method:**
+```promql
+rate(myapp_conduit_mcp_request_total[5m])
+```
+
+**Error rate percentage:**
+```promql
+100 * (
+  rate(myapp_conduit_mcp_request_total{status="error"}[5m])
+  /
+  rate(myapp_conduit_mcp_request_total[5m])
+)
+```
+
+**P95 tool execution duration:**
+```promql
+histogram_quantile(0.95,
+  rate(myapp_conduit_mcp_tool_duration_milliseconds_bucket[5m])
+)
+```
+
+**Authentication success rate:**
+```promql
+100 * (
+  rate(myapp_conduit_mcp_auth_verify_total{status="ok"}[5m])
+  /
+  rate(myapp_conduit_mcp_auth_verify_total[5m])
+)
+```
+
+See `ConduitMcp.PromEx` module documentation for complete details and alert examples.
+
 ## Documentation
 
 - [API Documentation](https://hexdocs.pm/conduit_mcp)
