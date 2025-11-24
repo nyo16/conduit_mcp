@@ -227,6 +227,68 @@ defmodule ConduitMcp.DSLTest do
       assert error["code"] == -32601
       assert error["message"] =~ "Tool not found"
     end
+
+    test "tool with enum validates allowed values" do
+      conn = %Plug.Conn{}
+
+      # Test with valid enum value
+      {:ok, result} = DSLTestServer.handle_call_tool(conn, "with_enum", %{"action" => "start"})
+      assert result["content"] == [%{"type" => "text", "text" => "Action: start"}]
+
+      # All enum values should work
+      {:ok, result2} = DSLTestServer.handle_call_tool(conn, "with_enum", %{"action" => "stop"})
+      assert result2["content"] == [%{"type" => "text", "text" => "Action: stop"}]
+
+      {:ok, result3} = DSLTestServer.handle_call_tool(conn, "with_enum", %{"action" => "restart"})
+      assert result3["content"] == [%{"type" => "text", "text" => "Action: restart"}]
+    end
+
+    test "tool handles default values when parameter not provided" do
+      conn = %Plug.Conn{}
+
+      # Call tool without providing the parameter that has a default
+      {:ok, result} = DSLTestServer.handle_call_tool(conn, "with_default", %{})
+
+      assert result["content"] == [%{"type" => "text", "text" => "Hello, World!"}]
+    end
+
+    test "tool handles explicit values overriding defaults" do
+      conn = %Plug.Conn{}
+
+      {:ok, result} = DSLTestServer.handle_call_tool(conn, "with_default", %{"name" => "Alice"})
+
+      assert result["content"] == [%{"type" => "text", "text" => "Hello, Alice!"}]
+    end
+
+    test "tool with MFA handler receives correct parameters" do
+      conn = %Plug.Conn{}
+
+      # Test various values
+      {:ok, result1} = DSLTestServer.handle_call_tool(conn, "with_mfa", %{"value" => 5})
+      assert result1["content"] == [%{"type" => "text", "text" => "Result: 10"}]
+
+      {:ok, result2} = DSLTestServer.handle_call_tool(conn, "with_mfa", %{"value" => 100})
+      assert result2["content"] == [%{"type" => "text", "text" => "Result: 200"}]
+    end
+
+    test "tool with function capture works correctly" do
+      conn = %Plug.Conn{}
+
+      {:ok, result} = DSLTestServer.handle_call_tool(conn, "with_capture", %{"value" => 7})
+      assert result["content"] == [%{"type" => "text", "text" => "Result: 21"}]
+    end
+
+    test "tool with boolean handles both true and false" do
+      conn = %Plug.Conn{}
+
+      # Test with true
+      {:ok, result1} = DSLTestServer.handle_call_tool(conn, "with_boolean", %{"enabled" => true, "count" => 10})
+      assert result1["content"] == [%{"type" => "text", "text" => "Enabled: true, Count: 10"}]
+
+      # Test with false
+      {:ok, result2} = DSLTestServer.handle_call_tool(conn, "with_boolean", %{"enabled" => false, "count" => 0})
+      assert result2["content"] == [%{"type" => "text", "text" => "Enabled: false, Count: 0"}]
+    end
   end
 
   describe "DSL prompt definitions" do
@@ -269,6 +331,61 @@ defmodule ConduitMcp.DSLTest do
       # Should use default language "elixir"
       assert Enum.at(messages, 1)["content"]["text"] =~ "elixir"
     end
+
+    test "prompt returns properly formatted messages" do
+      conn = %Plug.Conn{}
+
+      {:ok, result} = DSLTestServer.handle_get_prompt(conn, "code_review", %{
+        "code" => "function test() { return true; }",
+        "language" => "javascript"
+      })
+
+      messages = result["messages"]
+
+      # Verify message structure
+      assert length(messages) == 2
+
+      # System message
+      system_msg = Enum.at(messages, 0)
+      assert system_msg["role"] == "system"
+      assert system_msg["content"]["type"] == "text"
+      assert system_msg["content"]["text"] == "You are an expert code reviewer"
+
+      # User message
+      user_msg = Enum.at(messages, 1)
+      assert user_msg["role"] == "user"
+      assert user_msg["content"]["type"] == "text"
+      assert user_msg["content"]["text"] =~ "javascript"
+      assert user_msg["content"]["text"] =~ "function test()"
+    end
+
+    test "prompt handles missing optional arguments" do
+      conn = %Plug.Conn{}
+
+      {:ok, result} = DSLTestServer.handle_get_prompt(conn, "simple_prompt", %{})
+
+      messages = result["messages"]
+      # Should use default topic "Elixir"
+      assert hd(messages)["content"]["text"] =~ "Elixir"
+    end
+
+    test "prompt handles provided optional arguments" do
+      conn = %Plug.Conn{}
+
+      {:ok, result} = DSLTestServer.handle_get_prompt(conn, "simple_prompt", %{"topic" => "Phoenix"})
+
+      messages = result["messages"]
+      assert hd(messages)["content"]["text"] =~ "Phoenix"
+    end
+
+    test "returns error for unknown prompt" do
+      conn = %Plug.Conn{}
+
+      {:error, error} = DSLTestServer.handle_get_prompt(conn, "nonexistent", %{})
+
+      assert error["code"] == -32601
+      assert error["message"] =~ "Prompt not found"
+    end
   end
 
   describe "DSL resource definitions" do
@@ -309,6 +426,44 @@ defmodule ConduitMcp.DSLTest do
       {:ok, result} = DSLTestServer.handle_read_resource(conn, "static://readme")
 
       assert result["content"] == [%{"type" => "text", "text" => "# README\n\nThis is a test README."}]
+    end
+
+    test "extracts URI parameters from actual URIs" do
+      conn = %Plug.Conn{}
+
+      # Test with actual user ID
+      {:ok, result} = DSLTestServer.handle_read_resource(conn, "user://123")
+
+      content = hd(result["content"])
+      assert content["type"] == "text"
+
+      # Verify parameter was extracted and used
+      {:ok, data} = Jason.decode(content["text"])
+      assert data["id"] == "123"
+      assert data["name"] == "User 123"
+      assert data["email"] == "user123@example.com"
+    end
+
+    test "extracts parameters from different URIs" do
+      conn = %Plug.Conn{}
+
+      # Test with different ID
+      {:ok, result} = DSLTestServer.handle_read_resource(conn, "user://456")
+
+      content = hd(result["content"])
+      {:ok, data} = Jason.decode(content["text"])
+      assert data["id"] == "456"
+      assert data["name"] == "User 456"
+    end
+
+    test "returns error for non-matching URI" do
+      conn = %Plug.Conn{}
+
+      # Test with URI that doesn't match any template
+      {:error, error} = DSLTestServer.handle_read_resource(conn, "unknown://resource")
+
+      assert error["code"] == -32601
+      assert error["message"] =~ "Resource not found"
     end
   end
 
@@ -665,6 +820,69 @@ defmodule ConduitMcp.DSLTest do
       assert "start" in enum_values
       assert "stop" in enum_values
       assert "restart" in enum_values
+    end
+  end
+
+  describe "URI parameter extraction" do
+    test "extracts single parameter from URI" do
+      template = "user://{id}"
+      uri = "user://123"
+
+      assert {:ok, %{"id" => "123"}} = ConduitMcp.DSL.extract_uri_params(template, uri)
+    end
+
+    test "extracts multiple parameters from URI" do
+      template = "user://{user_id}/posts/{post_id}"
+      uri = "user://123/posts/456"
+
+      assert {:ok, params} = ConduitMcp.DSL.extract_uri_params(template, uri)
+      assert params["user_id"] == "123"
+      assert params["post_id"] == "456"
+    end
+
+    test "matches template against itself" do
+      template = "user://{id}"
+
+      # When called with template itself, should extract placeholder name
+      assert {:ok, %{"id" => "{id}"}} = ConduitMcp.DSL.extract_uri_params(template, template)
+    end
+
+    test "returns no_match for non-matching URI" do
+      template = "user://{id}"
+      uri = "post://123"
+
+      assert :no_match = ConduitMcp.DSL.extract_uri_params(template, uri)
+    end
+
+    test "handles URIs with special characters in template" do
+      template = "file://path/{filename}.txt"
+      uri = "file://path/document.txt"
+
+      assert {:ok, %{"filename" => "document"}} = ConduitMcp.DSL.extract_uri_params(template, uri)
+    end
+
+    test "handles complex URI patterns" do
+      template = "api://v1/users/{userId}/projects/{projectId}/tasks/{taskId}"
+      uri = "api://v1/users/u123/projects/p456/tasks/t789"
+
+      assert {:ok, params} = ConduitMcp.DSL.extract_uri_params(template, uri)
+      assert params["userId"] == "u123"
+      assert params["projectId"] == "p456"
+      assert params["taskId"] == "t789"
+    end
+
+    test "returns no_match when path structure differs" do
+      template = "user://{id}/posts/{post_id}"
+      uri = "user://123/comments/456"
+
+      assert :no_match = ConduitMcp.DSL.extract_uri_params(template, uri)
+    end
+
+    test "handles parameters with underscores and numbers" do
+      template = "resource://{resource_id_123}"
+      uri = "resource://abc-def-456"
+
+      assert {:ok, %{"resource_id_123" => "abc-def-456"}} = ConduitMcp.DSL.extract_uri_params(template, uri)
     end
   end
 end

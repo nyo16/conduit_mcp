@@ -642,8 +642,8 @@ defmodule ConduitMcp.DSL do
       # Inject generated resource handler clauses
       unquote(resource_clauses)
 
-      # Catch-all for unknown resources
-      if unquote(length(resources)) > 0 do
+      # Catch-all for unknown resources (only if no resources with handlers were generated)
+      if unquote(length(resources)) > 0 and unquote(Enum.empty?(resource_clauses)) do
         def handle_read_resource(_conn, uri) do
           {:error, %{"code" => -32601, "message" => "Resource not found: #{uri}"}}
         end
@@ -707,31 +707,96 @@ defmodule ConduitMcp.DSL do
 
   # Generate resource handler clauses outside quote block
   defp generate_resource_clauses(resources) do
-    Enum.reverse(resources)
-    |> Enum.map(fn %{uri: res_uri, handler: handler} ->
-      case handler do
-        {:fn_ast, handler_ast} ->
-          quote do
-            def handle_read_resource(_conn, unquote(res_uri)) do
-              # Extract params from URI - simplified for now
-              params = %{}  # TODO: Implement URI param extraction in future version
-              unquote(handler_ast).(_conn, params, %{})
-            end
-          end
+    # Generate a single comprehensive handler that tries all resources
+    resources_with_handlers = resources
+    |> Enum.reverse()
+    |> Enum.filter(fn %{handler: handler} -> handler != nil end)
 
-        {:mfa, {mod, fun}} ->
-          quote do
-            def handle_read_resource(_conn, unquote(res_uri)) do
-              params = %{}  # TODO: Implement URI param extraction in future version
-              apply(unquote(mod), unquote(fun), [_conn, params, %{}])
-            end
-          end
+    if Enum.empty?(resources_with_handlers) do
+      []
+    else
+      # Generate a single function that tries each resource
+      template_clauses = Enum.map(resources_with_handlers, fn %{uri: res_uri, handler: handler} ->
+        case handler do
+          {:fn_ast, handler_ast} ->
+            quote do
+              case ConduitMcp.DSL.extract_uri_params(unquote(res_uri), uri) do
+                {:ok, params} ->
+                  unquote(handler_ast).(conn, params, %{})
 
-        nil ->
-          # Resource without read handler - just list it
-          nil
-      end
-    end)
-    |> Enum.reject(&is_nil/1)
+                :no_match ->
+                  nil
+              end
+            end
+
+          {:mfa, {mod, fun}} ->
+            quote do
+              case ConduitMcp.DSL.extract_uri_params(unquote(res_uri), uri) do
+                {:ok, params} ->
+                  apply(unquote(mod), unquote(fun), [conn, params, %{}])
+
+                :no_match ->
+                  nil
+              end
+            end
+        end
+      end)
+
+      # Create a function that tries each template in sequence
+      [quote do
+        def handle_read_resource(conn, uri) do
+          # Try each resource template in order
+          result = unquote(template_clauses)
+          |> Enum.find_value(fn clause_result ->
+            case clause_result do
+              nil -> false
+              other -> other
+            end
+          end)
+
+          case result do
+            nil ->
+              # No match found, fall through to catch-all
+              {:error, %{"code" => -32601, "message" => "Resource not found: #{uri}"}}
+
+            result ->
+              result
+          end
+        end
+      end]
+    end
+  end
+
+  @doc false
+  def extract_uri_params(template, uri) do
+    # Parse template to extract parameter names and create regex pattern
+    # Template: "user://{id}/posts/{post_id}"
+    # URI: "user://123/posts/456"
+    # Result: %{"id" => "123", "post_id" => "456"}
+
+    # Extract parameter names first (before escaping)
+    param_names = Regex.scan(~r/\{([^}]+)\}/, template)
+    |> Enum.map(fn [_full, name] -> name end)
+
+    # Replace {param} with a placeholder token before escaping
+    template_with_tokens = Regex.replace(~r/\{[^}]+\}/, template, "<<<PARAM>>>")
+
+    # Escape special regex characters
+    escaped_template = Regex.escape(template_with_tokens)
+
+    # Replace placeholder tokens with capture groups
+    pattern = String.replace(escaped_template, "<<<PARAM>>>", "([^/]+)")
+
+    # Try to match the URI against the pattern
+    case Regex.run(~r/^#{pattern}$/, uri) do
+      nil ->
+        :no_match
+
+      [_full | captured_values] ->
+        params = Enum.zip(param_names, captured_values)
+        |> Enum.into(%{})
+
+        {:ok, params}
+    end
   end
 end

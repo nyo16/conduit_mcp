@@ -3,7 +3,7 @@
 An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) specification. Build MCP servers to expose tools, resources, and prompts to LLM applications.
 
 [![Tests](https://img.shields.io/badge/tests-193%20passing-brightgreen)]()
-[![Version](https://img.shields.io/badge/version-0.4.6-blue)]()
+[![Version](https://img.shields.io/badge/version-0.4.7-blue)]()
 
 ## Features
 
@@ -19,7 +19,7 @@ An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcont
 ```elixir
 def deps do
   [
-    {:conduit_mcp, "~> 0.4.6"}
+    {:conduit_mcp, "~> 0.4.7"}
   ]
 end
 ```
