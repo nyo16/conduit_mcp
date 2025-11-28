@@ -1,3 +1,5 @@
+![ConduitMCP](images/header.jpeg)
+
 # ConduitMCP
 
 An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) specification. Build MCP servers to expose tools, resources, and prompts to LLM applications.
