@@ -5,11 +5,12 @@
 An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) specification. Build MCP servers to expose tools, resources, and prompts to LLM applications.
 
 [![Tests](https://img.shields.io/badge/tests-229%20passing-brightgreen)]()
-[![Version](https://img.shields.io/badge/version-0.5.0-blue)]()
+[![Version](https://img.shields.io/badge/version-0.6.0-blue)]()
 
 ## Features
 
 - **Clean DSL** - Declarative tool definitions with automatic schema generation
+- **Runtime Validation** - Parameter validation with NimbleOptions, type coercion, and custom constraints
 - **Stateless Architecture** - Pure functions, no processes, maximum concurrency
 - **Flexible Authentication** - Bearer tokens, API keys, custom verification
 - **Full MCP Spec** - Tools, resources, prompts, and all MCP 2025-06-18 features
@@ -21,7 +22,7 @@ An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcont
 ```elixir
 def deps do
   [
-    {:conduit_mcp, "~> 0.5.0"}
+    {:conduit_mcp, "~> 0.6.0"}
   ]
 end
 ```
@@ -172,6 +173,109 @@ defmodule MyAppWeb.Router do
   end
 end
 ```
+
+## Parameter Validation
+
+ConduitMCP v0.6.0+ includes comprehensive runtime parameter validation using [NimbleOptions](https://hexdocs.pm/nimble_options). Validation includes type checking, constraints, and automatic type coercion.
+
+### Enhanced Parameter Options
+
+```elixir
+tool "create_user", "Create a new user" do
+  # Basic types with constraints
+  param :name, :string, "Full name", required: true, min_length: 2, max_length: 50
+  param :age, :integer, "Age", min: 0, max: 150
+  param :email, :string, "Email address", validator: &ConduitMcp.Validation.Validators.email/1
+
+  # Enum validation
+  param :role, :string, "User role", enum: ["admin", "user", "guest"], default: "user"
+
+  # Numeric constraints
+  param :score, :number, "Performance score", min: 0.0, max: 100.0, default: 50.0
+
+  handle &UserService.create/2
+end
+```
+
+### Type Coercion
+
+Automatic type conversion when `type_coercion: true` (enabled by default):
+
+```elixir
+# Client sends: {"age": "25", "active": "true", "score": "85.5"}
+# Server receives: %{"age" => 25, "active" => true, "score" => 85.5}
+```
+
+### Custom Validators
+
+Use built-in validators or create your own:
+
+```elixir
+# Built-in validators
+param :email, :string, "Email", validator: &ConduitMcp.Validation.Validators.email/1
+param :url, :string, "Website", validator: &ConduitMcp.Validation.Validators.url/1
+
+# Custom validator function
+param :username, :string, "Username", validator: fn username ->
+  String.match?(username, ~r/^[a-zA-Z0-9_]{3,20}$/)
+end
+
+# Module function validator
+param :priority, :string, "Priority", validator: {MyApp.Validators, :valid_priority?}
+```
+
+### Validation Configuration
+
+Configure validation behavior in your application config:
+
+```elixir
+# config/config.exs
+config :conduit_mcp, :validation,
+  runtime_validation: true,    # Enable validation (default: true)
+  strict_mode: true,           # Fail on validation errors (default: true)
+  type_coercion: true,         # Auto-convert types (default: true)
+  log_validation_errors: false # Log failures (default: false)
+```
+
+### Error Responses
+
+Validation failures return detailed error information:
+
+```json
+{
+  "error": {
+    "code": -32602,
+    "message": "Parameter validation failed",
+    "data": {
+      "errors": [
+        {
+          "parameter": "age",
+          "value": -5,
+          "message": "must be greater than or equal to 0"
+        },
+        {
+          "parameter": "email",
+          "value": "invalid-email",
+          "message": "must be a valid email address"
+        }
+      ]
+    }
+  }
+}
+```
+
+### Supported Constraints
+
+| Constraint | Types | Description | Example |
+|------------|-------|-------------|---------|
+| `required: true` | All | Parameter must be present | `required: true` |
+| `min: N` | number, integer | Minimum value (inclusive) | `min: 0` |
+| `max: N` | number, integer | Maximum value (inclusive) | `max: 100` |
+| `min_length: N` | string | Minimum string length | `min_length: 3` |
+| `max_length: N` | string | Maximum string length | `max_length: 255` |
+| `enum: [...]` | All | Value must be in list | `enum: ["red", "green", "blue"]` |
+| `default: value` | All | Default if not provided | `default: "guest"` |
+| `validator: fun` | All | Custom validation function | `validator: &valid_email?/1` |
 
 ## Authentication
 
