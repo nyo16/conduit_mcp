@@ -248,7 +248,8 @@ defmodule ConduitMcp.Validation.SchemaConverter do
 
   defp parse_required_error(message, _original_params) do
     # Extract required field name from error message
-    case Regex.run(~r/required option (\w+) not found/, message) do
+    # NimbleOptions format: "required :name option not found"
+    case Regex.run(~r/required :(\w+) option not found/, message) do
       [_, field_name] ->
         {:ok, [%{
           parameter: field_name,

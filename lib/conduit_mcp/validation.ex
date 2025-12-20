@@ -49,14 +49,38 @@ defmodule ConduitMcp.Validation do
     if validation_enabled?() do
       case get_tool_validation_schema(server_module, tool_name) do
         {:ok, schema} ->
-          validate_with_schema(schema, params, tool_name)
+          # Add telemetry for validation attempts
+          :telemetry.execute([:conduit_mcp, :validation, :started], %{}, %{
+            tool: tool_name,
+            server: server_module
+          })
+
+          result = validate_with_schema(schema, params, tool_name)
+
+          # Add telemetry for validation results
+          case result do
+            {:ok, _} ->
+              :telemetry.execute([:conduit_mcp, :validation, :success], %{}, %{
+                tool: tool_name,
+                server: server_module
+              })
+            {:error, errors} ->
+              :telemetry.execute([:conduit_mcp, :validation, :failed], %{error_count: length(errors)}, %{
+                tool: tool_name,
+                server: server_module,
+                errors: errors
+              })
+          end
+
+          result
 
         {:error, :tool_not_found} ->
-          {:error, [%{
+          error = [%{
             parameter: nil,
             value: nil,
             message: "Tool '#{tool_name}' not found"
-          }]}
+          }]
+          {:error, format_validation_errors(error)}
 
         {:error, :no_validation_schema} ->
           # Server doesn't have validation schemas - skip validation
@@ -135,10 +159,6 @@ defmodule ConduitMcp.Validation do
     |> Keyword.get(:runtime_validation, true)
   end
 
-  defp strict_mode? do
-    Application.get_env(:conduit_mcp, :validation, [])
-    |> Keyword.get(:strict_mode, true)
-  end
 
   defp type_coercion_enabled? do
     Application.get_env(:conduit_mcp, :validation, [])
@@ -181,7 +201,8 @@ defmodule ConduitMcp.Validation do
     # First, handle custom validations that NimbleOptions doesn't support directly
     case validate_custom_constraints(atom_params, schema) do
       {:error, errors} ->
-        {:error, errors}
+        formatted_errors = format_validation_errors(errors)
+        {:error, formatted_errors}
 
       {:ok, preprocessed_params} ->
         # Apply type coercion if enabled
@@ -242,7 +263,9 @@ defmodule ConduitMcp.Validation do
 
   defp format_nimble_options_error(%NimbleOptions.ValidationError{} = error, original_params) do
     # Use the detailed error formatter from SchemaConverter
-    SchemaConverter.format_detailed_errors(error, original_params)
+    raw_errors = SchemaConverter.format_detailed_errors(error, original_params)
+    # Format to use string keys like custom constraint errors
+    format_validation_errors(raw_errors)
   end
 
   defp format_single_error(%{parameter: param, value: value, message: message}) do
