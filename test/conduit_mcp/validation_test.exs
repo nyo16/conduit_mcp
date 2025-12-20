@@ -107,7 +107,7 @@ defmodule ConduitMcp.ValidationTest do
     test "validate_tool_params/3 with type coercion" do
       # String numbers should be converted to integers/floats by NimbleOptions
       params = %{"count" => "10", "score" => "85.5"}
-      assert {:ok, validated_params} = Validation.validate_tool_params(TestValidationServer, "complex_tool", params)
+      assert {:ok, _validated_params} = Validation.validate_tool_params(TestValidationServer, "complex_tool", params)
       # NimbleOptions should handle type coercion
     end
 
