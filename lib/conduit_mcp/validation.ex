@@ -49,7 +49,30 @@ defmodule ConduitMcp.Validation do
     if validation_enabled?() do
       case get_tool_validation_schema(server_module, tool_name) do
         {:ok, schema} ->
-          validate_with_schema(schema, params, tool_name)
+          # Add telemetry for validation attempts
+          :telemetry.execute([:conduit_mcp, :validation, :started], %{}, %{
+            tool: tool_name,
+            server: server_module
+          })
+
+          result = validate_with_schema(schema, params, tool_name)
+
+          # Add telemetry for validation results
+          case result do
+            {:ok, _} ->
+              :telemetry.execute([:conduit_mcp, :validation, :success], %{}, %{
+                tool: tool_name,
+                server: server_module
+              })
+            {:error, errors} ->
+              :telemetry.execute([:conduit_mcp, :validation, :failed], %{error_count: length(errors)}, %{
+                tool: tool_name,
+                server: server_module,
+                errors: errors
+              })
+          end
+
+          result
 
         {:error, :tool_not_found} ->
           {:error, [%{

@@ -11,7 +11,7 @@ defmodule ConduitMcp.ValidationTest do
       def __validation_schema_for_tool__("simple_tool") do
         [
           name: [type: :string, required: true],
-          age: [type: :integer, min: 0, max: 150]
+          age: [type: :integer, __min_value__: 0, __max_value__: 150]
         ]
       end
 
@@ -24,10 +24,10 @@ defmodule ConduitMcp.ValidationTest do
 
       def __validation_schema_for_tool__("complex_tool") do
         [
-          count: [type: :integer, min: 1, max: 100, required: true],
-          score: [type: :float, min: 0.0, max: 100.0, default: 50.0],
+          count: [type: :integer, __min_value__: 1, __max_value__: 100, required: true],
+          score: [type: :float, __min_value__: 0.0, __max_value__: 100.0, default: 50.0],
           email: [type: :string, validator: &Validators.email/1],
-          tags: [type: {:list, :string}, max_length: 5]
+          tags: [type: {:list, :string}, __max_length__: 5]
         ]
       end
 
