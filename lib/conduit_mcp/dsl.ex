@@ -130,18 +130,41 @@ defmodule ConduitMcp.DSL do
   @doc """
   Defines a parameter for a tool.
 
-  ## Options
+  ## Basic Options
 
   - `:required` - Mark parameter as required (default: false)
   - `:enum` - List of allowed values
   - `:default` - Default value if not provided
 
+  ## Enhanced Validation Options (NimbleOptions)
+
+  - `:min` - Minimum value for numbers (inclusive)
+  - `:max` - Maximum value for numbers (inclusive)
+  - `:min_length` - Minimum string length
+  - `:max_length` - Maximum string length
+  - `:validator` - Custom validation function `fn(value) -> boolean()`
+
   ## Examples
 
+      # Basic validation
       param :name, :string, "User name", required: true
-      param :age, :number, "Age in years"
       param :role, :string, "User role", enum: ["admin", "user", "guest"]
       param :active, :boolean, "Active status", default: true
+
+      # Enhanced validation
+      param :age, :integer, "Age in years", min: 0, max: 150, required: true
+      param :username, :string, "Username", min_length: 3, max_length: 30
+      param :score, :number, "Score", min: 0.0, max: 100.0, default: 50.0
+      param :email, :string, "Email", validator: &ConduitMcp.Validation.Validators.email/1
+
+      # Complex validation with multiple constraints
+      param :priority, :string, "Task priority",
+        required: true,
+        enum: ["low", "medium", "high", "critical"],
+        validator: &MyApp.validate_priority/1
+
+      # Array with validation
+      param :tags, {:array, :string}, "Tags", max_length: 10
   """
   defmacro param(name, type, description \\ nil, opts \\ [])
 
@@ -594,6 +617,23 @@ defmodule ConduitMcp.DSL do
     prompt_schemas = prompts |> Enum.reverse() |> Enum.map(&ConduitMcp.DSL.SchemaBuilder.build_prompt_schema/1)
     resource_schemas = resources |> Enum.reverse() |> Enum.map(&ConduitMcp.DSL.SchemaBuilder.build_resource_schema/1)
 
+    # Generate validation schema lookup functions
+    validation_lookup_functions = ConduitMcp.DSL.SchemaBuilder.generate_validation_lookup_functions(
+      tools |> Enum.reverse(),
+      prompts |> Enum.reverse()
+    )
+
+    # Validate all schemas at compile time
+    case ConduitMcp.DSL.SchemaBuilder.validate_all_schemas(
+      tools |> Enum.reverse(),
+      prompts |> Enum.reverse()
+    ) do
+      :ok -> :ok
+      {:error, errors} ->
+        require Logger
+        Logger.warning("Validation schema compilation warnings: #{inspect(errors)}")
+    end
+
     tool_clauses = generate_tool_clauses(tools)
     prompt_clauses = generate_prompt_clauses(prompts)
     resource_clauses = generate_resource_clauses(resources)
@@ -603,6 +643,9 @@ defmodule ConduitMcp.DSL do
       @tools unquote(Macro.escape(tool_schemas))
       @prompts unquote(Macro.escape(prompt_schemas))
       @resources unquote(Macro.escape(resource_schemas))
+
+      # Inject validation schema lookup functions
+      unquote(validation_lookup_functions)
 
       # Always generate handle_list_tools (empty list if no tools)
       def handle_list_tools(_conn) do

@@ -1,7 +1,7 @@
 defmodule ConduitMcp.MixProject do
   use Mix.Project
 
-  @version "0.5.0"
+  @version "0.6.0"
   @source_url "https://github.com/nyo16/conduit_mcp"
 
   def project do
@@ -16,8 +16,13 @@ defmodule ConduitMcp.MixProject do
       docs: docs(),
       name: "ConduitMCP",
       source_url: @source_url,
-      test_coverage: [tool: ExCoveralls],
-      preferred_cli_env: [
+      test_coverage: [tool: ExCoveralls]
+    ]
+  end
+
+  def cli do
+    [
+      preferred_envs: [
         coveralls: :test,
         "coveralls.detail": :test,
         "coveralls.post": :test,
@@ -41,6 +46,7 @@ defmodule ConduitMcp.MixProject do
       {:jason, "~> 1.4"},
       {:plug, "~> 1.15"},
       {:bandit, "~> 1.5"},
+      {:nimble_options, "1.1.1"},
 
       # Optional: Prometheus metrics via PromEx
       {:prom_ex, "~> 1.11", optional: true},

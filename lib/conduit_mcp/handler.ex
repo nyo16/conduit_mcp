@@ -79,16 +79,27 @@ defmodule ConduitMcp.Handler do
         start_time = System.monotonic_time()
 
         result =
-          case server_module.handle_call_tool(conn, tool_name, tool_params) do
-            {:ok, tool_result} when is_map(tool_result) ->
-              Protocol.success_response(id, tool_result)
+          case ConduitMcp.Validation.validate_tool_params(server_module, tool_name, tool_params) do
+            {:ok, validated_params} ->
+              case server_module.handle_call_tool(conn, tool_name, validated_params) do
+                {:ok, tool_result} when is_map(tool_result) ->
+                  Protocol.success_response(id, tool_result)
 
-            {:error, error} ->
-              Protocol.error_response(id, error["code"] || -32000, error["message"] || "Tool execution failed")
+                {:error, error} ->
+                  Protocol.error_response(id, error["code"] || -32000, error["message"] || "Tool execution failed")
 
-            other ->
-              Logger.error("Unexpected result from handle_call_tool: #{inspect(other)}")
-              Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
+                other ->
+                  Logger.error("Unexpected result from handle_call_tool: #{inspect(other)}")
+                  Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
+              end
+
+            {:error, validation_errors} ->
+              Protocol.error_response(
+                id,
+                -32602,
+                "Parameter validation failed",
+                %{"errors" => ConduitMcp.Validation.format_validation_errors(validation_errors)}
+              )
           end
 
         duration = System.monotonic_time() - start_time
@@ -162,16 +173,27 @@ defmodule ConduitMcp.Handler do
         start_time = System.monotonic_time()
 
         result =
-          case server_module.handle_get_prompt(conn, prompt_name, prompt_args) do
-            {:ok, prompt_result} when is_map(prompt_result) ->
-              Protocol.success_response(id, prompt_result)
+          case ConduitMcp.Validation.validate_prompt_args(server_module, prompt_name, prompt_args) do
+            {:ok, validated_args} ->
+              case server_module.handle_get_prompt(conn, prompt_name, validated_args) do
+                {:ok, prompt_result} when is_map(prompt_result) ->
+                  Protocol.success_response(id, prompt_result)
 
-            {:error, error} ->
-              Protocol.error_response(id, error["code"] || -32000, error["message"] || "Prompt get failed")
+                {:error, error} ->
+                  Protocol.error_response(id, error["code"] || -32000, error["message"] || "Prompt get failed")
 
-            other ->
-              Logger.error("Unexpected result from handle_get_prompt: #{inspect(other)}")
-              Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
+                other ->
+                  Logger.error("Unexpected result from handle_get_prompt: #{inspect(other)}")
+                  Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
+              end
+
+            {:error, validation_errors} ->
+              Protocol.error_response(
+                id,
+                -32602,
+                "Argument validation failed",
+                %{"errors" => ConduitMcp.Validation.format_validation_errors(validation_errors)}
+              )
           end
 
         duration = System.monotonic_time() - start_time

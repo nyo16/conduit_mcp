@@ -1,10 +1,23 @@
 defmodule ConduitMcp.DSL.SchemaBuilder do
   @moduledoc """
-  Builds JSON Schema from DSL parameter definitions.
+  Builds JSON Schema and NimbleOptions schemas from DSL parameter definitions.
 
   This module converts the accumulated parameter definitions from the DSL
-  into proper JSON Schema format for MCP tool input schemas.
+  into both JSON Schema format (for MCP client validation) and NimbleOptions
+  schemas (for runtime server-side validation).
+
+  ## Dual Schema Generation
+
+  The module now generates two types of schemas:
+
+  1. **JSON Schema** - Used by MCP clients for input validation and introspection
+  2. **NimbleOptions Schema** - Used for runtime server-side parameter validation
+
+  Both schemas are generated from the same DSL parameter definitions but serve
+  different purposes in the validation pipeline.
   """
+
+  alias ConduitMcp.Validation.SchemaConverter
 
   @doc """
   Builds a complete tool schema from DSL definition.
@@ -208,4 +221,207 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
   defp atom_to_json_type(:array), do: "array"
   defp atom_to_json_type(:null), do: "null"
   defp atom_to_json_type(other), do: to_string(other)
+
+  # ======= DUAL SCHEMA GENERATION =======
+
+  @doc """
+  Builds both JSON Schema and NimbleOptions validation schema from tool definition.
+
+  Returns a map containing both schema types for comprehensive validation.
+
+  ## Examples
+
+      iex> tool_def = %{name: "greet", params: [...]}
+      iex> ConduitMcp.DSL.SchemaBuilder.build_dual_schemas(tool_def)
+      %{
+        json_schema: %{"name" => "greet", "inputSchema" => %{...}},
+        nimble_options_schema: [name: [type: :string, required: true], ...]
+      }
+
+  """
+  def build_dual_schemas(tool_def) do
+    %{
+      json_schema: build_tool_schema(tool_def),
+      nimble_options_schema: build_nimble_options_schema(tool_def)
+    }
+  end
+
+  @doc """
+  Builds dual schemas for prompt definitions.
+  """
+  def build_dual_prompt_schemas(prompt_def) do
+    %{
+      json_schema: build_prompt_schema(prompt_def),
+      nimble_options_schema: build_nimble_options_prompt_schema(prompt_def)
+    }
+  end
+
+  @doc """
+  Builds a NimbleOptions validation schema from tool definition.
+
+  Converts DSL parameter definitions into a NimbleOptions schema format
+  that can be used for runtime parameter validation with type coercion
+  and advanced constraints.
+
+  ## Examples
+
+      iex> tool_def = %{
+      ...>   name: "calculate",
+      ...>   params: [
+      ...>     %{name: :a, type: :integer, opts: [required: true, min: 0]},
+      ...>     %{name: :b, type: :integer, opts: [required: true, min: 0]}
+      ...>   ]
+      ...> }
+      iex> ConduitMcp.DSL.SchemaBuilder.build_nimble_options_schema(tool_def)
+      [
+        a: [type: :integer, required: true, min: 0],
+        b: [type: :integer, required: true, min: 0]
+      ]
+
+  """
+  def build_nimble_options_schema(%{params: params}) do
+    SchemaConverter.dsl_params_to_nimble_options(params)
+  end
+
+  @doc """
+  Builds a NimbleOptions validation schema for prompt arguments.
+  """
+  def build_nimble_options_prompt_schema(%{args: args}) do
+    SchemaConverter.dsl_params_to_nimble_options(args)
+  end
+
+  @doc """
+  Validates that a NimbleOptions schema is properly formed.
+
+  This is used during compile time to ensure the generated schema
+  is valid for NimbleOptions validation.
+  """
+  def validate_nimble_options_schema(schema) do
+    SchemaConverter.validate_schema(schema)
+  end
+
+  @doc """
+  Compiles validation schemas for all tools in a server module.
+
+  This function is used during the `@before_compile` hook to generate
+  validation schemas for all tools defined in the DSL.
+
+  ## Examples
+
+      iex> tools = [
+      ...>   %{name: "greet", params: [...]},
+      ...>   %{name: "calc", params: [...]}
+      ...> ]
+      iex> ConduitMcp.DSL.SchemaBuilder.compile_tool_validation_schemas(tools)
+      %{
+        "greet" => [name: [type: :string, required: true], ...],
+        "calc" => [a: [type: :integer, min: 0], ...]
+      }
+
+  """
+  def compile_tool_validation_schemas(tools) when is_list(tools) do
+    Enum.reduce(tools, %{}, fn tool, acc ->
+      tool_name = to_string(tool.name)
+      validation_schema = build_nimble_options_schema(tool)
+      Map.put(acc, tool_name, validation_schema)
+    end)
+  end
+
+  @doc """
+  Compiles validation schemas for all prompts in a server module.
+  """
+  def compile_prompt_validation_schemas(prompts) when is_list(prompts) do
+    Enum.reduce(prompts, %{}, fn prompt, acc ->
+      prompt_name = to_string(prompt.name)
+      validation_schema = build_nimble_options_prompt_schema(prompt)
+      Map.put(acc, prompt_name, validation_schema)
+    end)
+  end
+
+  @doc """
+  Generates compile-time validation schema lookup functions.
+
+  This creates the AST for functions that will be injected into the
+  server module to provide fast schema lookups at runtime.
+
+  Returns quoted AST that defines:
+  - `__validation_schema_for_tool__/1`
+  - `__validation_schema_for_prompt__/1`
+  """
+  def generate_validation_lookup_functions(tools, prompts) do
+    tool_schemas = compile_tool_validation_schemas(tools)
+    prompt_schemas = compile_prompt_validation_schemas(prompts)
+
+    quote do
+      @doc false
+      def __validation_schema_for_tool__(tool_name) do
+        case unquote(Macro.escape(tool_schemas)) do
+          %{^tool_name => schema} -> schema
+          _ -> nil
+        end
+      end
+
+      @doc false
+      def __validation_schema_for_prompt__(prompt_name) do
+        case unquote(Macro.escape(prompt_schemas)) do
+          %{^prompt_name => schema} -> schema
+          _ -> nil
+        end
+      end
+
+      @doc false
+      def __all_validation_schemas__ do
+        %{
+          tools: unquote(Macro.escape(tool_schemas)),
+          prompts: unquote(Macro.escape(prompt_schemas))
+        }
+      end
+    end
+  end
+
+  @doc """
+  Validates all schemas in a tool/prompt definition list.
+
+  Used during compile time to catch schema generation errors early.
+  Returns `:ok` if all schemas are valid, or `{:error, details}` if any are invalid.
+  """
+  def validate_all_schemas(tools, prompts) do
+    tool_results = Enum.map(tools, &validate_tool_schema/1)
+    prompt_results = Enum.map(prompts, &validate_prompt_schema/1)
+
+    all_results = tool_results ++ prompt_results
+    errors = Enum.filter(all_results, fn result -> elem(result, 0) == :error end)
+
+    if errors == [] do
+      :ok
+    else
+      {:error, errors}
+    end
+  end
+
+  # Private helpers for schema validation
+
+  defp validate_tool_schema(tool) do
+    try do
+      nimble_schema = build_nimble_options_schema(tool)
+      case validate_nimble_options_schema(nimble_schema) do
+        :ok -> {:ok, tool.name}
+        {:error, reason} -> {:error, {tool.name, reason}}
+      end
+    rescue
+      error -> {:error, {tool.name, Exception.message(error)}}
+    end
+  end
+
+  defp validate_prompt_schema(prompt) do
+    try do
+      nimble_schema = build_nimble_options_prompt_schema(prompt)
+      case validate_nimble_options_schema(nimble_schema) do
+        :ok -> {:ok, prompt.name}
+        {:error, reason} -> {:error, {prompt.name, reason}}
+      end
+    rescue
+      error -> {:error, {prompt.name, Exception.message(error)}}
+    end
+  end
 end
