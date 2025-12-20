@@ -5,7 +5,7 @@
 An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) specification. Build MCP servers to expose tools, resources, and prompts to LLM applications.
 
 [![Tests](https://img.shields.io/badge/tests-229%20passing-brightgreen)]()
-[![Version](https://img.shields.io/badge/version-0.6.0-blue)]()
+[![Version](https://img.shields.io/badge/version-0.6.1-blue)]()
 
 ## Features
 
@@ -22,14 +22,14 @@ An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcont
 ```elixir
 def deps do
   [
-    {:conduit_mcp, "~> 0.6.0"}
+    {:conduit_mcp, "~> 0.6.1"}
   ]
 end
 ```
 
 ## Quick Start
 
-### Example with DSL (Recommended)
+### Basic DSL Example
 
 ```elixir
 defmodule MyApp.MCPServer do
@@ -45,14 +45,6 @@ defmodule MyApp.MCPServer do
       greeting = if style == "formal", do: "Good day", else: "Hey"
       text("#{greeting}, #{name}!")
     end
-  end
-
-  tool "calculate", "Math operations" do
-    param :op, :string, "Operation", enum: ~w(add sub mul div), required: true
-    param :a, :number, "First number", required: true
-    param :b, :number, "Second number", required: true
-
-    handle MyMath, :calculate
   end
 
   prompt "code_review", "Code review assistant" do
@@ -74,6 +66,48 @@ defmodule MyApp.MCPServer do
     read fn _conn, params, _opts ->
       user = MyApp.Users.get!(params["id"])
       json(user)
+    end
+  end
+end
+```
+
+### Enhanced DSL with Validation
+
+```elixir
+defmodule MyApp.MCPServer do
+  use ConduitMcp.Server
+
+  tool "create_user", "Create a new user with validation" do
+    # Basic types with constraints
+    param :name, :string, "Full name", required: true, min_length: 2, max_length: 50
+    param :age, :integer, "Age", min: 0, max: 150, required: true
+    param :email, :string, "Email address", validator: &ConduitMcp.Validation.Validators.email/1
+
+    # Enum validation with default
+    param :role, :string, "User role", enum: ["admin", "user", "guest"], default: "user"
+
+    # Numeric constraints with defaults
+    param :score, :number, "Performance score", min: 0.0, max: 100.0, default: 50.0
+
+    handle &UserService.create/2
+  end
+
+  tool "calculate", "Math with validation" do
+    param :operation, :string, "Math operation", enum: ~w(add subtract multiply divide), required: true
+    param :a, :number, "First number", required: true
+    param :b, :number, "Second number", required: true
+    param :precision, :integer, "Decimal places", min: 0, max: 10, default: 2
+
+    handle fn _conn, params ->
+      result = case params["operation"] do
+        "add" -> params["a"] + params["b"]
+        "subtract" -> params["a"] - params["b"]
+        "multiply" -> params["a"] * params["b"]
+        "divide" -> params["a"] / params["b"]
+      end
+
+      formatted = Float.round(result, params["precision"])
+      text("Result: #{formatted}")
     end
   end
 end
