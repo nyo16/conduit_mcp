@@ -2,46 +2,64 @@ defmodule ConduitMcp.Plugs.RateLimit do
   @moduledoc """
   Rate limiting plug for MCP servers.
 
-  Provides configurable rate limiting using a user-supplied Hammer backend module.
-  Mirrors the auth plug pattern — configurable per-transport, wired through
-  `conn.private`, skips CORS OPTIONS, halts with JSON-RPC error on rejection,
-  emits telemetry.
+  This plug is **completely optional**. If you don't need rate limiting, simply
+  omit the `:rate_limit` option from your transport config — no additional
+  dependencies are required.
+
+  ## Dependencies
+
+  Rate limiting requires the [`hammer`](https://hex.pm/packages/hammer) package.
+  Add it to your `mix.exs` only if you intend to use this plug:
+
+      {:hammer, "~> 7.2"}
+
+  ## How it works
+
+  You define your own Hammer module, supervise it in your application, and pass
+  it as the `:backend` option. This gives you full control over the backend
+  (`:ets`, `:atomic`), algorithm (`:fix_window`, `:leaky_bucket`, etc.), and
+  supervision strategy.
 
   ## Options
 
-  - `:backend` - **Required.** A module that implements `hit/3` (e.g., a module
-    defined with `use Hammer, backend: :ets`). The user must supervise this module
-    in their own application supervision tree.
+  - `:backend` - **Required when enabled.** A module that implements `hit/3`
+    (e.g., a module defined with `use Hammer, backend: :ets`). You must supervise
+    this module in your own application supervision tree.
   - `:enabled` - Enable/disable rate limiting (default: `true`)
   - `:scale` - Time window in milliseconds (default: `60_000`)
   - `:limit` - Maximum requests per window (default: `60`)
   - `:key_func` - Function to derive the rate limit key from the connection
     (default: IP-based). Signature: `(Plug.Conn.t()) -> String.t()`
 
-  ## Examples
+  ## Setup
 
-  ### Define your Hammer module
+  ### 1. Define your Hammer module
 
       defmodule MyApp.RateLimiter do
         use Hammer, backend: :ets
       end
 
-  ### Add to your supervision tree
+  ### 2. Add to your supervision tree
 
       children = [
         {MyApp.RateLimiter, [clean_period: :timer.minutes(1)]}
       ]
 
-  ### Basic IP-based rate limiting
+  ### 3. Pass as `:backend` in transport config
 
-      plug ConduitMcp.Plugs.RateLimit,
-        backend: MyApp.RateLimiter,
-        scale: :timer.seconds(60),
-        limit: 100
+      {Bandit,
+       plug: {ConduitMcp.Transport.StreamableHTTP,
+              server_module: MyApp.MCPServer,
+              rate_limit: [
+                backend: MyApp.RateLimiter,
+                scale: :timer.seconds(60),
+                limit: 100
+              ]},
+       port: 4001}
 
-  ### Per-user rate limiting
+  ## Per-user rate limiting
 
-      plug ConduitMcp.Plugs.RateLimit,
+      rate_limit: [
         backend: MyApp.RateLimiter,
         limit: 100,
         key_func: fn conn ->
@@ -50,10 +68,12 @@ defmodule ConduitMcp.Plugs.RateLimit do
             _ -> conn.remote_ip |> :inet.ntoa() |> to_string()
           end
         end
+      ]
 
-  ### Disabled
+  ## Without rate limiting
 
-      plug ConduitMcp.Plugs.RateLimit, enabled: false
+  Simply omit the `:rate_limit` option from your transport config. The `hammer`
+  dependency is not required and won't be compiled.
   """
 
   import Plug.Conn
