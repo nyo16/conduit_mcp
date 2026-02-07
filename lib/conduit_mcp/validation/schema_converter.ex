@@ -185,9 +185,6 @@ defmodule ConduitMcp.Validation.SchemaConverter do
     rescue
       error ->
         {:error, Exception.message(error)}
-    catch
-      :error, %ArgumentError{} = error ->
-        {:error, Exception.message(error)}
     end
   end
 

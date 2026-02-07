@@ -16,9 +16,13 @@ defmodule ConduitMcp.MixProject do
       docs: docs(),
       name: "ConduitMCP",
       source_url: @source_url,
-      test_coverage: [tool: ExCoveralls]
+      test_coverage: [tool: ExCoveralls],
+      elixirc_paths: elixirc_paths(Mix.env())
     ]
   end
+
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
 
   def cli do
     [
