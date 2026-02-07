@@ -131,6 +131,36 @@ defmodule ConduitMcp.Telemetry do
         nil
       )
 
+  ### Rate Limiting Events
+
+  #### `[:conduit_mcp, :rate_limit, :check]`
+
+  Emitted when a rate limit check is performed.
+
+  **Measurements:**
+
+    * `:duration` (integer) - Rate limit check duration in native time units
+
+  **Metadata:**
+
+    * `:key` (String.t) - The rate limit key (e.g., IP address or user ID)
+    * `:status` (:allow | :deny) - Whether the request was allowed or denied
+    * `:count` (integer) - Current request count (only when status is :allow)
+    * `:retry_after` (integer) - Seconds until the limit resets (only when status is :deny)
+
+  **Example:**
+
+      :telemetry.attach(
+        "track-rate-limits",
+        [:conduit_mcp, :rate_limit, :check],
+        fn _event, _measurements, metadata, _config ->
+          if metadata.status == :deny do
+            Logger.warning("Rate limited: key=\#{metadata.key}")
+          end
+        end,
+        nil
+      )
+
   ### Authentication Events
 
   #### `[:conduit_mcp, :auth, :verify]`
@@ -173,6 +203,7 @@ defmodule ConduitMcp.Telemetry do
             [:conduit_mcp, :tool, :execute],
             [:conduit_mcp, :resource, :read],
             [:conduit_mcp, :prompt, :get],
+            [:conduit_mcp, :rate_limit, :check],
             [:conduit_mcp, :auth, :verify]
           ]
 
@@ -211,6 +242,14 @@ defmodule ConduitMcp.Telemetry do
         def handle_event([:conduit_mcp, :prompt, :get], measurements, metadata, _config) do
           Logger.info("Prompt retrieved",
             prompt: metadata.prompt_name,
+            status: metadata.status,
+            duration_ms: convert_duration(measurements.duration)
+          )
+        end
+
+        def handle_event([:conduit_mcp, :rate_limit, :check], measurements, metadata, _config) do
+          Logger.info("Rate limit check",
+            key: metadata.key,
             status: metadata.status,
             duration_ms: convert_duration(measurements.duration)
           )
@@ -300,6 +339,18 @@ defmodule ConduitMcp.Telemetry do
               description: "Prompt retrieval duration"
             ),
 
+            # Rate limit check count
+            counter("conduit_mcp.rate_limit.check.count",
+              tags: [:status],
+              description: "Rate limit checks"
+            ),
+
+            # Rate limit check duration
+            distribution("conduit_mcp.rate_limit.check.duration",
+              unit: {:native, :millisecond},
+              description: "Rate limit check duration"
+            ),
+
             # Auth verification count
             counter("conduit_mcp.auth.verify.count",
               tags: [:strategy, :status],
@@ -356,6 +407,7 @@ defmodule ConduitMcp.Telemetry do
         [:conduit_mcp, :tool, :execute],
         [:conduit_mcp, :resource, :read],
         [:conduit_mcp, :prompt, :get],
+        [:conduit_mcp, :rate_limit, :check],
         [:conduit_mcp, :auth, :verify]
       ]
   """
@@ -366,6 +418,7 @@ defmodule ConduitMcp.Telemetry do
       [:conduit_mcp, :tool, :execute],
       [:conduit_mcp, :resource, :read],
       [:conduit_mcp, :prompt, :get],
+      [:conduit_mcp, :rate_limit, :check],
       [:conduit_mcp, :auth, :verify]
     ]
   end
@@ -448,6 +501,19 @@ defmodule ConduitMcp.Telemetry do
 
     Logger.debug(
       "Prompt retrieved: prompt=#{metadata.prompt_name} status=#{metadata.status} duration=#{duration_ms}ms"
+    )
+  end
+
+  defp handle_event([:conduit_mcp, :rate_limit, :check], measurements, metadata, _config) do
+    duration_ms = System.convert_time_unit(measurements.duration, :native, :millisecond)
+
+    require Logger
+
+    level = if metadata.status == :allow, do: :debug, else: :warning
+
+    Logger.log(
+      level,
+      "Rate limit check: key=#{metadata.key} status=#{metadata.status} duration=#{duration_ms}ms"
     )
   end
 
