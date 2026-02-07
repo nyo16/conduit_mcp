@@ -1,7 +1,7 @@
 defmodule ConduitMcp.MixProject do
   use Mix.Project
 
-  @version "0.6.0"
+  @version "0.6.1"
   @source_url "https://github.com/nyo16/conduit_mcp"
 
   def project do
@@ -44,15 +44,15 @@ defmodule ConduitMcp.MixProject do
     [
       # Core dependencies
       {:jason, "~> 1.4"},
-      {:plug, "~> 1.15"},
-      {:bandit, "~> 1.5"},
+      {:plug, "~> 1.19"},
+      {:bandit, "~> 1.9"},
       {:nimble_options, "1.1.1"},
 
       # Optional: Prometheus metrics via PromEx
       {:prom_ex, "~> 1.11", optional: true},
 
       # Development
-      {:ex_doc, "~> 0.31", only: :dev, runtime: false},
+      {:ex_doc, "~> 0.39", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:excoveralls, "~> 0.18", only: :test, runtime: false}
