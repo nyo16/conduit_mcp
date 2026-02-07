@@ -250,8 +250,9 @@ defmodule ConduitMcp.TelemetryTest do
       assert [:conduit_mcp, :tool, :execute] in events
       assert [:conduit_mcp, :resource, :read] in events
       assert [:conduit_mcp, :prompt, :get] in events
+      assert [:conduit_mcp, :rate_limit, :check] in events
       assert [:conduit_mcp, :auth, :verify] in events
-      assert length(events) == 5
+      assert length(events) == 6
     end
   end
 
