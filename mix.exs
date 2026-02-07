@@ -47,7 +47,7 @@ defmodule ConduitMcp.MixProject do
       {:plug, "~> 1.19"},
       {:bandit, "~> 1.9"},
       {:nimble_options, "1.1.1"},
-      {:hammer, "~> 7.2"},
+      {:hammer, "~> 7.2", optional: true},
 
       # Optional: Prometheus metrics via PromEx
       {:prom_ex, "~> 1.11", optional: true},

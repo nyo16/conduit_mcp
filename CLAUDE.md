@@ -25,7 +25,7 @@ Requires Elixir ~> 1.18. No config directory exists; validation config is set vi
 
 ## Architecture
 
-MCP server modules are **stateless** — just compiled functions. Each HTTP request runs in its own Bandit process for maximum concurrency. The only supervised process is `ConduitMcp.RateLimiter` (Hammer ETS backend for rate limiting).
+MCP server modules are **stateless** — just compiled functions. Each HTTP request runs in its own Bandit process for maximum concurrency. No supervised processes — rate limiting uses a user-supplied Hammer module.
 
 ### Request Flow
 
@@ -57,9 +57,7 @@ HTTP Request → Transport (StreamableHTTP/SSE) → Auth Plug → Rate Limit Plu
 
 - **`ConduitMcp.Plugs.Auth`** — Authentication plug. Strategies: `:bearer_token`, `:api_key`, `:function` (custom). Skips CORS preflight. Authenticated user stored in `conn.assigns[:current_user]`.
 
-- **`ConduitMcp.Plugs.RateLimit`** — Rate limiting plug using Hammer v7.2. Configurable per-transport via `:rate_limit` option. Skips CORS preflight. Returns HTTP 429 with JSON-RPC error (`code: -32000`) on rejection. Supports custom `:key_func` for per-user or per-IP limiting. Emits `[:conduit_mcp, :rate_limit, :check]` telemetry.
-
-- **`ConduitMcp.RateLimiter`** — Hammer-based rate limiter module (`use Hammer, backend: :ets`). Started in the supervision tree by `ConduitMcp.Application`. Configurable via `config :conduit_mcp, :rate_limit, backend_opts: [...]`.
+- **`ConduitMcp.Plugs.RateLimit`** — Rate limiting plug using a user-supplied Hammer module. Requires `:backend` option (a module with `hit/3`). Configurable per-transport via `:rate_limit` option. Skips CORS preflight. Returns HTTP 429 with JSON-RPC error (`code: -32000`) on rejection. Supports custom `:key_func` for per-user or per-IP limiting. Emits `[:conduit_mcp, :rate_limit, :check]` telemetry. Hammer is an optional dependency.
 
 - **`ConduitMcp.PromEx`** — Optional Prometheus metrics plugin (conditional compilation, only loads if `:prom_ex` dependency is available).
 

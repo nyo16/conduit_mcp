@@ -6,11 +6,14 @@ defmodule ConduitMcp.Plugs.RateLimitTest do
   alias ConduitMcp.Plugs.RateLimit
   alias ConduitMcp.TelemetryTestHelper
 
+  @backend ConduitMcp.TestRateLimiter
+
   describe "init/1" do
-    test "sets defaults" do
-      opts = RateLimit.init([])
+    test "sets defaults with backend" do
+      opts = RateLimit.init(backend: @backend)
 
       assert opts.enabled == true
+      assert opts.backend == @backend
       assert opts.scale == 60_000
       assert opts.limit == 60
       assert is_function(opts.key_func, 1)
@@ -19,12 +22,30 @@ defmodule ConduitMcp.Plugs.RateLimitTest do
     test "accepts custom options" do
       key_fn = fn _conn -> "custom" end
 
-      opts = RateLimit.init(enabled: false, scale: 30_000, limit: 100, key_func: key_fn)
+      opts =
+        RateLimit.init(
+          backend: @backend,
+          enabled: false,
+          scale: 30_000,
+          limit: 100,
+          key_func: key_fn
+        )
 
       assert opts.enabled == false
       assert opts.scale == 30_000
       assert opts.limit == 100
       assert opts.key_func == key_fn
+    end
+
+    test "raises when backend is missing and enabled" do
+      assert_raise ArgumentError, ~r/requires a :backend option/, fn ->
+        RateLimit.init([])
+      end
+    end
+
+    test "does not raise when backend is missing but disabled" do
+      opts = RateLimit.init(enabled: false)
+      assert opts.enabled == false
     end
   end
 
@@ -41,7 +62,7 @@ defmodule ConduitMcp.Plugs.RateLimitTest do
 
   describe "call/2 with OPTIONS" do
     test "bypasses rate limiting for CORS preflight" do
-      opts = RateLimit.init(limit: 1, scale: 60_000)
+      opts = RateLimit.init(backend: @backend, limit: 1, scale: 60_000)
       conn = conn(:options, "/")
 
       result = RateLimit.call(conn, opts)
@@ -53,7 +74,10 @@ defmodule ConduitMcp.Plugs.RateLimitTest do
   describe "call/2 within limit" do
     test "allows request within limit" do
       key = "test-allow-#{System.unique_integer([:positive])}"
-      opts = RateLimit.init(limit: 10, scale: 60_000, key_func: fn _conn -> key end)
+
+      opts =
+        RateLimit.init(backend: @backend, limit: 10, scale: 60_000, key_func: fn _conn -> key end)
+
       conn = conn(:post, "/")
 
       result = RateLimit.call(conn, opts)
@@ -67,7 +91,9 @@ defmodule ConduitMcp.Plugs.RateLimitTest do
       ref =
         TelemetryTestHelper.attach_event_handlers(self(), [[:conduit_mcp, :rate_limit, :check]])
 
-      opts = RateLimit.init(limit: 10, scale: 60_000, key_func: fn _conn -> key end)
+      opts =
+        RateLimit.init(backend: @backend, limit: 10, scale: 60_000, key_func: fn _conn -> key end)
+
       conn = conn(:post, "/")
 
       RateLimit.call(conn, opts)
@@ -83,7 +109,9 @@ defmodule ConduitMcp.Plugs.RateLimitTest do
   describe "call/2 exceeding limit" do
     test "returns 429 when limit exceeded" do
       key = "test-deny-#{System.unique_integer([:positive])}"
-      opts = RateLimit.init(limit: 1, scale: 60_000, key_func: fn _conn -> key end)
+
+      opts =
+        RateLimit.init(backend: @backend, limit: 1, scale: 60_000, key_func: fn _conn -> key end)
 
       # First request should be allowed
       conn1 = conn(:post, "/")
@@ -106,7 +134,9 @@ defmodule ConduitMcp.Plugs.RateLimitTest do
 
     test "includes Retry-After header on 429" do
       key = "test-retry-after-#{System.unique_integer([:positive])}"
-      opts = RateLimit.init(limit: 1, scale: 60_000, key_func: fn _conn -> key end)
+
+      opts =
+        RateLimit.init(backend: @backend, limit: 1, scale: 60_000, key_func: fn _conn -> key end)
 
       # Exhaust limit
       RateLimit.call(conn(:post, "/"), opts)
@@ -126,7 +156,8 @@ defmodule ConduitMcp.Plugs.RateLimitTest do
       ref =
         TelemetryTestHelper.attach_event_handlers(self(), [[:conduit_mcp, :rate_limit, :check]])
 
-      opts = RateLimit.init(limit: 1, scale: 60_000, key_func: fn _conn -> key end)
+      opts =
+        RateLimit.init(backend: @backend, limit: 1, scale: 60_000, key_func: fn _conn -> key end)
 
       # Exhaust limit
       RateLimit.call(conn(:post, "/"), opts)
@@ -150,8 +181,11 @@ defmodule ConduitMcp.Plugs.RateLimitTest do
       key1 = "user-1-#{System.unique_integer([:positive])}"
       key2 = "user-2-#{System.unique_integer([:positive])}"
 
-      opts_user1 = RateLimit.init(limit: 1, scale: 60_000, key_func: fn _conn -> key1 end)
-      opts_user2 = RateLimit.init(limit: 1, scale: 60_000, key_func: fn _conn -> key2 end)
+      opts_user1 =
+        RateLimit.init(backend: @backend, limit: 1, scale: 60_000, key_func: fn _conn -> key1 end)
+
+      opts_user2 =
+        RateLimit.init(backend: @backend, limit: 1, scale: 60_000, key_func: fn _conn -> key2 end)
 
       # User 1 exhausts their limit
       RateLimit.call(conn(:post, "/"), opts_user1)

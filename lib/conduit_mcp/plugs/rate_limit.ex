@@ -2,12 +2,16 @@ defmodule ConduitMcp.Plugs.RateLimit do
   @moduledoc """
   Rate limiting plug for MCP servers.
 
-  Provides configurable rate limiting using Hammer. Mirrors the auth plug pattern —
-  configurable per-transport, wired through `conn.private`, skips CORS OPTIONS,
-  halts with JSON-RPC error on rejection, emits telemetry.
+  Provides configurable rate limiting using a user-supplied Hammer backend module.
+  Mirrors the auth plug pattern — configurable per-transport, wired through
+  `conn.private`, skips CORS OPTIONS, halts with JSON-RPC error on rejection,
+  emits telemetry.
 
   ## Options
 
+  - `:backend` - **Required.** A module that implements `hit/3` (e.g., a module
+    defined with `use Hammer, backend: :ets`). The user must supervise this module
+    in their own application supervision tree.
   - `:enabled` - Enable/disable rate limiting (default: `true`)
   - `:scale` - Time window in milliseconds (default: `60_000`)
   - `:limit` - Maximum requests per window (default: `60`)
@@ -16,15 +20,29 @@ defmodule ConduitMcp.Plugs.RateLimit do
 
   ## Examples
 
+  ### Define your Hammer module
+
+      defmodule MyApp.RateLimiter do
+        use Hammer, backend: :ets
+      end
+
+  ### Add to your supervision tree
+
+      children = [
+        {MyApp.RateLimiter, [clean_period: :timer.minutes(1)]}
+      ]
+
   ### Basic IP-based rate limiting
 
       plug ConduitMcp.Plugs.RateLimit,
+        backend: MyApp.RateLimiter,
         scale: :timer.seconds(60),
         limit: 100
 
   ### Per-user rate limiting
 
       plug ConduitMcp.Plugs.RateLimit,
+        backend: MyApp.RateLimiter,
         limit: 100,
         key_func: fn conn ->
           case conn.assigns[:current_user] do
@@ -45,8 +63,17 @@ defmodule ConduitMcp.Plugs.RateLimit do
 
   @impl true
   def init(opts) do
+    enabled = Keyword.get(opts, :enabled, true)
+    backend = Keyword.get(opts, :backend)
+
+    if enabled and is_nil(backend) do
+      raise ArgumentError,
+            "ConduitMcp.Plugs.RateLimit requires a :backend option (a module with hit/3)"
+    end
+
     %{
-      enabled: Keyword.get(opts, :enabled, true),
+      enabled: enabled,
+      backend: backend,
       scale: Keyword.get(opts, :scale, 60_000),
       limit: Keyword.get(opts, :limit, 60),
       key_func: Keyword.get(opts, :key_func, &default_key_func/1)
@@ -62,11 +89,11 @@ defmodule ConduitMcp.Plugs.RateLimit do
     conn
   end
 
-  def call(conn, %{scale: scale, limit: limit, key_func: key_func}) do
+  def call(conn, %{backend: backend, scale: scale, limit: limit, key_func: key_func}) do
     key = key_func.(conn)
     start_time = System.monotonic_time()
 
-    case ConduitMcp.RateLimiter.hit(key, scale, limit) do
+    case backend.hit(key, scale, limit) do
       {:allow, count} ->
         duration = System.monotonic_time() - start_time
 

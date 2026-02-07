@@ -6,6 +6,8 @@ defmodule ConduitMcp.Transport.RateLimitIntegrationTest do
   alias ConduitMcp.Transport.StreamableHTTP
   alias ConduitMcp.TestServer
 
+  @backend ConduitMcp.TestRateLimiter
+
   describe "StreamableHTTP with rate limiting" do
     test "allows requests within rate limit" do
       key = "integration-allow-#{System.unique_integer([:positive])}"
@@ -14,6 +16,7 @@ defmodule ConduitMcp.Transport.RateLimitIntegrationTest do
         StreamableHTTP.init(
           server_module: TestServer,
           rate_limit: [
+            backend: @backend,
             limit: 10,
             scale: 60_000,
             key_func: fn _conn -> key end
@@ -48,6 +51,7 @@ defmodule ConduitMcp.Transport.RateLimitIntegrationTest do
         StreamableHTTP.init(
           server_module: TestServer,
           rate_limit: [
+            backend: @backend,
             limit: 1,
             scale: 60_000,
             key_func: fn _conn -> key end
@@ -107,6 +111,7 @@ defmodule ConduitMcp.Transport.RateLimitIntegrationTest do
             token: "secret-token"
           ],
           rate_limit: [
+            backend: @backend,
             limit: 1,
             scale: 60_000,
             key_func: fn _conn -> key end
