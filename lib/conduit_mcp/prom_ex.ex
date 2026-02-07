@@ -16,7 +16,7 @@ if Code.ensure_loaded?(PromEx) do
 
         def deps do
           [
-            {:conduit_mcp, "~> 0.4.7"},
+            {:conduit_mcp, "~> 0.6.5"},
             {:prom_ex, "~> 1.11"}
           ]
         end

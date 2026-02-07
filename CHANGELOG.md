@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.5] - 2026-02-07
+
+### Added
+
+- **Message-level rate limiting** (`ConduitMcp.Plugs.MessageRateLimit`)
+  - Second rate limiting layer that limits MCP method calls per time window
+  - POST-only: GET/OPTIONS pass through automatically
+  - Skips JSON-RPC notifications (no `id` field)
+  - Configurable excluded methods (e.g., `["initialize", "ping"]`)
+  - User-aware default key function (uses `conn.assigns[:current_user]` from Auth plug)
+  - `"msg:"` key prefix prevents Hammer counter collision with HTTP rate limiter
+  - HTTP 429 response with `Retry-After` header and JSON-RPC error (code `-32000`)
+  - Telemetry event: `[:conduit_mcp, :message_rate_limit, :check]`
+  - PromEx metrics: `message_rate_limit_check_total`, `message_rate_limit_check_duration_milliseconds`
+  - Configurable via `:message_rate_limit` transport option
+  - Works alongside existing HTTP-level rate limiting
+
+### Improved
+
+- **Test coverage** expanded to 309 tests
+- **README** updated with Rate Limiting documentation (HTTP + message-level)
+- **Telemetry** documentation updated with message rate limit events
+- **PromEx** plugin updated with message rate limit metrics
+- Applied `mix format` to all files in the codebase
+
 ## [0.5.0] - 2025-11-24
 
 ### Added
@@ -171,6 +196,7 @@ None - This release is fully backward compatible.
 - Basic authentication
 - Phoenix integration example
 
+[0.6.5]: https://github.com/nyo16/conduit_mcp/compare/v0.5.0...v0.6.5
 [0.4.6]: https://github.com/nyo16/conduit_mcp/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/nyo16/conduit_mcp/compare/v0.4.0...v0.4.5
 [0.4.0]: https://github.com/nyo16/conduit_mcp/compare/v0.3.1...v0.4.0

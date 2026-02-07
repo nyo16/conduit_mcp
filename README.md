@@ -4,8 +4,8 @@
 
 An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) specification. Build MCP servers to expose tools, resources, and prompts to LLM applications.
 
-[![Tests](https://img.shields.io/badge/tests-229%20passing-brightgreen)]()
-[![Version](https://img.shields.io/badge/version-0.6.1-blue)]()
+[![Tests](https://img.shields.io/badge/tests-309%20passing-brightgreen)]()
+[![Version](https://img.shields.io/badge/version-0.6.5-blue)]()
 
 ## Features
 
@@ -15,6 +15,7 @@ An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcont
 - **Flexible Authentication** - Bearer tokens, API keys, custom verification
 - **Full MCP Spec** - Tools, resources, prompts, and all MCP 2025-06-18 features
 - **Phoenix Ready** - Drop-in integration with Phoenix applications
+- **Rate Limiting** - HTTP-level and message-level rate limiting with Hammer
 - **Production Ready** - Comprehensive tests, telemetry, CORS support
 
 ## Installation
@@ -22,7 +23,7 @@ An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcont
 ```elixir
 def deps do
   [
-    {:conduit_mcp, "~> 0.6.1"}
+    {:conduit_mcp, "~> 0.6.5"}
   ]
 end
 ```
@@ -368,6 +369,109 @@ tool "profile", "Get profile" do
 end
 ```
 
+## Rate Limiting
+
+ConduitMCP supports two layers of rate limiting using [Hammer](https://hex.pm/packages/hammer). Both are optional — omit the config and no rate limiting is applied.
+
+### Setup
+
+Add `hammer` to your dependencies:
+
+```elixir
+def deps do
+  [
+    {:conduit_mcp, "~> 0.6.5"},
+    {:hammer, "~> 7.2"}
+  ]
+end
+```
+
+Define a Hammer module and add it to your supervision tree:
+
+```elixir
+defmodule MyApp.RateLimiter do
+  use Hammer, backend: :ets
+end
+
+# In your application.ex
+children = [
+  {MyApp.RateLimiter, [clean_period: :timer.minutes(1)]}
+]
+```
+
+### HTTP Rate Limiting
+
+Limits raw HTTP connections — prevents DDoS and connection flooding.
+
+```elixir
+{Bandit,
+ plug: {ConduitMcp.Transport.StreamableHTTP,
+        server_module: MyApp.MCPServer,
+        rate_limit: [
+          backend: MyApp.RateLimiter,
+          scale: :timer.seconds(60),   # Time window (default: 60s)
+          limit: 100                    # Max requests per window (default: 60)
+        ]},
+ port: 4001}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `:backend` | required | Hammer module with `hit/3` |
+| `:enabled` | `true` | Toggle on/off |
+| `:scale` | `60_000` | Time window in ms |
+| `:limit` | `60` | Max requests per window |
+| `:key_func` | IP-based | `(Plug.Conn.t()) -> String.t()` |
+
+### Message Rate Limiting
+
+Limits MCP method calls (tool calls, resource reads, prompt gets) per time window. Think of it as: HTTP rate limit = "how fast can you knock on the door", message rate limit = "how many questions can you ask once inside."
+
+```elixir
+{Bandit,
+ plug: {ConduitMcp.Transport.StreamableHTTP,
+        server_module: MyApp.MCPServer,
+        rate_limit: [backend: MyApp.RateLimiter, limit: 100, scale: 60_000],
+        message_rate_limit: [
+          backend: MyApp.RateLimiter,
+          scale: :timer.minutes(5),    # Time window (default: 5 min)
+          limit: 50,                    # Max messages per window (default: 50)
+          excluded_methods: ["initialize", "ping"]
+        ]},
+ port: 4001}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `:backend` | required | Hammer module with `hit/3` |
+| `:enabled` | `true` | Toggle on/off |
+| `:scale` | `300_000` | Time window in ms (5 min) |
+| `:limit` | `50` | Max messages per window |
+| `:key_func` | user-aware | Uses `conn.assigns[:current_user]` if set, falls back to IP |
+| `:excluded_methods` | `[]` | Methods to skip (e.g., `["initialize", "ping"]`) |
+
+Key behaviors:
+- **POST only** — GET and OPTIONS requests pass through
+- **Notifications skipped** — JSON-RPC notifications (no `id` field) are not counted
+- **User-aware** — Default key uses authenticated user when Auth plug is in the pipeline
+- **Key prefix** — Keys are prefixed with `"msg:"` to avoid collision with HTTP rate limiter
+- **HTTP 429** — Returns JSON-RPC error with code `-32000` and `Retry-After` header
+
+### Per-user Rate Limiting
+
+```elixir
+rate_limit: [
+  backend: MyApp.RateLimiter,
+  limit: 100,
+  key_func: fn conn ->
+    case conn.assigns[:current_user] do
+      %{id: id} -> "user:#{id}"
+      _ -> conn.remote_ip |> :inet.ntoa() |> to_string()
+    end
+  end
+]
+```
+
 ## Client Configuration
 
 ### VS Code / Cursor
@@ -406,6 +510,8 @@ ConduitMCP emits telemetry events for monitoring:
 - `[:conduit_mcp, :tool, :execute]` - Tool executions
 - `[:conduit_mcp, :resource, :read]` - Resource reads
 - `[:conduit_mcp, :prompt, :get]` - Prompt retrievals
+- `[:conduit_mcp, :rate_limit, :check]` - HTTP rate limit checks
+- `[:conduit_mcp, :message_rate_limit, :check]` - Message rate limit checks
 - `[:conduit_mcp, :auth, :verify]` - Authentication attempts
 
 Example handler:
@@ -433,7 +539,7 @@ Add `:prom_ex` to your dependencies:
 ```elixir
 def deps do
   [
-    {:conduit_mcp, "~> 0.5.0"},
+    {:conduit_mcp, "~> 0.6.5"},
     {:prom_ex, "~> 1.11"}
   ]
 end
@@ -498,6 +604,14 @@ All metrics are prefixed with `{otp_app}_conduit_mcp_`:
 **Prompt Metrics:**
 - `prompt_get_total{prompt_name, status}` - Total prompt retrievals
 - `prompt_get_duration_milliseconds{prompt_name, status}` - Retrieval duration
+
+**Rate Limit Metrics:**
+- `rate_limit_check_total{status}` - HTTP rate limit checks
+- `rate_limit_check_duration_milliseconds` - Check duration
+
+**Message Rate Limit Metrics:**
+- `message_rate_limit_check_total{status, method}` - Message rate limit checks
+- `message_rate_limit_check_duration_milliseconds{status, method}` - Check duration
 
 **Auth Metrics:**
 - `auth_verify_total{strategy, status}` - Total auth attempts
