@@ -57,6 +57,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   plug(:match)
   plug(Plug.Parsers, parsers: [:json], json_decoder: Jason)
   plug(:maybe_authenticate)
+  plug(:maybe_rate_limit)
   plug(:dispatch)
 
   defp add_cors_headers(conn, _opts) do
@@ -83,6 +84,16 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     end
   end
 
+  defp maybe_rate_limit(conn, _opts) do
+    case conn.private[:rate_limit_config] do
+      nil ->
+        conn
+
+      rate_limit_opts ->
+        ConduitMcp.Plugs.RateLimit.call(conn, ConduitMcp.Plugs.RateLimit.init(rate_limit_opts))
+    end
+  end
+
   def init(opts) do
     server_module = Keyword.get(opts, :server_module)
 
@@ -99,6 +110,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     cors_methods = Keyword.get(opts, :cors_methods, "GET, POST, OPTIONS")
     cors_headers = Keyword.get(opts, :cors_headers, "content-type, authorization")
     auth_config = Keyword.get(opts, :auth)
+    rate_limit_config = Keyword.get(opts, :rate_limit)
 
     conn
     |> Plug.Conn.put_private(:server_module, server_module)
@@ -106,6 +118,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     |> Plug.Conn.put_private(:cors_methods, cors_methods)
     |> Plug.Conn.put_private(:cors_headers, cors_headers)
     |> Plug.Conn.put_private(:auth_config, auth_config)
+    |> Plug.Conn.put_private(:rate_limit_config, rate_limit_config)
     |> super(opts)
   end
 
@@ -118,11 +131,14 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   get "/" do
     conn
     |> put_resp_content_type("application/json")
-    |> send_resp(200, Jason.encode!(%{
-      "transport" => "streamable-http",
-      "version" => "2025-06-18",
-      "status" => "ready"
-    }))
+    |> send_resp(
+      200,
+      Jason.encode!(%{
+        "transport" => "streamable-http",
+        "version" => "2025-06-18",
+        "status" => "ready"
+      })
+    )
   end
 
   # Main endpoint for bidirectional streaming

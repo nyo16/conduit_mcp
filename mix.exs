@@ -48,6 +48,9 @@ defmodule ConduitMcp.MixProject do
       {:bandit, "~> 1.9"},
       {:nimble_options, "1.1.1"},
 
+      # Optional: Rate limiting (only needed if using ConduitMcp.Plugs.RateLimit)
+      {:hammer, "~> 7.2", optional: true},
+
       # Optional: Prometheus metrics via PromEx
       {:prom_ex, "~> 1.11", optional: true},
 

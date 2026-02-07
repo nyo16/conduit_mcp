@@ -7,10 +7,7 @@ defmodule ConduitMcp.Application do
 
   @impl true
   def start(_type, _args) do
-    children = [
-      # Starts a worker by calling: ConduitMcp.Worker.start_link(arg)
-      # {ConduitMcp.Worker, arg}
-    ]
+    children = []
 
     # See https://hexdocs.pm/elixir/Supervisor.html
     # for other strategies and supported options
