@@ -6,51 +6,54 @@ defmodule ConduitMcp.DSLTest do
     use ConduitMcp.Server
 
     tool "simple", "Simple tool" do
-      param :message, :string, "A message", required: true
+      param(:message, :string, "A message", required: true)
 
-      handle fn _conn, %{"message" => msg} ->
+      handle(fn _conn, %{"message" => msg} ->
         text("Got: #{msg}")
-      end
+      end)
     end
 
     tool "with_enum", "Tool with enum" do
-      param :action, :string, "Action to perform", enum: ["start", "stop", "restart"], required: true
+      param(:action, :string, "Action to perform",
+        enum: ["start", "stop", "restart"],
+        required: true
+      )
 
-      handle fn _conn, %{"action" => action} ->
+      handle(fn _conn, %{"action" => action} ->
         text("Action: #{action}")
-      end
+      end)
     end
 
     tool "with_default", "Tool with default value" do
-      param :name, :string, "Name", default: "World"
+      param(:name, :string, "Name", default: "World")
 
-      handle fn _conn, params ->
+      handle(fn _conn, params ->
         name = params["name"] || "World"
         text("Hello, #{name}!")
-      end
+      end)
     end
 
     tool "with_mfa", "Tool using MFA handler" do
-      param :value, :number, "A number", required: true
+      param(:value, :number, "A number", required: true)
 
-      handle __MODULE__, :double_value
+      handle(__MODULE__, :double_value)
     end
 
     tool "with_capture", "Tool using function capture" do
-      param :value, :number, "A number", required: true
+      param(:value, :number, "A number", required: true)
 
-      handle &__MODULE__.triple_value/2
+      handle(&__MODULE__.triple_value/2)
     end
 
     tool "with_boolean", "Tool with boolean parameter" do
-      param :enabled, :boolean, "Enable feature", required: true
-      param :count, :integer, "Item count", default: 0
+      param(:enabled, :boolean, "Enable feature", required: true)
+      param(:count, :integer, "Item count", default: 0)
 
-      handle fn _conn, params ->
+      handle(fn _conn, params ->
         enabled = params["enabled"]
         count = params["count"] || 0
         text("Enabled: #{enabled}, Count: #{count}")
-      end
+      end)
     end
 
     # TODO: Add nested object support in future version
@@ -73,44 +76,45 @@ defmodule ConduitMcp.DSLTest do
 
     # Prompt examples
     prompt "code_review", "Code review assistant" do
-      arg :code, :string, "Code to review", required: true
-      arg :language, :string, "Programming language", default: "elixir"
+      arg(:code, :string, "Code to review", required: true)
+      arg(:language, :string, "Programming language", default: "elixir")
 
-      get fn _conn, args ->
+      get(fn _conn, args ->
         language = args["language"] || "elixir"
+
         [
           system("You are an expert code reviewer"),
           user("Review this #{language} code:\n#{args["code"]}")
         ]
-      end
+      end)
     end
 
     prompt "simple_prompt", "Simple prompt" do
-      arg :topic, :string, "Topic to discuss"
+      arg(:topic, :string, "Topic to discuss")
 
-      get fn _conn, args ->
+      get(fn _conn, args ->
         [user("Tell me about #{args["topic"] || "Elixir"}")]
-      end
+      end)
     end
 
     # Resource examples
     resource "user://{id}" do
-      description "User profile data"
-      mime_type "application/json"
+      description("User profile data")
+      mime_type("application/json")
 
-      read fn _conn, params, _opts ->
+      read(fn _conn, params, _opts ->
         user_id = params["id"]
         json(%{id: user_id, name: "User #{user_id}", email: "user#{user_id}@example.com"})
-      end
+      end)
     end
 
     resource "static://readme" do
-      description "Project README"
-      mime_type "text/markdown"
+      description("Project README")
+      mime_type("text/markdown")
 
-      read fn _conn, _params, _opts ->
+      read(fn _conn, _params, _opts ->
         text("# README\n\nThis is a test README.")
-      end
+      end)
     end
   end
 
@@ -121,7 +125,8 @@ defmodule ConduitMcp.DSLTest do
 
       tools = result["tools"]
       assert is_list(tools)
-      assert length(tools) == 6  # simple, with_enum, with_default, with_mfa, with_capture, with_boolean
+      # simple, with_enum, with_default, with_mfa, with_capture, with_boolean
+      assert length(tools) == 6
 
       # Check simple tool
       simple_tool = Enum.find(tools, fn t -> t["name"] == "simple" end)
@@ -154,7 +159,7 @@ defmodule ConduitMcp.DSLTest do
       default_tool = Enum.find(result["tools"], fn t -> t["name"] == "with_default" end)
       # Should have no required field or empty list
       refute Map.has_key?(default_tool["inputSchema"], "required") or
-             default_tool["inputSchema"]["required"] == []
+               default_tool["inputSchema"]["required"] == []
     end
 
     test "handles enum parameters correctly" do
@@ -162,7 +167,12 @@ defmodule ConduitMcp.DSLTest do
       {:ok, result} = DSLTestServer.handle_list_tools(conn)
 
       enum_tool = Enum.find(result["tools"], fn t -> t["name"] == "with_enum" end)
-      assert enum_tool["inputSchema"]["properties"]["action"]["enum"] == ["start", "stop", "restart"]
+
+      assert enum_tool["inputSchema"]["properties"]["action"]["enum"] == [
+               "start",
+               "stop",
+               "restart"
+             ]
     end
 
     test "handles default values correctly" do
@@ -203,7 +213,9 @@ defmodule ConduitMcp.DSLTest do
 
     test "executes tool with boolean and integer parameters" do
       conn = %Plug.Conn{}
-      {:ok, result} = DSLTestServer.handle_call_tool(conn, "with_boolean", %{"enabled" => true, "count" => 5})
+
+      {:ok, result} =
+        DSLTestServer.handle_call_tool(conn, "with_boolean", %{"enabled" => true, "count" => 5})
 
       assert result["content"] == [%{"type" => "text", "text" => "Enabled: true, Count: 5"}]
     end
@@ -282,11 +294,15 @@ defmodule ConduitMcp.DSLTest do
       conn = %Plug.Conn{}
 
       # Test with true
-      {:ok, result1} = DSLTestServer.handle_call_tool(conn, "with_boolean", %{"enabled" => true, "count" => 10})
+      {:ok, result1} =
+        DSLTestServer.handle_call_tool(conn, "with_boolean", %{"enabled" => true, "count" => 10})
+
       assert result1["content"] == [%{"type" => "text", "text" => "Enabled: true, Count: 10"}]
 
       # Test with false
-      {:ok, result2} = DSLTestServer.handle_call_tool(conn, "with_boolean", %{"enabled" => false, "count" => 0})
+      {:ok, result2} =
+        DSLTestServer.handle_call_tool(conn, "with_boolean", %{"enabled" => false, "count" => 0})
+
       assert result2["content"] == [%{"type" => "text", "text" => "Enabled: false, Count: 0"}]
     end
   end
@@ -308,10 +324,11 @@ defmodule ConduitMcp.DSLTest do
     test "executes prompt with inline handler" do
       conn = %Plug.Conn{}
 
-      {:ok, result} = DSLTestServer.handle_get_prompt(conn, "code_review", %{
-        "code" => "def hello, do: :world",
-        "language" => "elixir"
-      })
+      {:ok, result} =
+        DSLTestServer.handle_get_prompt(conn, "code_review", %{
+          "code" => "def hello, do: :world",
+          "language" => "elixir"
+        })
 
       messages = result["messages"]
       assert length(messages) == 2
@@ -323,9 +340,10 @@ defmodule ConduitMcp.DSLTest do
     test "executes prompt with default arguments" do
       conn = %Plug.Conn{}
 
-      {:ok, result} = DSLTestServer.handle_get_prompt(conn, "code_review", %{
-        "code" => "def test, do: :ok"
-      })
+      {:ok, result} =
+        DSLTestServer.handle_get_prompt(conn, "code_review", %{
+          "code" => "def test, do: :ok"
+        })
 
       messages = result["messages"]
       # Should use default language "elixir"
@@ -335,10 +353,11 @@ defmodule ConduitMcp.DSLTest do
     test "prompt returns properly formatted messages" do
       conn = %Plug.Conn{}
 
-      {:ok, result} = DSLTestServer.handle_get_prompt(conn, "code_review", %{
-        "code" => "function test() { return true; }",
-        "language" => "javascript"
-      })
+      {:ok, result} =
+        DSLTestServer.handle_get_prompt(conn, "code_review", %{
+          "code" => "function test() { return true; }",
+          "language" => "javascript"
+        })
 
       messages = result["messages"]
 
@@ -372,7 +391,8 @@ defmodule ConduitMcp.DSLTest do
     test "prompt handles provided optional arguments" do
       conn = %Plug.Conn{}
 
-      {:ok, result} = DSLTestServer.handle_get_prompt(conn, "simple_prompt", %{"topic" => "Phoenix"})
+      {:ok, result} =
+        DSLTestServer.handle_get_prompt(conn, "simple_prompt", %{"topic" => "Phoenix"})
 
       messages = result["messages"]
       assert hd(messages)["content"]["text"] =~ "Phoenix"
@@ -425,7 +445,9 @@ defmodule ConduitMcp.DSLTest do
 
       {:ok, result} = DSLTestServer.handle_read_resource(conn, "static://readme")
 
-      assert result["content"] == [%{"type" => "text", "text" => "# README\n\nThis is a test README."}]
+      assert result["content"] == [
+               %{"type" => "text", "text" => "# README\n\nThis is a test README."}
+             ]
     end
 
     test "extracts URI parameters from actual URIs" do
@@ -513,7 +535,12 @@ defmodule ConduitMcp.DSLTest do
         name: "test",
         description: "Test",
         params: [
-          %{name: :action, type: :string, description: "Action", opts: [enum: ["a", "b", "c"], required: true]}
+          %{
+            name: :action,
+            type: :string,
+            description: "Action",
+            opts: [enum: ["a", "b", "c"], required: true]
+          }
         ]
       }
 
@@ -632,30 +659,33 @@ defmodule ConduitMcp.DSLTest do
       import ConduitMcp.DSL.Helpers
 
       msg = system("You are helpful")
+
       assert msg == %{
-        "role" => "system",
-        "content" => %{"type" => "text", "text" => "You are helpful"}
-      }
+               "role" => "system",
+               "content" => %{"type" => "text", "text" => "You are helpful"}
+             }
     end
 
     test "user/1 creates user message" do
       import ConduitMcp.DSL.Helpers
 
       msg = user("Hello")
+
       assert msg == %{
-        "role" => "user",
-        "content" => %{"type" => "text", "text" => "Hello"}
-      }
+               "role" => "user",
+               "content" => %{"type" => "text", "text" => "Hello"}
+             }
     end
 
     test "assistant/1 creates assistant message" do
       import ConduitMcp.DSL.Helpers
 
       msg = assistant("Hi there")
+
       assert msg == %{
-        "role" => "assistant",
-        "content" => %{"type" => "text", "text" => "Hi there"}
-      }
+               "role" => "assistant",
+               "content" => %{"type" => "text", "text" => "Hi there"}
+             }
     end
 
     test "texts/1 creates multiple content items" do
@@ -664,10 +694,10 @@ defmodule ConduitMcp.DSLTest do
       result = texts(["Line 1", "Line 2", "Line 3"])
 
       assert result == [
-        %{"type" => "text", "text" => "Line 1"},
-        %{"type" => "text", "text" => "Line 2"},
-        %{"type" => "text", "text" => "Line 3"}
-      ]
+               %{"type" => "text", "text" => "Line 1"},
+               %{"type" => "text", "text" => "Line 2"},
+               %{"type" => "text", "text" => "Line 3"}
+             ]
     end
   end
 
@@ -728,9 +758,9 @@ defmodule ConduitMcp.DSLTest do
         use ConduitMcp.Server
 
         tool "ping", "Simple ping" do
-          handle fn _conn, _params ->
+          handle(fn _conn, _params ->
             text("pong")
-          end
+          end)
         end
       end
 
@@ -763,12 +793,12 @@ defmodule ConduitMcp.DSLTest do
         use ConduitMcp.Server
 
         tool "all_types", "Tool with all param types" do
-          param :str, :string, "A string"
-          param :num, :number, "A number"
-          param :int, :integer, "An integer"
-          param :bool, :boolean, "A boolean"
+          param(:str, :string, "A string")
+          param(:num, :number, "A number")
+          param(:int, :integer, "An integer")
+          param(:bool, :boolean, "A boolean")
 
-          handle fn _conn, _p -> text("ok") end
+          handle(fn _conn, _p -> text("ok") end)
         end
       end
 
@@ -789,11 +819,11 @@ defmodule ConduitMcp.DSLTest do
         use ConduitMcp.Server
 
         tool "multi", "Multiple required params" do
-          param :first, :string, "First", required: true
-          param :second, :number, "Second", required: true
-          param :third, :string, "Third"
+          param(:first, :string, "First", required: true)
+          param(:second, :number, "Second", required: true)
+          param(:third, :string, "Third")
 
-          handle fn _conn, _p -> text("ok") end
+          handle(fn _conn, _p -> text("ok") end)
         end
       end
 
@@ -882,7 +912,8 @@ defmodule ConduitMcp.DSLTest do
       template = "resource://{resource_id_123}"
       uri = "resource://abc-def-456"
 
-      assert {:ok, %{"resource_id_123" => "abc-def-456"}} = ConduitMcp.DSL.extract_uri_params(template, uri)
+      assert {:ok, %{"resource_id_123" => "abc-def-456"}} =
+               ConduitMcp.DSL.extract_uri_params(template, uri)
     end
   end
 end

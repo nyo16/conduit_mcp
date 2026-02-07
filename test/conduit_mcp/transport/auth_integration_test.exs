@@ -8,23 +8,29 @@ defmodule ConduitMcp.Transport.AuthIntegrationTest do
 
   describe "StreamableHTTP with bearer token authentication" do
     setup do
-      opts = StreamableHTTP.init(
-        server_module: TestServer,
-        auth: [
-          strategy: :bearer_token,
-          token: "test-secret-token"
-        ]
-      )
+      opts =
+        StreamableHTTP.init(
+          server_module: TestServer,
+          auth: [
+            strategy: :bearer_token,
+            token: "test-secret-token"
+          ]
+        )
+
       {:ok, opts: opts}
     end
 
     test "allows authenticated requests", %{opts: opts} do
       conn =
-        conn(:post, "/", Jason.encode!(%{
-          "jsonrpc" => "2.0",
-          "id" => 1,
-          "method" => "tools/list"
-        }))
+        conn(
+          :post,
+          "/",
+          Jason.encode!(%{
+            "jsonrpc" => "2.0",
+            "id" => 1,
+            "method" => "tools/list"
+          })
+        )
         |> put_req_header("content-type", "application/json")
         |> put_req_header("authorization", "Bearer test-secret-token")
 
@@ -40,13 +46,18 @@ defmodule ConduitMcp.Transport.AuthIntegrationTest do
 
     test "blocks unauthenticated requests", %{opts: opts} do
       conn =
-        conn(:post, "/", Jason.encode!(%{
-          "jsonrpc" => "2.0",
-          "id" => 1,
-          "method" => "tools/list"
-        }))
+        conn(
+          :post,
+          "/",
+          Jason.encode!(%{
+            "jsonrpc" => "2.0",
+            "id" => 1,
+            "method" => "tools/list"
+          })
+        )
         |> put_req_header("content-type", "application/json")
-        # No authorization header
+
+      # No authorization header
 
       result = StreamableHTTP.call(conn, opts)
 
@@ -59,15 +70,19 @@ defmodule ConduitMcp.Transport.AuthIntegrationTest do
 
     test "blocks requests with wrong token", %{opts: opts} do
       conn =
-        conn(:post, "/", Jason.encode!(%{
-          "jsonrpc" => "2.0",
-          "id" => 1,
-          "method" => "tools/call",
-          "params" => %{
-            "name" => "echo",
-            "arguments" => %{"message" => "test"}
-          }
-        }))
+        conn(
+          :post,
+          "/",
+          Jason.encode!(%{
+            "jsonrpc" => "2.0",
+            "id" => 1,
+            "method" => "tools/call",
+            "params" => %{
+              "name" => "echo",
+              "arguments" => %{"message" => "test"}
+            }
+          })
+        )
         |> put_req_header("content-type", "application/json")
         |> put_req_header("authorization", "Bearer wrong-token")
 
@@ -97,21 +112,26 @@ defmodule ConduitMcp.Transport.AuthIntegrationTest do
         end
       end
 
-      opts = StreamableHTTP.init(
-        server_module: TestServer,
-        auth: [
-          strategy: :function,
-          verify: verify_fn,
-          assign_as: :current_user
-        ]
-      )
+      opts =
+        StreamableHTTP.init(
+          server_module: TestServer,
+          auth: [
+            strategy: :function,
+            verify: verify_fn,
+            assign_as: :current_user
+          ]
+        )
 
       conn =
-        conn(:post, "/", Jason.encode!(%{
-          "jsonrpc" => "2.0",
-          "id" => 1,
-          "method" => "ping"
-        }))
+        conn(
+          :post,
+          "/",
+          Jason.encode!(%{
+            "jsonrpc" => "2.0",
+            "id" => 1,
+            "method" => "ping"
+          })
+        )
         |> put_req_header("content-type", "application/json")
         |> put_req_header("authorization", "Bearer admin-token-456")
 
@@ -126,19 +146,25 @@ defmodule ConduitMcp.Transport.AuthIntegrationTest do
 
   describe "StreamableHTTP with disabled auth" do
     test "allows all requests when auth is disabled" do
-      opts = StreamableHTTP.init(
-        server_module: TestServer,
-        auth: [enabled: false]
-      )
+      opts =
+        StreamableHTTP.init(
+          server_module: TestServer,
+          auth: [enabled: false]
+        )
 
       conn =
-        conn(:post, "/", Jason.encode!(%{
-          "jsonrpc" => "2.0",
-          "id" => 1,
-          "method" => "ping"
-        }))
+        conn(
+          :post,
+          "/",
+          Jason.encode!(%{
+            "jsonrpc" => "2.0",
+            "id" => 1,
+            "method" => "ping"
+          })
+        )
         |> put_req_header("content-type", "application/json")
-        # No authorization header
+
+      # No authorization header
 
       result = StreamableHTTP.call(conn, opts)
 
@@ -149,21 +175,26 @@ defmodule ConduitMcp.Transport.AuthIntegrationTest do
 
   describe "StreamableHTTP with API key authentication" do
     test "accepts valid API key" do
-      opts = StreamableHTTP.init(
-        server_module: TestServer,
-        auth: [
-          strategy: :api_key,
-          api_key: "secret-api-key-xyz",
-          header: "x-api-key"
-        ]
-      )
+      opts =
+        StreamableHTTP.init(
+          server_module: TestServer,
+          auth: [
+            strategy: :api_key,
+            api_key: "secret-api-key-xyz",
+            header: "x-api-key"
+          ]
+        )
 
       conn =
-        conn(:post, "/", Jason.encode!(%{
-          "jsonrpc" => "2.0",
-          "id" => 1,
-          "method" => "tools/list"
-        }))
+        conn(
+          :post,
+          "/",
+          Jason.encode!(%{
+            "jsonrpc" => "2.0",
+            "id" => 1,
+            "method" => "tools/list"
+          })
+        )
         |> put_req_header("content-type", "application/json")
         |> put_req_header("x-api-key", "secret-api-key-xyz")
 
@@ -177,21 +208,26 @@ defmodule ConduitMcp.Transport.AuthIntegrationTest do
     end
 
     test "rejects invalid API key" do
-      opts = StreamableHTTP.init(
-        server_module: TestServer,
-        auth: [
-          strategy: :api_key,
-          api_key: "secret-api-key-xyz",
-          header: "x-api-key"
-        ]
-      )
+      opts =
+        StreamableHTTP.init(
+          server_module: TestServer,
+          auth: [
+            strategy: :api_key,
+            api_key: "secret-api-key-xyz",
+            header: "x-api-key"
+          ]
+        )
 
       conn =
-        conn(:post, "/", Jason.encode!(%{
-          "jsonrpc" => "2.0",
-          "id" => 1,
-          "method" => "tools/list"
-        }))
+        conn(
+          :post,
+          "/",
+          Jason.encode!(%{
+            "jsonrpc" => "2.0",
+            "id" => 1,
+            "method" => "tools/list"
+          })
+        )
         |> put_req_header("content-type", "application/json")
         |> put_req_header("x-api-key", "wrong-key")
 

@@ -243,12 +243,13 @@ defmodule ConduitMcp.ProtocolTest do
 
   describe "error_response/4" do
     test "creates error response with additional data" do
-      response = Protocol.error_response(
-        1,
-        -32603,
-        "Internal error",
-        %{"details" => "Stack trace"}
-      )
+      response =
+        Protocol.error_response(
+          1,
+          -32603,
+          "Internal error",
+          %{"details" => "Stack trace"}
+        )
 
       assert response["jsonrpc"] == "2.0"
       assert response["id"] == 1

@@ -31,14 +31,18 @@ defmodule ConduitMcp.Transport.SSETest do
 
       assert get_resp_header(conn, "access-control-allow-origin") == ["*"]
       assert get_resp_header(conn, "access-control-allow-methods") == ["GET, POST, OPTIONS"]
-      assert get_resp_header(conn, "access-control-allow-headers") == ["content-type, authorization"]
+
+      assert get_resp_header(conn, "access-control-allow-headers") == [
+               "content-type, authorization"
+             ]
     end
 
     test "respects custom CORS origin" do
-      opts = SSE.init(
-        server_module: TestServer,
-        cors_origin: "https://example.com"
-      )
+      opts =
+        SSE.init(
+          server_module: TestServer,
+          cors_origin: "https://example.com"
+        )
 
       conn =
         conn(:post, "/message")
@@ -109,11 +113,12 @@ defmodule ConduitMcp.Transport.SSETest do
 
   describe "POST /message" do
     test "handles ping request" do
-      request_body = Jason.encode!(%{
-        "jsonrpc" => "2.0",
-        "id" => 1,
-        "method" => "ping"
-      })
+      request_body =
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "ping"
+        })
 
       conn =
         conn(:post, "/message", request_body)
@@ -130,16 +135,17 @@ defmodule ConduitMcp.Transport.SSETest do
     end
 
     test "handles initialize request" do
-      request_body = Jason.encode!(%{
-        "jsonrpc" => "2.0",
-        "id" => 1,
-        "method" => "initialize",
-        "params" => %{
-          "protocolVersion" => "2025-06-18",
-          "clientInfo" => %{"name" => "test-client", "version" => "1.0.0"},
-          "capabilities" => %{}
-        }
-      })
+      request_body =
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "initialize",
+          "params" => %{
+            "protocolVersion" => "2025-06-18",
+            "clientInfo" => %{"name" => "test-client", "version" => "1.0.0"},
+            "capabilities" => %{}
+          }
+        })
 
       conn =
         conn(:post, "/message", request_body)
@@ -153,11 +159,12 @@ defmodule ConduitMcp.Transport.SSETest do
     end
 
     test "handles tools/list request" do
-      request_body = Jason.encode!(%{
-        "jsonrpc" => "2.0",
-        "id" => 2,
-        "method" => "tools/list"
-      })
+      request_body =
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 2,
+          "method" => "tools/list"
+        })
 
       conn =
         conn(:post, "/message", request_body)
@@ -171,15 +178,16 @@ defmodule ConduitMcp.Transport.SSETest do
     end
 
     test "handles tools/call request" do
-      request_body = Jason.encode!(%{
-        "jsonrpc" => "2.0",
-        "id" => 3,
-        "method" => "tools/call",
-        "params" => %{
-          "name" => "echo",
-          "arguments" => %{"message" => "Hello"}
-        }
-      })
+      request_body =
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 3,
+          "method" => "tools/call",
+          "params" => %{
+            "name" => "echo",
+            "arguments" => %{"message" => "Hello"}
+          }
+        })
 
       conn =
         conn(:post, "/message", request_body)
@@ -192,10 +200,11 @@ defmodule ConduitMcp.Transport.SSETest do
     end
 
     test "handles notifications with 204 status" do
-      request_body = Jason.encode!(%{
-        "jsonrpc" => "2.0",
-        "method" => "notifications/initialized"
-      })
+      request_body =
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "method" => "notifications/initialized"
+        })
 
       conn =
         conn(:post, "/message", request_body)
@@ -223,11 +232,12 @@ defmodule ConduitMcp.Transport.SSETest do
     end
 
     test "returns error for unknown method" do
-      request_body = Jason.encode!(%{
-        "jsonrpc" => "2.0",
-        "id" => 100,
-        "method" => "unknown/method"
-      })
+      request_body =
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 100,
+          "method" => "unknown/method"
+        })
 
       conn =
         conn(:post, "/message", request_body)

@@ -404,6 +404,7 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
   defp validate_tool_schema(tool) do
     try do
       nimble_schema = build_nimble_options_schema(tool)
+
       case validate_nimble_options_schema(nimble_schema) do
         :ok -> {:ok, tool.name}
         {:error, reason} -> {:error, {tool.name, reason}}
@@ -416,6 +417,7 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
   defp validate_prompt_schema(prompt) do
     try do
       nimble_schema = build_nimble_options_prompt_schema(prompt)
+
       case validate_nimble_options_schema(nimble_schema) do
         :ok -> {:ok, prompt.name}
         {:error, reason} -> {:error, {prompt.name, reason}}

@@ -80,7 +80,8 @@ defmodule ConduitMcp.Validation.SchemaConverter do
 
   defp convert_type(:string), do: :string
   defp convert_type(:integer), do: :integer
-  defp convert_type(:number), do: :float  # NimbleOptions uses :float, not :number
+  # NimbleOptions uses :float, not :number
+  defp convert_type(:number), do: :float
   defp convert_type(:boolean), do: :boolean
   defp convert_type(:object), do: :map
   defp convert_type(:array), do: {:list, :any}
@@ -139,7 +140,8 @@ defmodule ConduitMcp.Validation.SchemaConverter do
     [{:validator, validator} | acc]
   end
 
-  defp convert_validation_opt({:validator, {module, function}}, acc) when is_atom(module) and is_atom(function) do
+  defp convert_validation_opt({:validator, {module, function}}, acc)
+       when is_atom(module) and is_atom(function) do
     # Convert MFA tuple to function
     validator_fn = fn value -> apply(module, function, [value]) end
     [{:validator, validator_fn} | acc]
@@ -192,14 +194,25 @@ defmodule ConduitMcp.Validation.SchemaConverter do
   # Private helper to clean schema - same as in main validation module
   defp remove_custom_constraint_markers(schema) do
     custom_markers = [
-      :__enum_values__, :__min_value__, :__max_value__, :__min_length__, :__max_length__,
-      :validator, :min, :max, :min_length, :max_length, :enum
+      :__enum_values__,
+      :__min_value__,
+      :__max_value__,
+      :__min_length__,
+      :__max_length__,
+      :validator,
+      :min,
+      :max,
+      :min_length,
+      :max_length,
+      :enum
     ]
 
     Enum.map(schema, fn {param_name, param_opts} ->
-      clean_opts = Enum.reduce(custom_markers, param_opts, fn marker, acc ->
-        Keyword.delete(acc, marker)
-      end)
+      clean_opts =
+        Enum.reduce(custom_markers, param_opts, fn marker, acc ->
+          Keyword.delete(acc, marker)
+        end)
+
       {param_name, clean_opts}
     end)
   end
@@ -215,14 +228,18 @@ defmodule ConduitMcp.Validation.SchemaConverter do
 
     # Try to parse the error message to extract parameter information
     case parse_validation_error(message, original_params) do
-      {:ok, detailed_errors} -> detailed_errors
+      {:ok, detailed_errors} ->
+        detailed_errors
+
       {:error, _} ->
         # Fallback to generic error
-        [%{
-          parameter: nil,
-          value: nil,
-          message: message
-        }]
+        [
+          %{
+            parameter: nil,
+            value: nil,
+            message: message
+          }
+        ]
     end
   end
 
@@ -251,11 +268,14 @@ defmodule ConduitMcp.Validation.SchemaConverter do
     # NimbleOptions format: "required :name option not found"
     case Regex.run(~r/required :(\w+) option not found/, message) do
       [_, field_name] ->
-        {:ok, [%{
-          parameter: field_name,
-          value: nil,
-          message: "is required"
-        }]}
+        {:ok,
+         [
+           %{
+             parameter: field_name,
+             value: nil,
+             message: "is required"
+           }
+         ]}
 
       nil ->
         {:error, :no_field_found}
@@ -269,11 +289,14 @@ defmodule ConduitMcp.Validation.SchemaConverter do
         value = get_original_value(field_name, original_params)
         constraint_message = extract_constraint_message(message)
 
-        {:ok, [%{
-          parameter: field_name,
-          value: value,
-          message: constraint_message
-        }]}
+        {:ok,
+         [
+           %{
+             parameter: field_name,
+             value: value,
+             message: constraint_message
+           }
+         ]}
 
       nil ->
         {:error, :no_field_found}
@@ -286,11 +309,14 @@ defmodule ConduitMcp.Validation.SchemaConverter do
       [_, expected_type, field_name] ->
         value = get_original_value(field_name, original_params)
 
-        {:ok, [%{
-          parameter: field_name,
-          value: value,
-          message: "must be of type #{expected_type}"
-        }]}
+        {:ok,
+         [
+           %{
+             parameter: field_name,
+             value: value,
+             message: "must be of type #{expected_type}"
+           }
+         ]}
 
       nil ->
         {:error, :no_type_info}

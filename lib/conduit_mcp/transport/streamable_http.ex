@@ -58,6 +58,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   plug(Plug.Parsers, parsers: [:json], json_decoder: Jason)
   plug(:maybe_authenticate)
   plug(:maybe_rate_limit)
+  plug(:maybe_message_rate_limit)
   plug(:dispatch)
 
   defp add_cors_headers(conn, _opts) do
@@ -94,6 +95,19 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     end
   end
 
+  defp maybe_message_rate_limit(conn, _opts) do
+    case conn.private[:message_rate_limit_config] do
+      nil ->
+        conn
+
+      message_rate_limit_opts ->
+        ConduitMcp.Plugs.MessageRateLimit.call(
+          conn,
+          ConduitMcp.Plugs.MessageRateLimit.init(message_rate_limit_opts)
+        )
+    end
+  end
+
   def init(opts) do
     server_module = Keyword.get(opts, :server_module)
 
@@ -111,6 +125,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     cors_headers = Keyword.get(opts, :cors_headers, "content-type, authorization")
     auth_config = Keyword.get(opts, :auth)
     rate_limit_config = Keyword.get(opts, :rate_limit)
+    message_rate_limit_config = Keyword.get(opts, :message_rate_limit)
 
     conn
     |> Plug.Conn.put_private(:server_module, server_module)
@@ -119,6 +134,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     |> Plug.Conn.put_private(:cors_headers, cors_headers)
     |> Plug.Conn.put_private(:auth_config, auth_config)
     |> Plug.Conn.put_private(:rate_limit_config, rate_limit_config)
+    |> Plug.Conn.put_private(:message_rate_limit_config, message_rate_limit_config)
     |> super(opts)
   end
 

@@ -161,6 +161,37 @@ defmodule ConduitMcp.Telemetry do
         nil
       )
 
+  ### Message Rate Limiting Events
+
+  #### `[:conduit_mcp, :message_rate_limit, :check]`
+
+  Emitted when a message-level rate limit check is performed.
+
+  **Measurements:**
+
+    * `:duration` (integer) - Rate limit check duration in native time units
+
+  **Metadata:**
+
+    * `:key` (String.t) - The rate limit key (e.g., `"msg:user:123"` or `"msg:127.0.0.1"`)
+    * `:status` (:allow | :deny) - Whether the message was allowed or denied
+    * `:method` (String.t | nil) - The MCP method being rate limited
+    * `:count` (integer) - Current message count (only when status is :allow)
+    * `:retry_after` (integer) - Seconds until the limit resets (only when status is :deny)
+
+  **Example:**
+
+      :telemetry.attach(
+        "track-message-rate-limits",
+        [:conduit_mcp, :message_rate_limit, :check],
+        fn _event, _measurements, metadata, _config ->
+          if metadata.status == :deny do
+            Logger.warning("Message rate limited: key=\#{metadata.key} method=\#{metadata.method}")
+          end
+        end,
+        nil
+      )
+
   ### Authentication Events
 
   #### `[:conduit_mcp, :auth, :verify]`
@@ -204,6 +235,7 @@ defmodule ConduitMcp.Telemetry do
             [:conduit_mcp, :resource, :read],
             [:conduit_mcp, :prompt, :get],
             [:conduit_mcp, :rate_limit, :check],
+            [:conduit_mcp, :message_rate_limit, :check],
             [:conduit_mcp, :auth, :verify]
           ]
 
@@ -250,6 +282,15 @@ defmodule ConduitMcp.Telemetry do
         def handle_event([:conduit_mcp, :rate_limit, :check], measurements, metadata, _config) do
           Logger.info("Rate limit check",
             key: metadata.key,
+            status: metadata.status,
+            duration_ms: convert_duration(measurements.duration)
+          )
+        end
+
+        def handle_event([:conduit_mcp, :message_rate_limit, :check], measurements, metadata, _config) do
+          Logger.info("Message rate limit check",
+            key: metadata.key,
+            method: metadata.method,
             status: metadata.status,
             duration_ms: convert_duration(measurements.duration)
           )
@@ -351,6 +392,18 @@ defmodule ConduitMcp.Telemetry do
               description: "Rate limit check duration"
             ),
 
+            # Message rate limit check count
+            counter("conduit_mcp.message_rate_limit.check.count",
+              tags: [:status, :method],
+              description: "Message rate limit checks"
+            ),
+
+            # Message rate limit check duration
+            distribution("conduit_mcp.message_rate_limit.check.duration",
+              unit: {:native, :millisecond},
+              description: "Message rate limit check duration"
+            ),
+
             # Auth verification count
             counter("conduit_mcp.auth.verify.count",
               tags: [:strategy, :status],
@@ -408,6 +461,7 @@ defmodule ConduitMcp.Telemetry do
         [:conduit_mcp, :resource, :read],
         [:conduit_mcp, :prompt, :get],
         [:conduit_mcp, :rate_limit, :check],
+        [:conduit_mcp, :message_rate_limit, :check],
         [:conduit_mcp, :auth, :verify]
       ]
   """
@@ -419,6 +473,7 @@ defmodule ConduitMcp.Telemetry do
       [:conduit_mcp, :resource, :read],
       [:conduit_mcp, :prompt, :get],
       [:conduit_mcp, :rate_limit, :check],
+      [:conduit_mcp, :message_rate_limit, :check],
       [:conduit_mcp, :auth, :verify]
     ]
   end
@@ -514,6 +569,24 @@ defmodule ConduitMcp.Telemetry do
     Logger.log(
       level,
       "Rate limit check: key=#{metadata.key} status=#{metadata.status} duration=#{duration_ms}ms"
+    )
+  end
+
+  defp handle_event(
+         [:conduit_mcp, :message_rate_limit, :check],
+         measurements,
+         metadata,
+         _config
+       ) do
+    duration_ms = System.convert_time_unit(measurements.duration, :native, :millisecond)
+
+    require Logger
+
+    level = if metadata.status == :allow, do: :debug, else: :warning
+
+    Logger.log(
+      level,
+      "Message rate limit check: key=#{metadata.key} method=#{metadata.method} status=#{metadata.status} duration=#{duration_ms}ms"
     )
   end
 

@@ -10,7 +10,7 @@ if Code.ensure_loaded?(PromEx) do
         metrics = PromEx.event_metrics(opts)
 
         assert is_list(metrics)
-        assert length(metrics) == 5
+        assert length(metrics) == 6
       end
 
       test "requires otp_app option" do
@@ -101,7 +101,7 @@ if Code.ensure_loaded?(PromEx) do
 
       test "auth metrics group contains counter and distribution" do
         opts = [otp_app: :test_app]
-        [_, _, _, _, auth_metrics] = PromEx.event_metrics(opts)
+        [_, _, _, _, _, auth_metrics] = PromEx.event_metrics(opts)
 
         assert auth_metrics.group_name == :conduit_mcp_auth_metrics
         assert length(auth_metrics.metrics) == 2

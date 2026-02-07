@@ -51,23 +51,31 @@ defmodule ConduitMcp.ValidationTest do
     test "validate_tool_params/3 with valid parameters" do
       params = %{"name" => "Alice", "age" => 25}
 
-      assert {:ok, validated_params} = Validation.validate_tool_params(TestValidationServer, "simple_tool", params)
+      assert {:ok, validated_params} =
+               Validation.validate_tool_params(TestValidationServer, "simple_tool", params)
+
       assert validated_params["name"] == "Alice"
       assert validated_params["age"] == 25
     end
 
     test "validate_tool_params/3 with missing required parameter" do
-      params = %{"age" => 25}  # Missing required "name"
+      # Missing required "name"
+      params = %{"age" => 25}
 
-      assert {:error, errors} = Validation.validate_tool_params(TestValidationServer, "simple_tool", params)
+      assert {:error, errors} =
+               Validation.validate_tool_params(TestValidationServer, "simple_tool", params)
+
       assert length(errors) == 1
       assert Enum.any?(errors, fn error -> error["parameter"] =~ "name" end)
     end
 
     test "validate_tool_params/3 with invalid range" do
-      params = %{"name" => "Alice", "age" => 200}  # Age too high
+      # Age too high
+      params = %{"name" => "Alice", "age" => 200}
 
-      assert {:error, errors} = Validation.validate_tool_params(TestValidationServer, "simple_tool", params)
+      assert {:error, errors} =
+               Validation.validate_tool_params(TestValidationServer, "simple_tool", params)
+
       assert length(errors) == 1
       assert List.first(errors)["parameter"] == "age"
       assert List.first(errors)["value"] == 200
@@ -80,15 +88,22 @@ defmodule ConduitMcp.ValidationTest do
 
       # Invalid enum value
       params = %{"action" => "invalid"}
-      assert {:error, errors} = Validation.validate_tool_params(TestValidationServer, "enum_tool", params)
+
+      assert {:error, errors} =
+               Validation.validate_tool_params(TestValidationServer, "enum_tool", params)
+
       assert length(errors) == 1
       assert List.first(errors)["parameter"] == "action"
       assert List.first(errors)["message"] =~ ~s(must be one of ["start", "stop", "restart"])
     end
 
     test "validate_tool_params/3 with default values" do
-      params = %{"action" => "start"}  # priority should get default
-      assert {:ok, validated_params} = Validation.validate_tool_params(TestValidationServer, "enum_tool", params)
+      # priority should get default
+      params = %{"action" => "start"}
+
+      assert {:ok, validated_params} =
+               Validation.validate_tool_params(TestValidationServer, "enum_tool", params)
+
       assert validated_params["action"] == "start"
       # Note: NimbleOptions would apply defaults, but our implementation passes through
     end
@@ -96,24 +111,35 @@ defmodule ConduitMcp.ValidationTest do
     test "validate_tool_params/3 with custom validator" do
       # Valid email
       params = %{"count" => 5, "email" => "test@example.com"}
-      assert {:ok, _} = Validation.validate_tool_params(TestValidationServer, "complex_tool", params)
+
+      assert {:ok, _} =
+               Validation.validate_tool_params(TestValidationServer, "complex_tool", params)
 
       # Invalid email
       params = %{"count" => 5, "email" => "invalid-email"}
-      assert {:error, errors} = Validation.validate_tool_params(TestValidationServer, "complex_tool", params)
+
+      assert {:error, errors} =
+               Validation.validate_tool_params(TestValidationServer, "complex_tool", params)
+
       assert length(errors) >= 1
     end
 
     test "validate_tool_params/3 with type coercion" do
       # String numbers should be converted to integers/floats by NimbleOptions
       params = %{"count" => "10", "score" => "85.5"}
-      assert {:ok, _validated_params} = Validation.validate_tool_params(TestValidationServer, "complex_tool", params)
+
+      assert {:ok, _validated_params} =
+               Validation.validate_tool_params(TestValidationServer, "complex_tool", params)
+
       # NimbleOptions should handle type coercion
     end
 
     test "validate_tool_params/3 with unknown tool" do
       params = %{"any" => "param"}
-      assert {:error, errors} = Validation.validate_tool_params(TestValidationServer, "unknown_tool", params)
+
+      assert {:error, errors} =
+               Validation.validate_tool_params(TestValidationServer, "unknown_tool", params)
+
       assert length(errors) == 1
       assert List.first(errors)["message"] =~ "not found"
     end
@@ -121,25 +147,37 @@ defmodule ConduitMcp.ValidationTest do
     test "validate_tool_params/3 with server without validation schemas" do
       params = %{"any" => "param"}
       # Should skip validation and return params as-is
-      assert {:ok, validated_params} = Validation.validate_tool_params(PlainServer, "any_tool", params)
+      assert {:ok, validated_params} =
+               Validation.validate_tool_params(PlainServer, "any_tool", params)
+
       assert validated_params == params
     end
 
     test "validate_prompt_args/3 with valid arguments" do
       args = %{"message" => "Hello", "format" => "text"}
-      assert {:ok, validated_args} = Validation.validate_prompt_args(TestValidationServer, "test_prompt", args)
+
+      assert {:ok, validated_args} =
+               Validation.validate_prompt_args(TestValidationServer, "test_prompt", args)
+
       assert validated_args["message"] == "Hello"
     end
 
     test "validate_prompt_args/3 with missing required argument" do
-      args = %{"format" => "text"}  # Missing required "message"
-      assert {:error, errors} = Validation.validate_prompt_args(TestValidationServer, "test_prompt", args)
+      # Missing required "message"
+      args = %{"format" => "text"}
+
+      assert {:error, errors} =
+               Validation.validate_prompt_args(TestValidationServer, "test_prompt", args)
+
       assert length(errors) >= 1
     end
 
     test "validate_prompt_args/3 with server without validation schemas" do
       args = %{"any" => "arg"}
-      assert {:ok, validated_args} = Validation.validate_prompt_args(PlainServer, "any_prompt", args)
+
+      assert {:ok, validated_args} =
+               Validation.validate_prompt_args(PlainServer, "any_prompt", args)
+
       assert validated_args == args
     end
 
@@ -164,7 +202,10 @@ defmodule ConduitMcp.ValidationTest do
       Application.put_env(:conduit_mcp, :validation, runtime_validation: false)
 
       params = %{"invalid" => "params"}
-      assert {:ok, validated_params} = Validation.validate_tool_params(TestValidationServer, "simple_tool", params)
+
+      assert {:ok, validated_params} =
+               Validation.validate_tool_params(TestValidationServer, "simple_tool", params)
+
       assert validated_params == params
 
       # Reset to default
@@ -214,7 +255,8 @@ defmodule ConduitMcp.ValidationTest do
 
       assert length(result) == 1
       {_name, opts} = List.first(result)
-      assert Keyword.get(opts, :type) == :float  # Should be converted from :number
+      # Should be converted from :number
+      assert Keyword.get(opts, :type) == :float
     end
 
     test "dsl_params_to_nimble_options/1 handles custom validators" do
@@ -310,9 +352,12 @@ defmodule ConduitMcp.ValidationTest do
     test "iso_date/1 validates ISO 8601 dates" do
       assert Validators.iso_date("2024-01-15") == true
       assert Validators.iso_date("2024-12-31") == true
-      assert Validators.iso_date("2024-02-29") == true  # Valid leap year
-      assert Validators.iso_date("2024-13-01") == false  # Invalid month
-      assert Validators.iso_date("2024-02-30") == false  # Invalid day
+      # Valid leap year
+      assert Validators.iso_date("2024-02-29") == true
+      # Invalid month
+      assert Validators.iso_date("2024-13-01") == false
+      # Invalid day
+      assert Validators.iso_date("2024-02-30") == false
       assert Validators.iso_date("not-a-date") == false
       assert Validators.iso_date(123) == false
     end
@@ -364,15 +409,17 @@ defmodule ConduitMcp.ValidationTest do
       assert is_function(email_list_validator, 1)
       assert email_list_validator.(["test@example.com", "user@domain.org"]) == true
       assert email_list_validator.(["test@example.com", "invalid-email"]) == false
-      assert email_list_validator.([]) == true  # Empty list is valid
+      # Empty list is valid
+      assert email_list_validator.([]) == true
       assert email_list_validator.("not-a-list") == false
     end
 
     test "all/1 creates composite validator requiring all to pass" do
-      strong_password_validator = Validators.all([
-        &Validators.non_empty_string/1,
-        Validators.range(8, 50)
-      ])
+      strong_password_validator =
+        Validators.all([
+          &Validators.non_empty_string/1,
+          Validators.range(8, 50)
+        ])
 
       assert is_function(strong_password_validator, 1)
       # This test would need a string that satisfies both non_empty_string AND range
@@ -381,15 +428,19 @@ defmodule ConduitMcp.ValidationTest do
     end
 
     test "any/1 creates composite validator requiring at least one to pass" do
-      flexible_id_validator = Validators.any([
-        &Validators.uuid/1,
-        &Validators.positive_number/1
-      ])
+      flexible_id_validator =
+        Validators.any([
+          &Validators.uuid/1,
+          &Validators.positive_number/1
+        ])
 
       assert is_function(flexible_id_validator, 1)
-      assert flexible_id_validator.(123) == true  # Valid positive number
-      assert flexible_id_validator.("550e8400-e29b-41d4-a716-446655440000") == true  # Valid UUID
-      assert flexible_id_validator.("invalid") == false  # Neither UUID nor positive number
+      # Valid positive number
+      assert flexible_id_validator.(123) == true
+      # Valid UUID
+      assert flexible_id_validator.("550e8400-e29b-41d4-a716-446655440000") == true
+      # Neither UUID nor positive number
+      assert flexible_id_validator.("invalid") == false
     end
   end
 
@@ -399,33 +450,36 @@ defmodule ConduitMcp.ValidationTest do
       use ConduitMcp.Server
 
       tool "validate_user", "Create a user with validation" do
-        param :name, :string, "Full name", required: true, min_length: 2, max_length: 50
-        param :age, :integer, "Age", min: 0, max: 150, required: true
-        param :email, :string, "Email address", validator: &Validators.email/1, required: true
-        param :role, :string, "User role", enum: ["admin", "user", "guest"], default: "user"
-        param :active, :boolean, "Active status", default: true
+        param(:name, :string, "Full name", required: true, min_length: 2, max_length: 50)
+        param(:age, :integer, "Age", min: 0, max: 150, required: true)
+        param(:email, :string, "Email address", validator: &Validators.email/1, required: true)
+        param(:role, :string, "User role", enum: ["admin", "user", "guest"], default: "user")
+        param(:active, :boolean, "Active status", default: true)
 
-        handle fn _conn, params ->
-          {:ok, %{
-            "content" => [
-              %{"type" => "text", "text" => "User #{params["name"]} created successfully"}
-            ]
-          }}
-        end
+        handle(fn _conn, params ->
+          {:ok,
+           %{
+             "content" => [
+               %{"type" => "text", "text" => "User #{params["name"]} created successfully"}
+             ]
+           }}
+        end)
       end
 
       tool "calculate_score", "Calculate performance score" do
-        param :base_score, :number, "Base score", min: 0.0, max: 100.0, required: true
-        param :multiplier, :number, "Score multiplier", min: 1.0, max: 10.0, default: 1.0
+        param(:base_score, :number, "Base score", min: 0.0, max: 100.0, required: true)
+        param(:multiplier, :number, "Score multiplier", min: 1.0, max: 10.0, default: 1.0)
 
-        handle fn _conn, params ->
+        handle(fn _conn, params ->
           score = params["base_score"] * params["multiplier"]
-          {:ok, %{
-            "content" => [
-              %{"type" => "text", "text" => "Final score: #{score}"}
-            ]
-          }}
-        end
+
+          {:ok,
+           %{
+             "content" => [
+               %{"type" => "text", "text" => "Final score: #{score}"}
+             ]
+           }}
+        end)
       end
     end
 
@@ -438,7 +492,9 @@ defmodule ConduitMcp.ValidationTest do
         "role" => "admin"
       }
 
-      assert {:ok, validated_params} = Validation.validate_tool_params(IntegrationTestServer, "validate_user", params)
+      assert {:ok, validated_params} =
+               Validation.validate_tool_params(IntegrationTestServer, "validate_user", params)
+
       assert validated_params["name"] == "Alice Johnson"
       assert validated_params["age"] == 30
     end
@@ -446,38 +502,63 @@ defmodule ConduitMcp.ValidationTest do
     test "DSL-generated validation catches constraint violations" do
       # Test min_length violation
       params = %{"name" => "A", "age" => 30, "email" => "alice@example.com"}
-      assert {:error, errors} = Validation.validate_tool_params(IntegrationTestServer, "validate_user", params)
+
+      assert {:error, errors} =
+               Validation.validate_tool_params(IntegrationTestServer, "validate_user", params)
+
       assert length(errors) >= 1
 
       # Test max age violation
       params = %{"name" => "Alice", "age" => 200, "email" => "alice@example.com"}
-      assert {:error, errors} = Validation.validate_tool_params(IntegrationTestServer, "validate_user", params)
+
+      assert {:error, errors} =
+               Validation.validate_tool_params(IntegrationTestServer, "validate_user", params)
+
       assert length(errors) >= 1
 
       # Test invalid email
       params = %{"name" => "Alice", "age" => 30, "email" => "invalid-email"}
-      assert {:error, errors} = Validation.validate_tool_params(IntegrationTestServer, "validate_user", params)
+
+      assert {:error, errors} =
+               Validation.validate_tool_params(IntegrationTestServer, "validate_user", params)
+
       assert length(errors) >= 1
 
       # Test invalid enum value
-      params = %{"name" => "Alice", "age" => 30, "email" => "alice@example.com", "role" => "invalid"}
-      assert {:error, errors} = Validation.validate_tool_params(IntegrationTestServer, "validate_user", params)
+      params = %{
+        "name" => "Alice",
+        "age" => 30,
+        "email" => "alice@example.com",
+        "role" => "invalid"
+      }
+
+      assert {:error, errors} =
+               Validation.validate_tool_params(IntegrationTestServer, "validate_user", params)
+
       assert length(errors) >= 1
     end
 
     test "number type validation works with float constraints" do
       # Valid score
       params = %{"base_score" => 85.5, "multiplier" => 2.0}
-      assert {:ok, _} = Validation.validate_tool_params(IntegrationTestServer, "calculate_score", params)
+
+      assert {:ok, _} =
+               Validation.validate_tool_params(IntegrationTestServer, "calculate_score", params)
 
       # Invalid base_score (too high)
       params = %{"base_score" => 150.0}
-      assert {:error, errors} = Validation.validate_tool_params(IntegrationTestServer, "calculate_score", params)
+
+      assert {:error, errors} =
+               Validation.validate_tool_params(IntegrationTestServer, "calculate_score", params)
+
       assert length(errors) >= 1
 
       # Invalid multiplier (too high)
       params = %{"base_score" => 85.5, "multiplier" => 15.0}
-      assert {:error, errors} = Validation.validate_tool_params(IntegrationTestServer, "calculate_score", params)
+
+      assert {:error, errors} =
+               Validation.validate_tool_params(IntegrationTestServer, "calculate_score", params)
+
       assert length(errors) >= 1
     end
   end

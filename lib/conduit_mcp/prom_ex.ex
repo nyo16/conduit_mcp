@@ -98,6 +98,14 @@ if Code.ensure_loaded?(PromEx) do
       - Tags: `prompt_name`, `status`
       - Buckets: [10, 50, 100, 500, 1_000]
 
+    ### Message Rate Limit Metrics
+
+    - `{prefix}_message_rate_limit_check_total` - Counter of message rate limit checks
+      - Tags: `status` (:allow | :deny), `method` (MCP method name)
+    - `{prefix}_message_rate_limit_check_duration_milliseconds` - Distribution of check durations
+      - Tags: `status`, `method`
+      - Buckets: [1, 5, 10, 25, 50, 100, 250]
+
     ### Authentication Metrics
 
     - `{prefix}_auth_verify_total` - Counter of authentication attempts
@@ -203,6 +211,7 @@ if Code.ensure_loaded?(PromEx) do
         tool_metrics(metric_prefix, duration_unit),
         resource_metrics(metric_prefix, duration_unit),
         prompt_metrics(metric_prefix, duration_unit),
+        message_rate_limit_metrics(metric_prefix, duration_unit),
         auth_metrics(metric_prefix, duration_unit)
       ]
     end
@@ -335,6 +344,38 @@ if Code.ensure_loaded?(PromEx) do
       )
     end
 
+    # Message rate limit metrics from [:conduit_mcp, :message_rate_limit, :check]
+    defp message_rate_limit_metrics(metric_prefix, duration_unit) do
+      Event.build(
+        :conduit_mcp_message_rate_limit_metrics,
+        [
+          # Counter: Message rate limit checks by status and method
+          counter(
+            metric_prefix ++ [:message_rate_limit, :check, :total],
+            event_name: [:conduit_mcp, :message_rate_limit, :check],
+            description: "Total number of MCP message rate limit checks",
+            measurement: fn _measurements -> 1 end,
+            tags: [:status, :method],
+            tag_values: &extract_message_rate_limit_tags/1
+          ),
+
+          # Distribution: Message rate limit check duration
+          distribution(
+            metric_prefix ++ [:message_rate_limit, :check, :duration, duration_unit],
+            event_name: [:conduit_mcp, :message_rate_limit, :check],
+            description: "MCP message rate limit check duration distribution",
+            measurement: :duration,
+            unit: {:native, duration_unit},
+            tags: [:status, :method],
+            tag_values: &extract_message_rate_limit_tags/1,
+            reporter_options: [
+              buckets: [1, 5, 10, 25, 50, 100, 250]
+            ]
+          )
+        ]
+      )
+    end
+
     # Authentication metrics from [:conduit_mcp, :auth, :verify]
     defp auth_metrics(metric_prefix, duration_unit) do
       Event.build(
@@ -393,6 +434,13 @@ if Code.ensure_loaded?(PromEx) do
       %{
         prompt_name: normalize_string(prompt_name),
         status: status
+      }
+    end
+
+    defp extract_message_rate_limit_tags(%{status: status, method: method}) do
+      %{
+        status: status,
+        method: normalize_string(method || "unknown")
       }
     end
 

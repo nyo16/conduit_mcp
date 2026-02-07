@@ -59,12 +59,15 @@ defmodule ConduitMcp.DSL.Helpers do
   """
   defmacro text(content) do
     quote do
-      {:ok, %{
-        "content" => [%{
-          "type" => "text",
-          "text" => unquote(content)
-        }]
-      }}
+      {:ok,
+       %{
+         "content" => [
+           %{
+             "type" => "text",
+             "text" => unquote(content)
+           }
+         ]
+       }}
     end
   end
 
@@ -82,12 +85,15 @@ defmodule ConduitMcp.DSL.Helpers do
   """
   defmacro json(data) do
     quote do
-      {:ok, %{
-        "content" => [%{
-          "type" => "text",
-          "text" => Jason.encode!(unquote(data))
-        }]
-      }}
+      {:ok,
+       %{
+         "content" => [
+           %{
+             "type" => "text",
+             "text" => Jason.encode!(unquote(data))
+           }
+         ]
+       }}
     end
   end
 
@@ -130,10 +136,11 @@ defmodule ConduitMcp.DSL.Helpers do
   """
   defmacro error(message, code \\ -32000) do
     quote do
-      {:error, %{
-        "code" => unquote(code),
-        "message" => unquote(message)
-      }}
+      {:error,
+       %{
+         "code" => unquote(code),
+         "message" => unquote(message)
+       }}
     end
   end
 
@@ -149,12 +156,15 @@ defmodule ConduitMcp.DSL.Helpers do
   """
   defmacro image(url) do
     quote do
-      {:ok, %{
-        "content" => [%{
-          "type" => "image",
-          "data" => unquote(url)
-        }]
-      }}
+      {:ok,
+       %{
+         "content" => [
+           %{
+             "type" => "image",
+             "data" => unquote(url)
+           }
+         ]
+       }}
     end
   end
 

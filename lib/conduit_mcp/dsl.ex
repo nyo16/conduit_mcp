@@ -60,7 +60,6 @@ defmodule ConduitMcp.DSL do
   - handle_call_tool/handle_get_prompt/handle_read_resource callbacks
   """
 
-
   @doc false
   defmacro __using__(_opts) do
     quote do
@@ -613,22 +612,32 @@ defmodule ConduitMcp.DSL do
     resources = Module.get_attribute(env.module, :mcp_resources) || []
 
     # Build schemas at compile time (outside quote block)
-    tool_schemas = tools |> Enum.reverse() |> Enum.map(&ConduitMcp.DSL.SchemaBuilder.build_tool_schema/1)
-    prompt_schemas = prompts |> Enum.reverse() |> Enum.map(&ConduitMcp.DSL.SchemaBuilder.build_prompt_schema/1)
-    resource_schemas = resources |> Enum.reverse() |> Enum.map(&ConduitMcp.DSL.SchemaBuilder.build_resource_schema/1)
+    tool_schemas =
+      tools |> Enum.reverse() |> Enum.map(&ConduitMcp.DSL.SchemaBuilder.build_tool_schema/1)
+
+    prompt_schemas =
+      prompts |> Enum.reverse() |> Enum.map(&ConduitMcp.DSL.SchemaBuilder.build_prompt_schema/1)
+
+    resource_schemas =
+      resources
+      |> Enum.reverse()
+      |> Enum.map(&ConduitMcp.DSL.SchemaBuilder.build_resource_schema/1)
 
     # Generate validation schema lookup functions
-    validation_lookup_functions = ConduitMcp.DSL.SchemaBuilder.generate_validation_lookup_functions(
-      tools |> Enum.reverse(),
-      prompts |> Enum.reverse()
-    )
+    validation_lookup_functions =
+      ConduitMcp.DSL.SchemaBuilder.generate_validation_lookup_functions(
+        tools |> Enum.reverse(),
+        prompts |> Enum.reverse()
+      )
 
     # Validate all schemas at compile time
     case ConduitMcp.DSL.SchemaBuilder.validate_all_schemas(
-      tools |> Enum.reverse(),
-      prompts |> Enum.reverse()
-    ) do
-      :ok -> :ok
+           tools |> Enum.reverse(),
+           prompts |> Enum.reverse()
+         ) do
+      :ok ->
+        :ok
+
       {:error, errors} ->
         require Logger
         Logger.warning("Validation schema compilation warnings: #{inspect(errors)}")
@@ -715,7 +724,8 @@ defmodule ConduitMcp.DSL do
 
         nil ->
           raise CompileError,
-            description: "Tool '#{tool_name}' has no handler defined. Use 'handle fn ... end' or 'handle Module, :function'"
+            description:
+              "Tool '#{tool_name}' has no handler defined. Use 'handle fn ... end' or 'handle Module, :function'"
       end
     end)
   end
@@ -743,7 +753,8 @@ defmodule ConduitMcp.DSL do
 
         nil ->
           raise CompileError,
-            description: "Prompt '#{prompt_name}' has no get handler defined. Use 'get fn ... end' or 'get Module, :function'"
+            description:
+              "Prompt '#{prompt_name}' has no get handler defined. Use 'get fn ... end' or 'get Module, :function'"
       end
     end)
   end
@@ -751,62 +762,67 @@ defmodule ConduitMcp.DSL do
   # Generate resource handler clauses outside quote block
   defp generate_resource_clauses(resources) do
     # Generate a single comprehensive handler that tries all resources
-    resources_with_handlers = resources
-    |> Enum.reverse()
-    |> Enum.filter(fn %{handler: handler} -> handler != nil end)
+    resources_with_handlers =
+      resources
+      |> Enum.reverse()
+      |> Enum.filter(fn %{handler: handler} -> handler != nil end)
 
     if Enum.empty?(resources_with_handlers) do
       []
     else
       # Generate a single function that tries each resource
-      template_clauses = Enum.map(resources_with_handlers, fn %{uri: res_uri, handler: handler} ->
-        case handler do
-          {:fn_ast, handler_ast} ->
-            quote do
-              case ConduitMcp.DSL.extract_uri_params(unquote(res_uri), uri) do
-                {:ok, params} ->
-                  unquote(handler_ast).(conn, params, %{})
+      template_clauses =
+        Enum.map(resources_with_handlers, fn %{uri: res_uri, handler: handler} ->
+          case handler do
+            {:fn_ast, handler_ast} ->
+              quote do
+                case ConduitMcp.DSL.extract_uri_params(unquote(res_uri), uri) do
+                  {:ok, params} ->
+                    unquote(handler_ast).(conn, params, %{})
 
-                :no_match ->
-                  nil
+                  :no_match ->
+                    nil
+                end
               end
-            end
 
-          {:mfa, {mod, fun}} ->
-            quote do
-              case ConduitMcp.DSL.extract_uri_params(unquote(res_uri), uri) do
-                {:ok, params} ->
-                  apply(unquote(mod), unquote(fun), [conn, params, %{}])
+            {:mfa, {mod, fun}} ->
+              quote do
+                case ConduitMcp.DSL.extract_uri_params(unquote(res_uri), uri) do
+                  {:ok, params} ->
+                    apply(unquote(mod), unquote(fun), [conn, params, %{}])
 
-                :no_match ->
-                  nil
+                  :no_match ->
+                    nil
+                end
               end
-            end
-        end
-      end)
+          end
+        end)
 
       # Create a function that tries each template in sequence
-      [quote do
-        def handle_read_resource(conn, uri) do
-          # Try each resource template in order
-          result = unquote(template_clauses)
-          |> Enum.find_value(fn clause_result ->
-            case clause_result do
-              nil -> false
-              other -> other
+      [
+        quote do
+          def handle_read_resource(conn, uri) do
+            # Try each resource template in order
+            result =
+              unquote(template_clauses)
+              |> Enum.find_value(fn clause_result ->
+                case clause_result do
+                  nil -> false
+                  other -> other
+                end
+              end)
+
+            case result do
+              nil ->
+                # No match found, fall through to catch-all
+                {:error, %{"code" => -32601, "message" => "Resource not found: #{uri}"}}
+
+              result ->
+                result
             end
-          end)
-
-          case result do
-            nil ->
-              # No match found, fall through to catch-all
-              {:error, %{"code" => -32601, "message" => "Resource not found: #{uri}"}}
-
-            result ->
-              result
           end
         end
-      end]
+      ]
     end
   end
 
@@ -818,8 +834,9 @@ defmodule ConduitMcp.DSL do
     # Result: %{"id" => "123", "post_id" => "456"}
 
     # Extract parameter names first (before escaping)
-    param_names = Regex.scan(~r/\{([^}]+)\}/, template)
-    |> Enum.map(fn [_full, name] -> name end)
+    param_names =
+      Regex.scan(~r/\{([^}]+)\}/, template)
+      |> Enum.map(fn [_full, name] -> name end)
 
     # Replace {param} with a placeholder token before escaping
     template_with_tokens = Regex.replace(~r/\{[^}]+\}/, template, "<<<PARAM>>>")
@@ -836,8 +853,9 @@ defmodule ConduitMcp.DSL do
         :no_match
 
       [_full | captured_values] ->
-        params = Enum.zip(param_names, captured_values)
-        |> Enum.into(%{})
+        params =
+          Enum.zip(param_names, captured_values)
+          |> Enum.into(%{})
 
         {:ok, params}
     end

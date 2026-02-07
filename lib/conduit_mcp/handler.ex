@@ -65,7 +65,11 @@ defmodule ConduitMcp.Handler do
             Protocol.success_response(id, result)
 
           {:error, error} ->
-            Protocol.error_response(id, error["code"] || -32000, error["message"] || "Failed to list tools")
+            Protocol.error_response(
+              id,
+              error["code"] || -32000,
+              error["message"] || "Failed to list tools"
+            )
 
           other ->
             Logger.error("Unexpected result from handle_list_tools: #{inspect(other)}")
@@ -86,7 +90,11 @@ defmodule ConduitMcp.Handler do
                   Protocol.success_response(id, tool_result)
 
                 {:error, error} ->
-                  Protocol.error_response(id, error["code"] || -32000, error["message"] || "Tool execution failed")
+                  Protocol.error_response(
+                    id,
+                    error["code"] || -32000,
+                    error["message"] || "Tool execution failed"
+                  )
 
                 other ->
                   Logger.error("Unexpected result from handle_call_tool: #{inspect(other)}")
@@ -107,7 +115,11 @@ defmodule ConduitMcp.Handler do
         :telemetry.execute(
           [:conduit_mcp, :tool, :execute],
           %{duration: duration},
-          %{tool_name: tool_name, server_module: server_module, status: if(Map.has_key?(result, "error"), do: :error, else: :ok)}
+          %{
+            tool_name: tool_name,
+            server_module: server_module,
+            status: if(Map.has_key?(result, "error"), do: :error, else: :ok)
+          }
         )
 
         result
@@ -118,7 +130,11 @@ defmodule ConduitMcp.Handler do
             Protocol.success_response(id, result)
 
           {:error, error} ->
-            Protocol.error_response(id, error["code"] || -32000, error["message"] || "Failed to list resources")
+            Protocol.error_response(
+              id,
+              error["code"] || -32000,
+              error["message"] || "Failed to list resources"
+            )
 
           other ->
             Logger.error("Unexpected result from handle_list_resources: #{inspect(other)}")
@@ -136,7 +152,11 @@ defmodule ConduitMcp.Handler do
               Protocol.success_response(id, resource_result)
 
             {:error, error} ->
-              Protocol.error_response(id, error["code"] || -32000, error["message"] || "Resource read failed")
+              Protocol.error_response(
+                id,
+                error["code"] || -32000,
+                error["message"] || "Resource read failed"
+              )
 
             other ->
               Logger.error("Unexpected result from handle_read_resource: #{inspect(other)}")
@@ -148,7 +168,11 @@ defmodule ConduitMcp.Handler do
         :telemetry.execute(
           [:conduit_mcp, :resource, :read],
           %{duration: duration},
-          %{uri: uri, server_module: server_module, status: if(Map.has_key?(result, "error"), do: :error, else: :ok)}
+          %{
+            uri: uri,
+            server_module: server_module,
+            status: if(Map.has_key?(result, "error"), do: :error, else: :ok)
+          }
         )
 
         result
@@ -159,7 +183,11 @@ defmodule ConduitMcp.Handler do
             Protocol.success_response(id, result)
 
           {:error, error} ->
-            Protocol.error_response(id, error["code"] || -32000, error["message"] || "Failed to list prompts")
+            Protocol.error_response(
+              id,
+              error["code"] || -32000,
+              error["message"] || "Failed to list prompts"
+            )
 
           other ->
             Logger.error("Unexpected result from handle_list_prompts: #{inspect(other)}")
@@ -180,7 +208,11 @@ defmodule ConduitMcp.Handler do
                   Protocol.success_response(id, prompt_result)
 
                 {:error, error} ->
-                  Protocol.error_response(id, error["code"] || -32000, error["message"] || "Prompt get failed")
+                  Protocol.error_response(
+                    id,
+                    error["code"] || -32000,
+                    error["message"] || "Prompt get failed"
+                  )
 
                 other ->
                   Logger.error("Unexpected result from handle_get_prompt: #{inspect(other)}")
@@ -201,7 +233,11 @@ defmodule ConduitMcp.Handler do
         :telemetry.execute(
           [:conduit_mcp, :prompt, :get],
           %{duration: duration},
-          %{prompt_name: prompt_name, server_module: server_module, status: if(Map.has_key?(result, "error"), do: :error, else: :ok)}
+          %{
+            prompt_name: prompt_name,
+            server_module: server_module,
+            status: if(Map.has_key?(result, "error"), do: :error, else: :ok)
+          }
         )
 
         result
@@ -212,6 +248,7 @@ defmodule ConduitMcp.Handler do
   rescue
     error ->
       Logger.error("Error handling method: #{inspect(error)}")
+
       Protocol.error_response(
         Map.get(request, "id"),
         Protocol.internal_error(),

@@ -18,7 +18,8 @@ defmodule ConduitMcp.Plugs.AuthTest do
 
     test "passes through without checking headers when disabled" do
       opts = Auth.init(enabled: false)
-      conn = conn(:get, "/")  # No auth header
+      # No auth header
+      conn = conn(:get, "/")
 
       result = Auth.call(conn, opts)
 
@@ -126,11 +127,13 @@ defmodule ConduitMcp.Plugs.AuthTest do
 
   describe "api key strategy" do
     setup do
-      opts = Auth.init(
-        strategy: :api_key,
-        api_key: "my-api-key-789",
-        header: "x-api-key"
-      )
+      opts =
+        Auth.init(
+          strategy: :api_key,
+          api_key: "my-api-key-789",
+          header: "x-api-key"
+        )
+
       {:ok, opts: opts}
     end
 
@@ -166,11 +169,12 @@ defmodule ConduitMcp.Plugs.AuthTest do
     end
 
     test "supports custom header name" do
-      opts = Auth.init(
-        strategy: :api_key,
-        api_key: "custom-key",
-        header: "x-custom-api-key"
-      )
+      opts =
+        Auth.init(
+          strategy: :api_key,
+          api_key: "custom-key",
+          header: "x-custom-api-key"
+        )
 
       conn =
         conn(:get, "/")
@@ -225,11 +229,12 @@ defmodule ConduitMcp.Plugs.AuthTest do
     test "supports custom assign key" do
       verify_fn = fn _token -> {:ok, %{role: :admin}} end
 
-      opts = Auth.init(
-        strategy: :function,
-        verify: verify_fn,
-        assign_as: :admin_user
-      )
+      opts =
+        Auth.init(
+          strategy: :function,
+          verify: verify_fn,
+          assign_as: :admin_user
+        )
 
       conn =
         conn(:get, "/")
@@ -262,10 +267,11 @@ defmodule ConduitMcp.Plugs.AuthTest do
     end
 
     test "calls module function with MFA tuple" do
-      opts = Auth.init(
-        strategy: :function,
-        verify: {TestAuth, :verify_token, []}
-      )
+      opts =
+        Auth.init(
+          strategy: :function,
+          verify: {TestAuth, :verify_token, []}
+        )
 
       conn =
         conn(:get, "/")
@@ -278,10 +284,11 @@ defmodule ConduitMcp.Plugs.AuthTest do
     end
 
     test "supports extra arguments in MFA tuple" do
-      opts = Auth.init(
-        strategy: :function,
-        verify: {TestAuth, :verify_with_extra_args, ["prefix_"]}
-      )
+      opts =
+        Auth.init(
+          strategy: :function,
+          verify: {TestAuth, :verify_with_extra_args, ["prefix_"]}
+        )
 
       conn =
         conn(:get, "/")
@@ -294,10 +301,11 @@ defmodule ConduitMcp.Plugs.AuthTest do
     end
 
     test "rejects when MFA returns error" do
-      opts = Auth.init(
-        strategy: :function,
-        verify: {TestAuth, :verify_token, []}
-      )
+      opts =
+        Auth.init(
+          strategy: :function,
+          verify: {TestAuth, :verify_token, []}
+        )
 
       conn =
         conn(:get, "/")
@@ -340,7 +348,8 @@ defmodule ConduitMcp.Plugs.AuthTest do
     end
 
     test "bearer_token strategy without token configured fails" do
-      opts = Auth.init(strategy: :bearer_token)  # No token provided
+      # No token provided
+      opts = Auth.init(strategy: :bearer_token)
 
       conn =
         conn(:get, "/")
@@ -353,7 +362,8 @@ defmodule ConduitMcp.Plugs.AuthTest do
     end
 
     test "api_key strategy without api_key configured fails" do
-      opts = Auth.init(strategy: :api_key)  # No api_key provided
+      # No api_key provided
+      opts = Auth.init(strategy: :api_key)
 
       conn =
         conn(:get, "/")
@@ -366,7 +376,8 @@ defmodule ConduitMcp.Plugs.AuthTest do
     end
 
     test "function strategy without verify function fails" do
-      opts = Auth.init(strategy: :function)  # No verify function
+      # No verify function
+      opts = Auth.init(strategy: :function)
 
       conn =
         conn(:get, "/")

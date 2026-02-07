@@ -64,22 +64,30 @@ defmodule ConduitMcp.Validation do
                 tool: tool_name,
                 server: server_module
               })
+
             {:error, errors} ->
-              :telemetry.execute([:conduit_mcp, :validation, :failed], %{error_count: length(errors)}, %{
-                tool: tool_name,
-                server: server_module,
-                errors: errors
-              })
+              :telemetry.execute(
+                [:conduit_mcp, :validation, :failed],
+                %{error_count: length(errors)},
+                %{
+                  tool: tool_name,
+                  server: server_module,
+                  errors: errors
+                }
+              )
           end
 
           result
 
         {:error, :tool_not_found} ->
-          error = [%{
-            parameter: nil,
-            value: nil,
-            message: "Tool '#{tool_name}' not found"
-          }]
+          error = [
+            %{
+              parameter: nil,
+              value: nil,
+              message: "Tool '#{tool_name}' not found"
+            }
+          ]
+
           {:error, format_validation_errors(error)}
 
         {:error, :no_validation_schema} ->
@@ -93,11 +101,14 @@ defmodule ConduitMcp.Validation do
   end
 
   def validate_tool_params(_server_module, _tool_name, params) do
-    {:error, [%{
-      parameter: nil,
-      value: params,
-      message: "Parameters must be a map"
-    }]}
+    {:error,
+     [
+       %{
+         parameter: nil,
+         value: params,
+         message: "Parameters must be a map"
+       }
+     ]}
   end
 
   @doc """
@@ -112,11 +123,14 @@ defmodule ConduitMcp.Validation do
           validate_with_schema(schema, args, prompt_name)
 
         {:error, :prompt_not_found} ->
-          {:error, [%{
-            parameter: nil,
-            value: nil,
-            message: "Prompt '#{prompt_name}' not found"
-          }]}
+          {:error,
+           [
+             %{
+               parameter: nil,
+               value: nil,
+               message: "Prompt '#{prompt_name}' not found"
+             }
+           ]}
 
         {:error, :no_validation_schema} ->
           # Server doesn't have validation schemas - skip validation
@@ -128,11 +142,14 @@ defmodule ConduitMcp.Validation do
   end
 
   def validate_prompt_args(_server_module, _prompt_name, args) do
-    {:error, [%{
-      parameter: nil,
-      value: args,
-      message: "Arguments must be a map"
-    }]}
+    {:error,
+     [
+       %{
+         parameter: nil,
+         value: args,
+         message: "Arguments must be a map"
+       }
+     ]}
   end
 
   @doc """
@@ -158,7 +175,6 @@ defmodule ConduitMcp.Validation do
     Application.get_env(:conduit_mcp, :validation, [])
     |> Keyword.get(:runtime_validation, true)
   end
-
 
   defp type_coercion_enabled? do
     Application.get_env(:conduit_mcp, :validation, [])
@@ -206,11 +222,12 @@ defmodule ConduitMcp.Validation do
 
       {:ok, preprocessed_params} ->
         # Apply type coercion if enabled
-        coerced_params = if type_coercion_enabled?() do
-          apply_type_coercion(preprocessed_params, schema)
-        else
-          preprocessed_params
-        end
+        coerced_params =
+          if type_coercion_enabled?() do
+            apply_type_coercion(preprocessed_params, schema)
+          else
+            preprocessed_params
+          end
 
         # Remove custom constraint markers and convert map to keyword list for NimbleOptions
         clean_schema = remove_custom_constraint_markers(schema)
@@ -311,6 +328,7 @@ defmodule ConduitMcp.Validation do
               value: param_value,
               message: "must be one of #{inspect(enum_values)}"
             }
+
             {:halt, {:error, [error]}}
           end
       end
@@ -339,15 +357,23 @@ defmodule ConduitMcp.Validation do
     min_val = Keyword.get(opts, :__min_value__) || Keyword.get(opts, :min)
 
     case min_val do
-      nil -> {:ok, value}
-      min_val when is_number(value) and value >= min_val -> {:ok, value}
+      nil ->
+        {:ok, value}
+
+      min_val when is_number(value) and value >= min_val ->
+        {:ok, value}
+
       min_val when is_number(value) ->
-        {:error, %{
-          parameter: to_string(param_name),
-          value: value,
-          message: "must be greater than or equal to #{min_val}"
-        }}
-      _ -> {:ok, value}  # Not a number, skip min validation
+        {:error,
+         %{
+           parameter: to_string(param_name),
+           value: value,
+           message: "must be greater than or equal to #{min_val}"
+         }}
+
+      # Not a number, skip min validation
+      _ ->
+        {:ok, value}
     end
   end
 
@@ -355,15 +381,23 @@ defmodule ConduitMcp.Validation do
     max_val = Keyword.get(opts, :__max_value__) || Keyword.get(opts, :max)
 
     case max_val do
-      nil -> {:ok, value}
-      max_val when is_number(value) and value <= max_val -> {:ok, value}
+      nil ->
+        {:ok, value}
+
+      max_val when is_number(value) and value <= max_val ->
+        {:ok, value}
+
       max_val when is_number(value) ->
-        {:error, %{
-          parameter: to_string(param_name),
-          value: value,
-          message: "must be less than or equal to #{max_val}"
-        }}
-      _ -> {:ok, value}  # Not a number, skip max validation
+        {:error,
+         %{
+           parameter: to_string(param_name),
+           value: value,
+           message: "must be less than or equal to #{max_val}"
+         }}
+
+      # Not a number, skip max validation
+      _ ->
+        {:ok, value}
     end
   end
 
@@ -389,15 +423,23 @@ defmodule ConduitMcp.Validation do
     min_len = Keyword.get(opts, :__min_length__) || Keyword.get(opts, :min_length)
 
     case min_len do
-      nil -> {:ok, value}
-      min_len when is_binary(value) and byte_size(value) >= min_len -> {:ok, value}
+      nil ->
+        {:ok, value}
+
+      min_len when is_binary(value) and byte_size(value) >= min_len ->
+        {:ok, value}
+
       min_len when is_binary(value) ->
-        {:error, %{
-          parameter: to_string(param_name),
-          value: value,
-          message: "must be at least #{min_len} characters long"
-        }}
-      _ -> {:ok, value}  # Not a string, skip length validation
+        {:error,
+         %{
+           parameter: to_string(param_name),
+           value: value,
+           message: "must be at least #{min_len} characters long"
+         }}
+
+      # Not a string, skip length validation
+      _ ->
+        {:ok, value}
     end
   end
 
@@ -405,15 +447,23 @@ defmodule ConduitMcp.Validation do
     max_len = Keyword.get(opts, :__max_length__) || Keyword.get(opts, :max_length)
 
     case max_len do
-      nil -> {:ok, value}
-      max_len when is_binary(value) and byte_size(value) <= max_len -> {:ok, value}
+      nil ->
+        {:ok, value}
+
+      max_len when is_binary(value) and byte_size(value) <= max_len ->
+        {:ok, value}
+
       max_len when is_binary(value) ->
-        {:error, %{
-          parameter: to_string(param_name),
-          value: value,
-          message: "must be no more than #{max_len} characters long"
-        }}
-      _ -> {:ok, value}  # Not a string, skip length validation
+        {:error,
+         %{
+           parameter: to_string(param_name),
+           value: value,
+           message: "must be no more than #{max_len} characters long"
+         }}
+
+      # Not a string, skip length validation
+      _ ->
+        {:ok, value}
     end
   end
 
@@ -439,6 +489,7 @@ defmodule ConduitMcp.Validation do
                   value: param_value,
                   message: "failed custom validation"
                 }
+
                 {:halt, {:error, [error]}}
               end
             rescue
@@ -448,6 +499,7 @@ defmodule ConduitMcp.Validation do
                   value: param_value,
                   message: "validation function error"
                 }
+
                 {:halt, {:error, [error]}}
             end
           end
@@ -457,14 +509,25 @@ defmodule ConduitMcp.Validation do
 
   defp remove_custom_constraint_markers(schema) do
     custom_markers = [
-      :__enum_values__, :__min_value__, :__max_value__, :__min_length__, :__max_length__,
-      :validator, :min, :max, :min_length, :max_length, :enum
+      :__enum_values__,
+      :__min_value__,
+      :__max_value__,
+      :__min_length__,
+      :__max_length__,
+      :validator,
+      :min,
+      :max,
+      :min_length,
+      :max_length,
+      :enum
     ]
 
     Enum.map(schema, fn {param_name, param_opts} ->
-      clean_opts = Enum.reduce(custom_markers, param_opts, fn marker, acc ->
-        Keyword.delete(acc, marker)
-      end)
+      clean_opts =
+        Enum.reduce(custom_markers, param_opts, fn marker, acc ->
+          Keyword.delete(acc, marker)
+        end)
+
       {param_name, clean_opts}
     end)
   end
@@ -487,14 +550,16 @@ defmodule ConduitMcp.Validation do
   defp coerce_value(value, :integer) when is_binary(value) do
     case Integer.parse(value) do
       {int_val, ""} -> int_val
-      _ -> value  # Can't coerce, keep original
+      # Can't coerce, keep original
+      _ -> value
     end
   end
 
   defp coerce_value(value, :float) when is_binary(value) do
     case Float.parse(value) do
       {float_val, ""} -> float_val
-      _ -> value  # Can't coerce, keep original
+      # Can't coerce, keep original
+      _ -> value
     end
   end
 
@@ -504,9 +569,11 @@ defmodule ConduitMcp.Validation do
       "false" -> false
       "1" -> true
       "0" -> false
-      _ -> value  # Can't coerce, keep original
+      # Can't coerce, keep original
+      _ -> value
     end
   end
 
-  defp coerce_value(value, _type), do: value  # No coercion needed or supported
+  # No coercion needed or supported
+  defp coerce_value(value, _type), do: value
 end
