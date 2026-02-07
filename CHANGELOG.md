@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Supports multiple parameters (e.g., `"user://{id}/posts/{post_id}"`)
   - Uses proper regex escaping with placeholder tokens
   - Returns `{:ok, params}` on match or `:no_match` otherwise
-  - Full implementation in `ConduitMcp.DSL.extract_uri_params/2`
+  - Full implementation in `extract_uri_params/2` (internal)
   - Resolves TODO from previous versions
 
 - **PromEx plugin** for Prometheus monitoring
