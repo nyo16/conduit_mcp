@@ -60,212 +60,22 @@ defmodule ConduitMcp.Handler do
         Protocol.success_response(id, %{})
 
       "tools/list" ->
-        list_result = call_list_callback(server_module, :handle_list_tools, conn, params)
-
-        case list_result do
-          {:ok, result} when is_map(result) ->
-            Protocol.success_response(id, result)
-
-          {:error, error} ->
-            Protocol.error_response(
-              id,
-              error["code"] || -32000,
-              error["message"] || "Failed to list tools"
-            )
-
-          other ->
-            Logger.error("Unexpected result from handle_list_tools: #{inspect(other)}")
-            Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
-        end
+        dispatch_list(id, server_module, :handle_list_tools, conn, params)
 
       "tools/call" ->
-        tool_name = Map.get(params, "name")
-        tool_params = Map.get(params, "arguments", %{})
-
-        start_time = System.monotonic_time()
-
-        result =
-          case check_tool_scope(conn, server_module, tool_name) do
-            {:error, scope_error} ->
-              scope_error
-
-            :ok ->
-              case ConduitMcp.Validation.validate_tool_params(
-                     server_module,
-                     tool_name,
-                     tool_params
-                   ) do
-                {:ok, validated_params} ->
-                  case server_module.handle_call_tool(conn, tool_name, validated_params) do
-                    {:ok, tool_result} when is_map(tool_result) ->
-                      Protocol.success_response(id, tool_result)
-                      |> maybe_add_meta(params)
-
-                    {:error, error} ->
-                      Protocol.error_response(
-                        id,
-                        error["code"] || -32000,
-                        error["message"] || "Tool execution failed"
-                      )
-
-                    other ->
-                      Logger.error("Unexpected result from handle_call_tool: #{inspect(other)}")
-
-                      Protocol.error_response(
-                        id,
-                        Protocol.internal_error(),
-                        "Internal server error"
-                      )
-                  end
-
-                {:error, validation_errors} ->
-                  Protocol.error_response(
-                    id,
-                    -32602,
-                    "Parameter validation failed",
-                    %{
-                      "errors" =>
-                        ConduitMcp.Validation.format_validation_errors(validation_errors)
-                    }
-                  )
-              end
-          end
-
-        duration = System.monotonic_time() - start_time
-
-        :telemetry.execute(
-          [:conduit_mcp, :tool, :execute],
-          %{duration: duration},
-          %{
-            tool_name: tool_name,
-            server_module: server_module,
-            status: if(Map.has_key?(result, "error"), do: :error, else: :ok)
-          }
-        )
-
-        result
+        handle_tool_call(id, params, server_module, conn)
 
       "resources/list" ->
-        list_result = call_list_callback(server_module, :handle_list_resources, conn, params)
-
-        case list_result do
-          {:ok, result} when is_map(result) ->
-            Protocol.success_response(id, result)
-
-          {:error, error} ->
-            Protocol.error_response(
-              id,
-              error["code"] || -32000,
-              error["message"] || "Failed to list resources"
-            )
-
-          other ->
-            Logger.error("Unexpected result from handle_list_resources: #{inspect(other)}")
-            Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
-        end
+        dispatch_list(id, server_module, :handle_list_resources, conn, params)
 
       "resources/read" ->
-        uri = Map.get(params, "uri")
-
-        start_time = System.monotonic_time()
-
-        result =
-          case server_module.handle_read_resource(conn, uri) do
-            {:ok, resource_result} when is_map(resource_result) ->
-              Protocol.success_response(id, resource_result)
-
-            {:error, error} ->
-              Protocol.error_response(
-                id,
-                error["code"] || -32000,
-                error["message"] || "Resource read failed"
-              )
-
-            other ->
-              Logger.error("Unexpected result from handle_read_resource: #{inspect(other)}")
-              Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
-          end
-
-        duration = System.monotonic_time() - start_time
-
-        :telemetry.execute(
-          [:conduit_mcp, :resource, :read],
-          %{duration: duration},
-          %{
-            uri: uri,
-            server_module: server_module,
-            status: if(Map.has_key?(result, "error"), do: :error, else: :ok)
-          }
-        )
-
-        result
+        handle_resource_read(id, params, server_module, conn)
 
       "prompts/list" ->
-        list_result = call_list_callback(server_module, :handle_list_prompts, conn, params)
-
-        case list_result do
-          {:ok, result} when is_map(result) ->
-            Protocol.success_response(id, result)
-
-          {:error, error} ->
-            Protocol.error_response(
-              id,
-              error["code"] || -32000,
-              error["message"] || "Failed to list prompts"
-            )
-
-          other ->
-            Logger.error("Unexpected result from handle_list_prompts: #{inspect(other)}")
-            Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
-        end
+        dispatch_list(id, server_module, :handle_list_prompts, conn, params)
 
       "prompts/get" ->
-        prompt_name = Map.get(params, "name")
-        prompt_args = Map.get(params, "arguments", %{})
-
-        start_time = System.monotonic_time()
-
-        result =
-          case ConduitMcp.Validation.validate_prompt_args(server_module, prompt_name, prompt_args) do
-            {:ok, validated_args} ->
-              case server_module.handle_get_prompt(conn, prompt_name, validated_args) do
-                {:ok, prompt_result} when is_map(prompt_result) ->
-                  Protocol.success_response(id, prompt_result)
-
-                {:error, error} ->
-                  Protocol.error_response(
-                    id,
-                    error["code"] || -32000,
-                    error["message"] || "Prompt get failed"
-                  )
-
-                other ->
-                  Logger.error("Unexpected result from handle_get_prompt: #{inspect(other)}")
-                  Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
-              end
-
-            {:error, validation_errors} ->
-              Protocol.error_response(
-                id,
-                -32602,
-                "Argument validation failed",
-                %{"errors" => ConduitMcp.Validation.format_validation_errors(validation_errors)}
-              )
-          end
-
-        duration = System.monotonic_time() - start_time
-
-        :telemetry.execute(
-          [:conduit_mcp, :prompt, :get],
-          %{duration: duration},
-          %{
-            prompt_name: prompt_name,
-            server_module: server_module,
-            status: if(Map.has_key?(result, "error"), do: :error, else: :ok)
-          }
-        )
-
-        result
+        handle_prompt_get(id, params, server_module, conn)
 
       "completion/complete" ->
         handle_completion(id, params, server_module, conn)
@@ -353,35 +163,148 @@ defmodule ConduitMcp.Handler do
     end
   end
 
+  defp dispatch_list(id, server_module, callback_name, conn, params) do
+    dispatch_callback(
+      id,
+      fn -> call_list_callback(server_module, callback_name, conn, params) end,
+      Atom.to_string(callback_name)
+    )
+  end
+
+  defp handle_tool_call(id, params, server_module, conn) do
+    tool_name = Map.get(params, "name")
+    tool_params = Map.get(params, "arguments", %{})
+    start_time = System.monotonic_time()
+
+    result =
+      with :ok <- check_tool_scope(conn, server_module, tool_name),
+           {:ok, validated_params} <-
+             ConduitMcp.Validation.validate_tool_params(server_module, tool_name, tool_params) do
+        dispatch_callback(
+          id,
+          fn -> server_module.handle_call_tool(conn, tool_name, validated_params) end,
+          "handle_call_tool"
+        )
+        |> maybe_add_meta(params)
+      else
+        {:error, %{"error" => _} = scope_error} ->
+          scope_error
+
+        {:error, validation_errors} ->
+          Protocol.error_response(
+            id,
+            -32602,
+            "Parameter validation failed",
+            %{"errors" => ConduitMcp.Validation.format_validation_errors(validation_errors)}
+          )
+      end
+
+    duration = System.monotonic_time() - start_time
+
+    :telemetry.execute(
+      [:conduit_mcp, :tool, :execute],
+      %{duration: duration},
+      %{
+        tool_name: tool_name,
+        server_module: server_module,
+        status: if(is_map(result) and Map.has_key?(result, "error"), do: :error, else: :ok)
+      }
+    )
+
+    result
+  end
+
+  defp handle_resource_read(id, params, server_module, conn) do
+    uri = Map.get(params, "uri")
+    start_time = System.monotonic_time()
+
+    result =
+      dispatch_callback(
+        id,
+        fn -> server_module.handle_read_resource(conn, uri) end,
+        "handle_read_resource"
+      )
+
+    duration = System.monotonic_time() - start_time
+
+    :telemetry.execute(
+      [:conduit_mcp, :resource, :read],
+      %{duration: duration},
+      %{
+        uri: uri,
+        server_module: server_module,
+        status: if(Map.has_key?(result, "error"), do: :error, else: :ok)
+      }
+    )
+
+    result
+  end
+
+  defp handle_prompt_get(id, params, server_module, conn) do
+    prompt_name = Map.get(params, "name")
+    prompt_args = Map.get(params, "arguments", %{})
+    start_time = System.monotonic_time()
+
+    result =
+      case ConduitMcp.Validation.validate_prompt_args(server_module, prompt_name, prompt_args) do
+        {:ok, validated_args} ->
+          dispatch_callback(
+            id,
+            fn -> server_module.handle_get_prompt(conn, prompt_name, validated_args) end,
+            "handle_get_prompt"
+          )
+
+        {:error, validation_errors} ->
+          Protocol.error_response(
+            id,
+            -32602,
+            "Argument validation failed",
+            %{"errors" => ConduitMcp.Validation.format_validation_errors(validation_errors)}
+          )
+      end
+
+    duration = System.monotonic_time() - start_time
+
+    :telemetry.execute(
+      [:conduit_mcp, :prompt, :get],
+      %{duration: duration},
+      %{
+        prompt_name: prompt_name,
+        server_module: server_module,
+        status: if(Map.has_key?(result, "error"), do: :error, else: :ok)
+      }
+    )
+
+    result
+  end
+
   # Checks if the tool requires an OAuth scope and if the request has it.
   # Returns :ok if no scope required or scope is present.
   # Returns {:error, error_response} if scope is missing.
   defp check_tool_scope(conn, server_module, tool_name) do
-    has_scope_lookup =
-      function_exported?(server_module, :__scope_for_tool__, 1)
+    required_scope = get_required_scope(server_module, tool_name)
+    verify_scope(conn, required_scope)
+  end
 
-    if has_scope_lookup do
-      case server_module.__scope_for_tool__(tool_name) do
-        nil ->
-          :ok
-
-        required_scope ->
-          token_scopes = Map.get(conn.assigns, :oauth_scopes, [])
-          required = String.split(required_scope, " ", trim: true)
-
-          if Enum.all?(required, &(&1 in token_scopes)) do
-            :ok
-          else
-            {:error,
-             Protocol.error_response(
-               nil,
-               -32000,
-               "Insufficient scope. Required: #{required_scope}"
-             )}
-          end
-      end
+  defp get_required_scope(server_module, tool_name) do
+    if function_exported?(server_module, :__scope_for_tool__, 1) do
+      server_module.__scope_for_tool__(tool_name)
     else
+      nil
+    end
+  end
+
+  defp verify_scope(_conn, nil), do: :ok
+
+  defp verify_scope(conn, required_scope) do
+    token_scopes = Map.get(conn.assigns, :oauth_scopes, [])
+    required = String.split(required_scope, " ", trim: true)
+
+    if Enum.all?(required, &(&1 in token_scopes)) do
       :ok
+    else
+      {:error,
+       Protocol.error_response(nil, -32000, "Insufficient scope. Required: #{required_scope}")}
     end
   end
 

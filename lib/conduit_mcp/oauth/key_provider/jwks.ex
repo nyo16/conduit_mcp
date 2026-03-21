@@ -45,31 +45,27 @@ if Code.ensure_loaded?(Req) do
 
     @impl true
     def fetch_key(kid, config) do
-      case fetch_keys(config) do
-        {:ok, keys} ->
-          case Enum.find(keys, fn key -> Map.get(key, "kid") == kid end) do
-            nil ->
-              # Key not found — force refresh in case keys rotated
-              jwks_uri = Keyword.fetch!(config, :jwks_uri)
-
-              case fetch_and_cache(jwks_uri) do
-                {:ok, fresh_keys} ->
-                  case Enum.find(fresh_keys, fn key -> Map.get(key, "kid") == kid end) do
-                    nil -> {:error, :not_found}
-                    key -> {:ok, key}
-                  end
-
-                error ->
-                  error
-              end
-
-            key ->
-              {:ok, key}
-          end
-
-        error ->
-          error
+      with {:ok, keys} <- fetch_keys(config),
+           nil <- find_key(keys, kid),
+           {:ok, fresh_keys} <- refresh_keys(config),
+           nil <- find_key(fresh_keys, kid) do
+        {:error, :not_found}
+      else
+        {:ok, key} -> {:ok, key}
+        {:error, _} = error -> error
       end
+    end
+
+    defp find_key(keys, kid) do
+      case Enum.find(keys, fn key -> Map.get(key, "kid") == kid end) do
+        nil -> nil
+        key -> {:ok, key}
+      end
+    end
+
+    defp refresh_keys(config) do
+      jwks_uri = Keyword.fetch!(config, :jwks_uri)
+      fetch_and_cache(jwks_uri)
     end
 
     defp ensure_table do
