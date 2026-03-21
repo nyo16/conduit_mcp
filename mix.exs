@@ -58,6 +58,13 @@ defmodule ConduitMcp.MixProject do
       # Optional: Prometheus metrics via PromEx
       {:prom_ex, "~> 1.11", optional: true},
 
+      # Optional: OAuth 2.1 JWT validation (only needed if using :oauth auth strategy)
+      {:joken, "~> 2.6", optional: true},
+      {:jose, "~> 1.11", optional: true},
+
+      # Optional: HTTP client for JWKS key fetching (only needed for JWKS key provider)
+      {:req, "~> 0.5", optional: true},
+
       # Development
       {:ex_doc, "~> 0.39", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false},

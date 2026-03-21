@@ -115,12 +115,16 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   defp maybe_authenticate(conn, _opts) do
     case conn.private[:auth_config] do
       nil ->
-        # No auth configured
         conn
 
       auth_opts ->
-        # Apply auth plug
-        ConduitMcp.Plugs.Auth.call(conn, ConduitMcp.Plugs.Auth.init(auth_opts))
+        strategy = Keyword.get(auth_opts, :strategy)
+
+        if strategy == :oauth and Code.ensure_loaded?(ConduitMcp.Plugs.OAuth) do
+          ConduitMcp.Plugs.OAuth.call(conn, ConduitMcp.Plugs.OAuth.init(auth_opts))
+        else
+          ConduitMcp.Plugs.Auth.call(conn, ConduitMcp.Plugs.Auth.init(auth_opts))
+        end
     end
   end
 
@@ -308,6 +312,27 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     conn
     |> put_resp_content_type("application/json")
     |> send_resp(200, Jason.encode!(%{status: "ok"}))
+  end
+
+  # OAuth Protected Resource Metadata (RFC 9728)
+  get "/.well-known/oauth-protected-resource" do
+    case conn.private[:auth_config] do
+      auth_config when is_list(auth_config) and auth_config != [] ->
+        strategy = Keyword.get(auth_config, :strategy)
+
+        if strategy == :oauth do
+          metadata = ConduitMcp.OAuth.ResourceMetadata.build(auth_config)
+
+          conn
+          |> put_resp_content_type("application/json")
+          |> send_resp(200, Jason.encode!(metadata))
+        else
+          send_resp(conn, 404, "Not found")
+        end
+
+      _ ->
+        send_resp(conn, 404, "Not found")
+    end
   end
 
   # Catch all

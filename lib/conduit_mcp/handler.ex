@@ -85,32 +85,50 @@ defmodule ConduitMcp.Handler do
         start_time = System.monotonic_time()
 
         result =
-          case ConduitMcp.Validation.validate_tool_params(server_module, tool_name, tool_params) do
-            {:ok, validated_params} ->
-              case server_module.handle_call_tool(conn, tool_name, validated_params) do
-                {:ok, tool_result} when is_map(tool_result) ->
-                  Protocol.success_response(id, tool_result)
-                  |> maybe_add_meta(params)
+          case check_tool_scope(conn, server_module, tool_name) do
+            {:error, scope_error} ->
+              scope_error
 
-                {:error, error} ->
+            :ok ->
+              case ConduitMcp.Validation.validate_tool_params(
+                     server_module,
+                     tool_name,
+                     tool_params
+                   ) do
+                {:ok, validated_params} ->
+                  case server_module.handle_call_tool(conn, tool_name, validated_params) do
+                    {:ok, tool_result} when is_map(tool_result) ->
+                      Protocol.success_response(id, tool_result)
+                      |> maybe_add_meta(params)
+
+                    {:error, error} ->
+                      Protocol.error_response(
+                        id,
+                        error["code"] || -32000,
+                        error["message"] || "Tool execution failed"
+                      )
+
+                    other ->
+                      Logger.error("Unexpected result from handle_call_tool: #{inspect(other)}")
+
+                      Protocol.error_response(
+                        id,
+                        Protocol.internal_error(),
+                        "Internal server error"
+                      )
+                  end
+
+                {:error, validation_errors} ->
                   Protocol.error_response(
                     id,
-                    error["code"] || -32000,
-                    error["message"] || "Tool execution failed"
+                    -32602,
+                    "Parameter validation failed",
+                    %{
+                      "errors" =>
+                        ConduitMcp.Validation.format_validation_errors(validation_errors)
+                    }
                   )
-
-                other ->
-                  Logger.error("Unexpected result from handle_call_tool: #{inspect(other)}")
-                  Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
               end
-
-            {:error, validation_errors} ->
-              Protocol.error_response(
-                id,
-                -32602,
-                "Parameter validation failed",
-                %{"errors" => ConduitMcp.Validation.format_validation_errors(validation_errors)}
-              )
           end
 
         duration = System.monotonic_time() - start_time
@@ -335,6 +353,38 @@ defmodule ConduitMcp.Handler do
     end
   end
 
+  # Checks if the tool requires an OAuth scope and if the request has it.
+  # Returns :ok if no scope required or scope is present.
+  # Returns {:error, error_response} if scope is missing.
+  defp check_tool_scope(conn, server_module, tool_name) do
+    has_scope_lookup =
+      function_exported?(server_module, :__scope_for_tool__, 1)
+
+    if has_scope_lookup do
+      case server_module.__scope_for_tool__(tool_name) do
+        nil ->
+          :ok
+
+        required_scope ->
+          token_scopes = Map.get(conn.assigns, :oauth_scopes, [])
+          required = String.split(required_scope, " ", trim: true)
+
+          if Enum.all?(required, &(&1 in token_scopes)) do
+            :ok
+          else
+            {:error,
+             Protocol.error_response(
+               nil,
+               -32000,
+               "Insufficient scope. Required: #{required_scope}"
+             )}
+          end
+      end
+    else
+      :ok
+    end
+  end
+
   defp handle_completion(id, params, server_module, conn) do
     ref = Map.get(params, "ref", %{})
     argument = Map.get(params, "argument", %{})
@@ -438,30 +488,13 @@ defmodule ConduitMcp.Handler do
     end
   end
 
-  defp build_capabilities(server_module) do
-    capabilities = %{}
-
-    capabilities =
-      if function_exported?(server_module, :handle_list_tools, 1) or
-           function_exported?(server_module, :handle_call_tool, 3) do
-        Map.put(capabilities, "tools", %{"listChanged" => false})
-      else
-        capabilities
-      end
-
-    capabilities =
-      if function_exported?(server_module, :handle_list_resources, 1) or
-           function_exported?(server_module, :handle_read_resource, 2) do
-        Map.put(capabilities, "resources", %{"listChanged" => false})
-      else
-        capabilities
-      end
-
-    if function_exported?(server_module, :handle_list_prompts, 1) or
-         function_exported?(server_module, :handle_get_prompt, 3) do
-      Map.put(capabilities, "prompts", %{"listChanged" => false})
-    else
-      capabilities
-    end
+  defp build_capabilities(_server_module) do
+    # All MCP servers (both DSL and manual mode) define all 6 callbacks,
+    # so we always advertise all capabilities.
+    %{
+      "tools" => %{"listChanged" => false},
+      "resources" => %{"listChanged" => false},
+      "prompts" => %{"listChanged" => false}
+    }
   end
 end
