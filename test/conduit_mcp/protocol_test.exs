@@ -5,7 +5,28 @@ defmodule ConduitMcp.ProtocolTest do
 
   describe "protocol_version/0" do
     test "returns the correct protocol version" do
-      assert Protocol.protocol_version() == "2025-06-18"
+      assert Protocol.protocol_version() == "2025-11-25"
+    end
+  end
+
+  describe "supported_versions/0" do
+    test "returns list of supported protocol versions" do
+      versions = Protocol.supported_versions()
+      assert is_list(versions)
+      assert "2025-11-25" in versions
+      assert "2025-06-18" in versions
+    end
+  end
+
+  describe "negotiate_version/1" do
+    test "returns matching version for supported version" do
+      assert Protocol.negotiate_version("2025-11-25") == "2025-11-25"
+      assert Protocol.negotiate_version("2025-06-18") == "2025-06-18"
+    end
+
+    test "returns nil for unsupported version" do
+      assert Protocol.negotiate_version("1999-01-01") == nil
+      assert Protocol.negotiate_version("unknown") == nil
     end
   end
 
@@ -29,6 +50,10 @@ defmodule ConduitMcp.ProtocolTest do
     test "internal_error returns -32603" do
       assert Protocol.internal_error() == -32603
     end
+
+    test "resource_not_found returns -32002" do
+      assert Protocol.resource_not_found() == -32002
+    end
   end
 
   describe "methods/0" do
@@ -44,7 +69,10 @@ defmodule ConduitMcp.ProtocolTest do
       assert methods["resources/read"] == :read_resource
       assert methods["prompts/list"] == :list_prompts
       assert methods["prompts/get"] == :get_prompt
+      assert methods["completion/complete"] == :complete
       assert methods["logging/setLevel"] == :set_log_level
+      assert methods["resources/subscribe"] == :subscribe_resource
+      assert methods["resources/unsubscribe"] == :unsubscribe_resource
     end
   end
 

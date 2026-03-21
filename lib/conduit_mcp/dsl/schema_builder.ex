@@ -47,12 +47,18 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
         }
       }
   """
-  def build_tool_schema(%{name: name, description: description, params: params}) do
-    %{
+  def build_tool_schema(%{name: name, description: description, params: params} = tool) do
+    schema = %{
       "name" => to_string(name),
       "description" => description,
       "inputSchema" => build_input_schema(params)
     }
+
+    case Map.get(tool, :annotations) do
+      nil -> schema
+      annotations when map_size(annotations) == 0 -> schema
+      annotations -> Map.put(schema, "annotations", annotations)
+    end
   end
 
   @doc """

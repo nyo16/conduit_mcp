@@ -73,7 +73,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
 
       body = Jason.decode!(conn.resp_body)
       assert body["transport"] == "streamable-http"
-      assert body["version"] == "2025-06-18"
+      assert body["version"] == "2025-11-25"
       assert body["status"] == "ready"
     end
   end
@@ -252,6 +252,232 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
         |> StreamableHTTP.call(@opts)
 
       assert conn.status == 404
+    end
+  end
+
+  describe "session management" do
+    @session_opts StreamableHTTP.init(
+                    server_module: TestServer,
+                    session: [store: ConduitMcp.Session.EtsStore]
+                  )
+
+    setup do
+      ConduitMcp.Session.EtsStore.ensure_table()
+      :ets.delete_all_objects(:conduit_mcp_sessions)
+      :ok
+    end
+
+    defp initialize_request_body do
+      Jason.encode!(%{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "initialize",
+        "params" => %{
+          "protocolVersion" => "2025-06-18",
+          "clientInfo" => %{"name" => "test-client", "version" => "1.0.0"},
+          "capabilities" => %{}
+        }
+      })
+    end
+
+    test "initialize request creates a session with MCP-Session-Id header" do
+      conn =
+        conn(:post, "/", initialize_request_body())
+        |> put_req_header("content-type", "application/json")
+        |> StreamableHTTP.call(@session_opts)
+
+      assert conn.status == 200
+
+      session_ids = get_resp_header(conn, "mcp-session-id")
+      assert length(session_ids) == 1
+
+      session_id = List.first(session_ids)
+      assert is_binary(session_id) and byte_size(session_id) > 0
+
+      # Session should exist in the store
+      assert {:ok, _data} = ConduitMcp.Session.get(session_id, ConduitMcp.Session.EtsStore)
+    end
+
+    test "subsequent request with valid session ID succeeds" do
+      # First, initialize to get a session
+      init_conn =
+        conn(:post, "/", initialize_request_body())
+        |> put_req_header("content-type", "application/json")
+        |> StreamableHTTP.call(@session_opts)
+
+      session_id = get_resp_header(init_conn, "mcp-session-id") |> List.first()
+      assert session_id
+
+      # Now send a request with the session ID
+      ping_body =
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 2,
+          "method" => "ping"
+        })
+
+      conn =
+        conn(:post, "/", ping_body)
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("mcp-session-id", session_id)
+        |> StreamableHTTP.call(@session_opts)
+
+      assert conn.status == 200
+
+      response = Jason.decode!(conn.resp_body)
+      assert response["result"] == %{}
+    end
+
+    test "request with invalid session ID gets 404" do
+      ping_body =
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "ping"
+        })
+
+      conn =
+        conn(:post, "/", ping_body)
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("mcp-session-id", "invalid-session-id")
+        |> StreamableHTTP.call(@session_opts)
+
+      assert conn.status == 404
+
+      response = Jason.decode!(conn.resp_body)
+      assert response["error"]
+      assert response["error"]["message"] =~ "Session not found"
+    end
+
+    test "sessions disabled (session: false) — no session header returned" do
+      no_session_opts =
+        StreamableHTTP.init(
+          server_module: TestServer,
+          session: false
+        )
+
+      conn =
+        conn(:post, "/", initialize_request_body())
+        |> put_req_header("content-type", "application/json")
+        |> StreamableHTTP.call(no_session_opts)
+
+      assert conn.status == 200
+      assert get_resp_header(conn, "mcp-session-id") == []
+    end
+  end
+
+  describe "origin validation" do
+    test "request with allowed origin passes" do
+      opts =
+        StreamableHTTP.init(
+          server_module: TestServer,
+          allowed_origins: ["https://allowed.example.com"]
+        )
+
+      ping_body =
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "ping"
+        })
+
+      conn =
+        conn(:post, "/", ping_body)
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("origin", "https://allowed.example.com")
+        |> StreamableHTTP.call(opts)
+
+      assert conn.status == 200
+
+      response = Jason.decode!(conn.resp_body)
+      assert response["result"] == %{}
+    end
+
+    test "request with disallowed origin gets 403" do
+      opts =
+        StreamableHTTP.init(
+          server_module: TestServer,
+          allowed_origins: ["https://allowed.example.com"]
+        )
+
+      ping_body =
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "ping"
+        })
+
+      conn =
+        conn(:post, "/", ping_body)
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("origin", "https://evil.example.com")
+        |> StreamableHTTP.call(opts)
+
+      assert conn.status == 403
+
+      response = Jason.decode!(conn.resp_body)
+      assert response["error"] == "Origin not allowed"
+    end
+
+    test "request with no Origin header passes (browser-less clients)" do
+      opts =
+        StreamableHTTP.init(
+          server_module: TestServer,
+          allowed_origins: ["https://allowed.example.com"]
+        )
+
+      ping_body =
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "ping"
+        })
+
+      conn =
+        conn(:post, "/", ping_body)
+        |> put_req_header("content-type", "application/json")
+        |> StreamableHTTP.call(opts)
+
+      assert conn.status == 200
+
+      response = Jason.decode!(conn.resp_body)
+      assert response["result"] == %{}
+    end
+
+    test "OPTIONS requests bypass origin validation" do
+      opts =
+        StreamableHTTP.init(
+          server_module: TestServer,
+          allowed_origins: ["https://allowed.example.com"]
+        )
+
+      conn =
+        conn(:options, "/")
+        |> put_req_header("origin", "https://evil.example.com")
+        |> StreamableHTTP.call(opts)
+
+      assert conn.status == 200
+    end
+  end
+
+  describe "MCP-Protocol-Version header" do
+    test "POST responses include MCP-Protocol-Version header" do
+      ping_body =
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "ping"
+        })
+
+      conn =
+        conn(:post, "/", ping_body)
+        |> put_req_header("content-type", "application/json")
+        |> StreamableHTTP.call(@opts)
+
+      assert conn.status == 200
+
+      protocol_versions = get_resp_header(conn, "mcp-protocol-version")
+      assert protocol_versions == ["2025-11-25"]
     end
   end
 end

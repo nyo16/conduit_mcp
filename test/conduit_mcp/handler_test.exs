@@ -6,7 +6,34 @@ defmodule ConduitMcp.HandlerTest do
   alias ConduitMcp.TestServer
 
   describe "handle_request/2 with valid requests" do
-    test "handles initialize request" do
+    test "handles initialize request with latest protocol version" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "initialize",
+        "params" => %{
+          "protocolVersion" => "2025-11-25",
+          "clientInfo" => %{"name" => "test-client", "version" => "1.0.0"},
+          "capabilities" => %{}
+        }
+      }
+
+      response = Handler.handle_request(request, TestServer)
+
+      assert response["jsonrpc"] == "2.0"
+      assert response["id"] == 1
+      assert response["result"]["protocolVersion"] == "2025-11-25"
+      assert response["result"]["serverInfo"]["name"] == "conduit-mcp"
+
+      assert response["result"]["serverInfo"]["version"] ==
+               Application.spec(:conduit_mcp, :vsn) |> to_string()
+
+      assert response["result"]["capabilities"]["tools"] == %{"listChanged" => false}
+      assert response["result"]["capabilities"]["resources"] == %{"listChanged" => false}
+      assert response["result"]["capabilities"]["prompts"] == %{"listChanged" => false}
+    end
+
+    test "handles initialize request with older supported protocol version" do
       request = %{
         "jsonrpc" => "2.0",
         "id" => 1,
@@ -20,14 +47,26 @@ defmodule ConduitMcp.HandlerTest do
 
       response = Handler.handle_request(request, TestServer)
 
-      assert response["jsonrpc"] == "2.0"
-      assert response["id"] == 1
       assert response["result"]["protocolVersion"] == "2025-06-18"
       assert response["result"]["serverInfo"]["name"] == "conduit-mcp"
-      assert response["result"]["serverInfo"]["version"] == "0.5.0"
-      assert response["result"]["capabilities"]["tools"] == %{}
-      assert response["result"]["capabilities"]["resources"] == %{}
-      assert response["result"]["capabilities"]["prompts"] == %{}
+    end
+
+    test "rejects unsupported protocol version" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "initialize",
+        "params" => %{
+          "protocolVersion" => "1999-01-01",
+          "clientInfo" => %{"name" => "test-client", "version" => "1.0.0"},
+          "capabilities" => %{}
+        }
+      }
+
+      response = Handler.handle_request(request, TestServer)
+
+      assert response["error"]["code"] == Protocol.invalid_request()
+      assert response["error"]["message"] =~ "Unsupported protocol version"
     end
 
     test "handles ping request" do
@@ -356,6 +395,383 @@ defmodule ConduitMcp.HandlerTest do
       assert is_integer(measurements.duration)
       assert metadata.tool_name == "fail"
       assert metadata.status == :error
+    end
+  end
+
+  # Inline test server that implements arity-2 list callbacks for pagination
+  defmodule PaginationServer do
+    use ConduitMcp.Server, dsl: false
+
+    @tools_page1 [
+      %{
+        "name" => "tool_a",
+        "description" => "First tool",
+        "inputSchema" => %{"type" => "object", "properties" => %{}}
+      }
+    ]
+
+    @tools_page2 [
+      %{
+        "name" => "tool_b",
+        "description" => "Second tool",
+        "inputSchema" => %{"type" => "object", "properties" => %{}}
+      }
+    ]
+
+    @impl true
+    def handle_list_tools(_conn, params) do
+      case Map.get(params, "cursor") do
+        "page2" ->
+          {:ok, %{"tools" => @tools_page2}}
+
+        _ ->
+          {:ok, %{"tools" => @tools_page1, "nextCursor" => "page2"}}
+      end
+    end
+
+    @impl true
+    def handle_list_resources(_conn, params) do
+      case Map.get(params, "cursor") do
+        "page2" ->
+          {:ok, %{"resources" => [%{"uri" => "test://r2", "name" => "Resource 2"}]}}
+
+        _ ->
+          {:ok,
+           %{
+             "resources" => [%{"uri" => "test://r1", "name" => "Resource 1"}],
+             "nextCursor" => "page2"
+           }}
+      end
+    end
+
+    @impl true
+    def handle_list_prompts(_conn, params) do
+      case Map.get(params, "cursor") do
+        "page2" ->
+          {:ok, %{"prompts" => [%{"name" => "prompt_b", "description" => "Second prompt"}]}}
+
+        _ ->
+          {:ok,
+           %{
+             "prompts" => [%{"name" => "prompt_a", "description" => "First prompt"}],
+             "nextCursor" => "page2"
+           }}
+      end
+    end
+  end
+
+  # Inline test server that implements handle_complete, handle_set_log_level,
+  # handle_subscribe_resource, and handle_unsubscribe_resource
+  defmodule ImplementedCallbacksServer do
+    use ConduitMcp.Server, dsl: false
+
+    @impl true
+    def handle_complete(_conn, ref, argument) do
+      ref_name = Map.get(ref, "name", "unknown")
+      arg_value = Map.get(argument, "value", "")
+
+      completions =
+        case ref_name do
+          "greeting" ->
+            ["english", "espanol", "esperanto"]
+            |> Enum.filter(&String.starts_with?(&1, arg_value))
+
+          _ ->
+            []
+        end
+
+      {:ok,
+       %{
+         "completion" => %{
+           "values" => completions,
+           "total" => length(completions),
+           "hasMore" => false
+         }
+       }}
+    end
+
+    @impl true
+    def handle_set_log_level(_conn, level) do
+      {:ok, %{"level" => level}}
+    end
+
+    @impl true
+    def handle_subscribe_resource(_conn, uri) do
+      {:ok, %{"subscribed" => uri}}
+    end
+
+    @impl true
+    def handle_unsubscribe_resource(_conn, uri) do
+      {:ok, %{"unsubscribed" => uri}}
+    end
+  end
+
+  describe "new MCP 2025-11-25 methods" do
+    test "completion/complete returns empty values when not implemented" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "completion/complete",
+        "params" => %{
+          "ref" => %{"type" => "ref/prompt", "name" => "greeting"},
+          "argument" => %{"name" => "language", "value" => "py"}
+        }
+      }
+
+      response = Handler.handle_request(request, TestServer)
+
+      assert response["result"]["completion"]["values"] == []
+      assert response["result"]["completion"]["hasMore"] == false
+    end
+
+    test "logging/setLevel returns ok when not implemented" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "logging/setLevel",
+        "params" => %{"level" => "debug"}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+      assert response["result"] == %{}
+    end
+
+    test "resources/subscribe returns method not found when not implemented" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "resources/subscribe",
+        "params" => %{"uri" => "test://resource1"}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+      assert response["error"]["code"] == Protocol.method_not_found()
+    end
+
+    test "resources/unsubscribe returns method not found when not implemented" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "resources/unsubscribe",
+        "params" => %{"uri" => "test://resource1"}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+      assert response["error"]["code"] == Protocol.method_not_found()
+    end
+
+    test "_meta field is passed through in tool call response" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tools/call",
+        "params" => %{
+          "name" => "echo",
+          "arguments" => %{"message" => "test"},
+          "_meta" => %{"progressToken" => "abc123"}
+        }
+      }
+
+      response = Handler.handle_request(request, TestServer)
+      assert response["result"]["_meta"]["progressToken"] == "abc123"
+    end
+  end
+
+  describe "pagination via arity-2 list callbacks" do
+    test "tools/list passes cursor param to arity-2 handle_list_tools" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tools/list",
+        "params" => %{"cursor" => "page2"}
+      }
+
+      response = Handler.handle_request(request, PaginationServer)
+
+      assert response["jsonrpc"] == "2.0"
+      assert response["id"] == 1
+      assert length(response["result"]["tools"]) == 1
+      assert hd(response["result"]["tools"])["name"] == "tool_b"
+      refute Map.has_key?(response["result"], "nextCursor")
+    end
+
+    test "tools/list returns first page with nextCursor when no cursor provided" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 2,
+        "method" => "tools/list"
+      }
+
+      response = Handler.handle_request(request, PaginationServer)
+
+      assert response["jsonrpc"] == "2.0"
+      assert response["id"] == 2
+      assert length(response["result"]["tools"]) == 1
+      assert hd(response["result"]["tools"])["name"] == "tool_a"
+      assert response["result"]["nextCursor"] == "page2"
+    end
+
+    test "resources/list passes cursor param to arity-2 handle_list_resources" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 3,
+        "method" => "resources/list",
+        "params" => %{"cursor" => "page2"}
+      }
+
+      response = Handler.handle_request(request, PaginationServer)
+
+      assert response["jsonrpc"] == "2.0"
+      assert response["id"] == 3
+      assert length(response["result"]["resources"]) == 1
+      assert hd(response["result"]["resources"])["name"] == "Resource 2"
+    end
+
+    test "prompts/list passes cursor param to arity-2 handle_list_prompts" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 4,
+        "method" => "prompts/list",
+        "params" => %{"cursor" => "page2"}
+      }
+
+      response = Handler.handle_request(request, PaginationServer)
+
+      assert response["jsonrpc"] == "2.0"
+      assert response["id"] == 4
+      assert length(response["result"]["prompts"]) == 1
+      assert hd(response["result"]["prompts"])["name"] == "prompt_b"
+    end
+
+    test "arity-1 fallback still works for servers without arity-2" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 5,
+        "method" => "tools/list",
+        "params" => %{"cursor" => "page2"}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+
+      assert response["jsonrpc"] == "2.0"
+      assert response["id"] == 5
+      # TestServer only implements arity-1, so it ignores the cursor
+      assert is_list(response["result"]["tools"])
+      assert length(response["result"]["tools"]) == 2
+    end
+  end
+
+  describe "handler methods with actual implementations" do
+    test "completion/complete returns server's completion values" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "completion/complete",
+        "params" => %{
+          "ref" => %{"type" => "ref/prompt", "name" => "greeting"},
+          "argument" => %{"name" => "language", "value" => "e"}
+        }
+      }
+
+      response = Handler.handle_request(request, ImplementedCallbacksServer)
+
+      assert response["jsonrpc"] == "2.0"
+      assert response["id"] == 1
+      assert response["result"]["completion"]["values"] == ["english", "espanol", "esperanto"]
+      assert response["result"]["completion"]["total"] == 3
+      assert response["result"]["completion"]["hasMore"] == false
+    end
+
+    test "completion/complete filters values based on partial input" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 2,
+        "method" => "completion/complete",
+        "params" => %{
+          "ref" => %{"type" => "ref/prompt", "name" => "greeting"},
+          "argument" => %{"name" => "language", "value" => "es"}
+        }
+      }
+
+      response = Handler.handle_request(request, ImplementedCallbacksServer)
+
+      assert response["result"]["completion"]["values"] == ["espanol", "esperanto"]
+      assert response["result"]["completion"]["total"] == 2
+    end
+
+    test "completion/complete returns empty for unknown ref" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 3,
+        "method" => "completion/complete",
+        "params" => %{
+          "ref" => %{"type" => "ref/prompt", "name" => "unknown"},
+          "argument" => %{"name" => "language", "value" => "e"}
+        }
+      }
+
+      response = Handler.handle_request(request, ImplementedCallbacksServer)
+
+      assert response["result"]["completion"]["values"] == []
+      assert response["result"]["completion"]["total"] == 0
+    end
+
+    test "logging/setLevel returns the server's response with level" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 4,
+        "method" => "logging/setLevel",
+        "params" => %{"level" => "debug"}
+      }
+
+      response = Handler.handle_request(request, ImplementedCallbacksServer)
+
+      assert response["jsonrpc"] == "2.0"
+      assert response["id"] == 4
+      assert response["result"]["level"] == "debug"
+    end
+
+    test "logging/setLevel works with different log levels" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 5,
+        "method" => "logging/setLevel",
+        "params" => %{"level" => "error"}
+      }
+
+      response = Handler.handle_request(request, ImplementedCallbacksServer)
+
+      assert response["result"]["level"] == "error"
+    end
+
+    test "resources/subscribe returns the server's response" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 6,
+        "method" => "resources/subscribe",
+        "params" => %{"uri" => "test://resource1"}
+      }
+
+      response = Handler.handle_request(request, ImplementedCallbacksServer)
+
+      assert response["jsonrpc"] == "2.0"
+      assert response["id"] == 6
+      assert response["result"]["subscribed"] == "test://resource1"
+    end
+
+    test "resources/unsubscribe returns the server's response" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 7,
+        "method" => "resources/unsubscribe",
+        "params" => %{"uri" => "test://resource1"}
+      }
+
+      response = Handler.handle_request(request, ImplementedCallbacksServer)
+
+      assert response["jsonrpc"] == "2.0"
+      assert response["id"] == 7
+      assert response["result"]["unsubscribed"] == "test://resource1"
     end
   end
 end

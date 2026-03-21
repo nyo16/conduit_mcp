@@ -113,6 +113,8 @@ defmodule ConduitMcp.Transport.SSE do
     auth_config = Keyword.get(opts, :auth)
     rate_limit_config = Keyword.get(opts, :rate_limit)
     message_rate_limit_config = Keyword.get(opts, :message_rate_limit)
+    server_name = Keyword.get(opts, :server_name)
+    server_version = Keyword.get(opts, :server_version)
 
     conn
     |> Plug.Conn.put_private(:server_module, server_module)
@@ -122,6 +124,8 @@ defmodule ConduitMcp.Transport.SSE do
     |> Plug.Conn.put_private(:auth_config, auth_config)
     |> Plug.Conn.put_private(:rate_limit_config, rate_limit_config)
     |> Plug.Conn.put_private(:message_rate_limit_config, message_rate_limit_config)
+    |> Plug.Conn.put_private(:server_name, server_name)
+    |> Plug.Conn.put_private(:server_version, server_version)
     |> super(opts)
   end
 

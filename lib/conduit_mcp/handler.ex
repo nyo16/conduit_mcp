@@ -54,13 +54,15 @@ defmodule ConduitMcp.Handler do
 
     case method do
       "initialize" ->
-        handle_initialize(id, params)
+        handle_initialize(id, params, server_module, conn)
 
       "ping" ->
         Protocol.success_response(id, %{})
 
       "tools/list" ->
-        case server_module.handle_list_tools(conn) do
+        list_result = call_list_callback(server_module, :handle_list_tools, conn, params)
+
+        case list_result do
           {:ok, result} when is_map(result) ->
             Protocol.success_response(id, result)
 
@@ -88,6 +90,7 @@ defmodule ConduitMcp.Handler do
               case server_module.handle_call_tool(conn, tool_name, validated_params) do
                 {:ok, tool_result} when is_map(tool_result) ->
                   Protocol.success_response(id, tool_result)
+                  |> maybe_add_meta(params)
 
                 {:error, error} ->
                   Protocol.error_response(
@@ -125,7 +128,9 @@ defmodule ConduitMcp.Handler do
         result
 
       "resources/list" ->
-        case server_module.handle_list_resources(conn) do
+        list_result = call_list_callback(server_module, :handle_list_resources, conn, params)
+
+        case list_result do
           {:ok, result} when is_map(result) ->
             Protocol.success_response(id, result)
 
@@ -178,7 +183,9 @@ defmodule ConduitMcp.Handler do
         result
 
       "prompts/list" ->
-        case server_module.handle_list_prompts(conn) do
+        list_result = call_list_callback(server_module, :handle_list_prompts, conn, params)
+
+        case list_result do
           {:ok, result} when is_map(result) ->
             Protocol.success_response(id, result)
 
@@ -242,6 +249,113 @@ defmodule ConduitMcp.Handler do
 
         result
 
+      "completion/complete" ->
+        ref = Map.get(params, "ref", %{})
+        argument = Map.get(params, "argument", %{})
+
+        if function_exported?(server_module, :handle_complete, 3) do
+          case server_module.handle_complete(conn, ref, argument) do
+            {:ok, result} when is_map(result) ->
+              Protocol.success_response(id, result)
+
+            {:error, error} ->
+              Protocol.error_response(
+                id,
+                error["code"] || -32000,
+                error["message"] || "Completion failed"
+              )
+
+            other ->
+              Logger.error("Unexpected result from handle_complete: #{inspect(other)}")
+              Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
+          end
+        else
+          Protocol.success_response(id, %{
+            "completion" => %{"values" => [], "total" => 0, "hasMore" => false}
+          })
+        end
+
+      "logging/setLevel" ->
+        level = Map.get(params, "level")
+
+        if function_exported?(server_module, :handle_set_log_level, 2) do
+          case server_module.handle_set_log_level(conn, level) do
+            {:ok, result} when is_map(result) ->
+              Protocol.success_response(id, result)
+
+            {:error, error} ->
+              Protocol.error_response(
+                id,
+                error["code"] || -32000,
+                error["message"] || "Failed to set log level"
+              )
+
+            other ->
+              Logger.error("Unexpected result from handle_set_log_level: #{inspect(other)}")
+              Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
+          end
+        else
+          Protocol.success_response(id, %{})
+        end
+
+      "resources/subscribe" ->
+        uri = Map.get(params, "uri")
+
+        if function_exported?(server_module, :handle_subscribe_resource, 2) do
+          case server_module.handle_subscribe_resource(conn, uri) do
+            {:ok, result} when is_map(result) ->
+              Protocol.success_response(id, result)
+
+            {:error, error} ->
+              Protocol.error_response(
+                id,
+                error["code"] || -32000,
+                error["message"] || "Subscribe failed"
+              )
+
+            other ->
+              Logger.error("Unexpected result from handle_subscribe_resource: #{inspect(other)}")
+
+              Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
+          end
+        else
+          Protocol.error_response(
+            id,
+            Protocol.method_not_found(),
+            "Resource subscriptions not supported"
+          )
+        end
+
+      "resources/unsubscribe" ->
+        uri = Map.get(params, "uri")
+
+        if function_exported?(server_module, :handle_unsubscribe_resource, 2) do
+          case server_module.handle_unsubscribe_resource(conn, uri) do
+            {:ok, result} when is_map(result) ->
+              Protocol.success_response(id, result)
+
+            {:error, error} ->
+              Protocol.error_response(
+                id,
+                error["code"] || -32000,
+                error["message"] || "Unsubscribe failed"
+              )
+
+            other ->
+              Logger.error(
+                "Unexpected result from handle_unsubscribe_resource: #{inspect(other)}"
+              )
+
+              Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
+          end
+        else
+          Protocol.error_response(
+            id,
+            Protocol.method_not_found(),
+            "Resource subscriptions not supported"
+          )
+        end
+
       _ ->
         Protocol.error_response(id, Protocol.method_not_found(), "Method not found: #{method}")
     end
@@ -271,27 +385,93 @@ defmodule ConduitMcp.Handler do
     end
   end
 
-  defp handle_initialize(id, params) do
-    protocol_version = Map.get(params, "protocolVersion")
+  defp handle_initialize(id, params, server_module, conn) do
+    client_version = Map.get(params, "protocolVersion")
     client_info = Map.get(params, "clientInfo", %{})
     _capabilities = Map.get(params, "capabilities", %{})
 
     Logger.info("Initializing connection with client: #{inspect(client_info)}")
-    Logger.debug("Protocol version: #{protocol_version}")
+    Logger.debug("Protocol version: #{client_version}")
 
-    result = %{
-      "protocolVersion" => Protocol.protocol_version(),
-      "serverInfo" => %{
-        "name" => "conduit-mcp",
-        "version" => "0.5.0"
-      },
-      "capabilities" => %{
-        "tools" => %{},
-        "resources" => %{},
-        "prompts" => %{}
+    negotiated_version = Protocol.negotiate_version(client_version)
+
+    if is_nil(negotiated_version) do
+      Logger.warning(
+        "Client requested unsupported protocol version: #{client_version}. " <>
+          "Supported: #{inspect(Protocol.supported_versions())}"
+      )
+
+      Protocol.error_response(
+        id,
+        Protocol.invalid_request(),
+        "Unsupported protocol version: #{client_version}. " <>
+          "Supported versions: #{Enum.join(Protocol.supported_versions(), ", ")}"
+      )
+    else
+      server_name =
+        Map.get(conn.private, :server_name) || "conduit-mcp"
+
+      server_version =
+        Map.get(conn.private, :server_version) ||
+          Application.spec(:conduit_mcp, :vsn) |> to_string()
+
+      capabilities = build_capabilities(server_module)
+
+      result = %{
+        "protocolVersion" => negotiated_version,
+        "serverInfo" => %{
+          "name" => server_name,
+          "version" => server_version
+        },
+        "capabilities" => capabilities
       }
-    }
 
-    Protocol.success_response(id, result)
+      Protocol.success_response(id, result)
+    end
+  end
+
+  # Adds _meta field from request params to the response result if present.
+  defp maybe_add_meta(response, params) do
+    case Map.get(params, "_meta") do
+      nil -> response
+      meta when is_map(meta) -> put_in(response, ["result", "_meta"], meta)
+    end
+  end
+
+  # Calls a list callback, preferring the arity-2 variant (with params for pagination).
+  # Falls back to arity-1 if arity-2 is not implemented.
+  defp call_list_callback(server_module, callback_name, conn, params) do
+    if function_exported?(server_module, callback_name, 2) do
+      apply(server_module, callback_name, [conn, params])
+    else
+      apply(server_module, callback_name, [conn])
+    end
+  end
+
+  defp build_capabilities(server_module) do
+    capabilities = %{}
+
+    capabilities =
+      if function_exported?(server_module, :handle_list_tools, 1) or
+           function_exported?(server_module, :handle_call_tool, 3) do
+        Map.put(capabilities, "tools", %{"listChanged" => false})
+      else
+        capabilities
+      end
+
+    capabilities =
+      if function_exported?(server_module, :handle_list_resources, 1) or
+           function_exported?(server_module, :handle_read_resource, 2) do
+        Map.put(capabilities, "resources", %{"listChanged" => false})
+      else
+        capabilities
+      end
+
+    if function_exported?(server_module, :handle_list_prompts, 1) or
+         function_exported?(server_module, :handle_get_prompt, 3) do
+      Map.put(capabilities, "prompts", %{"listChanged" => false})
+    else
+      capabilities
+    end
   end
 end

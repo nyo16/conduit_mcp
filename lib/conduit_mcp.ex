@@ -4,7 +4,7 @@ defmodule ConduitMcp do
 
   ConduitMCP provides a framework for building MCP servers that expose tools,
   resources, and prompts to LLM applications. The library implements the MCP
-  specification version 2025-06-18 with support for both modern Streamable HTTP
+  specification version 2025-11-25 with support for both modern Streamable HTTP
   and legacy SSE transports.
 
   ## Quick Example

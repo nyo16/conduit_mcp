@@ -1,10 +1,11 @@
 defmodule ConduitMcp.Protocol do
   @moduledoc """
   Core MCP (Model Context Protocol) definitions and message handling.
-  Based on specification version 2025-06-18.
+  Based on specification version 2025-11-25.
   """
 
-  @protocol_version "2025-06-18"
+  @protocol_version "2025-11-25"
+  @supported_versions ["2025-11-25", "2025-06-18"]
 
   @type json_rpc_id :: String.t() | integer()
   @type method :: String.t()
@@ -49,7 +50,23 @@ defmodule ConduitMcp.Protocol do
   @invalid_params -32602
   @internal_error -32603
 
+  # MCP-specific Error Codes
+  @resource_not_found -32002
+
   def protocol_version, do: @protocol_version
+  def supported_versions, do: @supported_versions
+
+  @doc """
+  Returns the best matching protocol version for the given client version.
+  Returns `nil` if no compatible version is found.
+  """
+  def negotiate_version(client_version) do
+    if client_version in @supported_versions do
+      client_version
+    else
+      nil
+    end
+  end
 
   # Error code constants
   def parse_error, do: @parse_error
@@ -57,6 +74,7 @@ defmodule ConduitMcp.Protocol do
   def method_not_found, do: @method_not_found
   def invalid_params, do: @invalid_params
   def internal_error, do: @internal_error
+  def resource_not_found, do: @resource_not_found
 
   @doc """
   Core MCP methods as defined in the specification.
@@ -81,6 +99,9 @@ defmodule ConduitMcp.Protocol do
       # Prompts
       "prompts/list" => :list_prompts,
       "prompts/get" => :get_prompt,
+
+      # Completion
+      "completion/complete" => :complete,
 
       # Logging
       "logging/setLevel" => :set_log_level

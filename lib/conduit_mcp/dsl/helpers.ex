@@ -169,6 +169,31 @@ defmodule ConduitMcp.DSL.Helpers do
   end
 
   @doc """
+  Creates an audio content response.
+
+  ## Example
+
+      handle fn _conn, %{"file" => file} ->
+        data = File.read!(file) |> Base.encode64()
+        audio(data, "audio/wav")
+      end
+  """
+  defmacro audio(data, mime_type) do
+    quote do
+      {:ok,
+       %{
+         "content" => [
+           %{
+             "type" => "audio",
+             "data" => unquote(data),
+             "mimeType" => unquote(mime_type)
+           }
+         ]
+       }}
+    end
+  end
+
+  @doc """
   Creates a system role message for prompts.
 
   ## Example

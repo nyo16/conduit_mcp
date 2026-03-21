@@ -107,6 +107,7 @@ defmodule ConduitMcp.DSL do
       @mcp_current_tool_description unquote(description)
       @mcp_current_tool_params []
       @mcp_current_tool_handler nil
+      @mcp_current_tool_annotations nil
 
       unquote(block)
 
@@ -115,7 +116,8 @@ defmodule ConduitMcp.DSL do
         name: @mcp_current_tool_name,
         description: @mcp_current_tool_description,
         params: Enum.reverse(@mcp_current_tool_params),
-        handler: @mcp_current_tool_handler
+        handler: @mcp_current_tool_handler,
+        annotations: @mcp_current_tool_annotations
       }
 
       # Clean up
@@ -123,6 +125,59 @@ defmodule ConduitMcp.DSL do
       Module.delete_attribute(__MODULE__, :mcp_current_tool_description)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_params)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_handler)
+      Module.delete_attribute(__MODULE__, :mcp_current_tool_annotations)
+    end
+  end
+
+  @doc """
+  Sets annotations for a tool.
+
+  Annotations provide hints about tool behavior to clients.
+
+  ## Options
+
+  - `:read_only` - Tool doesn't modify state (default: not set)
+  - `:destructive` - Tool may perform destructive operations (default: not set)
+  - `:idempotent` - Calling multiple times has same effect (default: not set)
+  - `:open_world` - Tool may interact with external systems (default: not set)
+
+  ## Example
+
+      tool "delete_user", "Deletes a user" do
+        annotations destructive: true, idempotent: true
+        param :id, :string, "User ID", required: true
+        handle fn _conn, %{"id" => id} -> ... end
+      end
+  """
+  defmacro annotations(opts) do
+    quote do
+      annotation_map = %{}
+
+      annotation_map =
+        case Keyword.get(unquote(opts), :read_only) do
+          nil -> annotation_map
+          val -> Map.put(annotation_map, "readOnlyHint", val)
+        end
+
+      annotation_map =
+        case Keyword.get(unquote(opts), :destructive) do
+          nil -> annotation_map
+          val -> Map.put(annotation_map, "destructiveHint", val)
+        end
+
+      annotation_map =
+        case Keyword.get(unquote(opts), :idempotent) do
+          nil -> annotation_map
+          val -> Map.put(annotation_map, "idempotentHint", val)
+        end
+
+      annotation_map =
+        case Keyword.get(unquote(opts), :open_world) do
+          nil -> annotation_map
+          val -> Map.put(annotation_map, "openWorldHint", val)
+        end
+
+      @mcp_current_tool_annotations annotation_map
     end
   end
 
