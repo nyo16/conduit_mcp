@@ -250,111 +250,16 @@ defmodule ConduitMcp.Handler do
         result
 
       "completion/complete" ->
-        ref = Map.get(params, "ref", %{})
-        argument = Map.get(params, "argument", %{})
-
-        if function_exported?(server_module, :handle_complete, 3) do
-          case server_module.handle_complete(conn, ref, argument) do
-            {:ok, result} when is_map(result) ->
-              Protocol.success_response(id, result)
-
-            {:error, error} ->
-              Protocol.error_response(
-                id,
-                error["code"] || -32000,
-                error["message"] || "Completion failed"
-              )
-
-            other ->
-              Logger.error("Unexpected result from handle_complete: #{inspect(other)}")
-              Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
-          end
-        else
-          Protocol.success_response(id, %{
-            "completion" => %{"values" => [], "total" => 0, "hasMore" => false}
-          })
-        end
+        handle_completion(id, params, server_module, conn)
 
       "logging/setLevel" ->
-        level = Map.get(params, "level")
-
-        if function_exported?(server_module, :handle_set_log_level, 2) do
-          case server_module.handle_set_log_level(conn, level) do
-            {:ok, result} when is_map(result) ->
-              Protocol.success_response(id, result)
-
-            {:error, error} ->
-              Protocol.error_response(
-                id,
-                error["code"] || -32000,
-                error["message"] || "Failed to set log level"
-              )
-
-            other ->
-              Logger.error("Unexpected result from handle_set_log_level: #{inspect(other)}")
-              Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
-          end
-        else
-          Protocol.success_response(id, %{})
-        end
+        handle_logging(id, params, server_module, conn)
 
       "resources/subscribe" ->
-        uri = Map.get(params, "uri")
-
-        if function_exported?(server_module, :handle_subscribe_resource, 2) do
-          case server_module.handle_subscribe_resource(conn, uri) do
-            {:ok, result} when is_map(result) ->
-              Protocol.success_response(id, result)
-
-            {:error, error} ->
-              Protocol.error_response(
-                id,
-                error["code"] || -32000,
-                error["message"] || "Subscribe failed"
-              )
-
-            other ->
-              Logger.error("Unexpected result from handle_subscribe_resource: #{inspect(other)}")
-
-              Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
-          end
-        else
-          Protocol.error_response(
-            id,
-            Protocol.method_not_found(),
-            "Resource subscriptions not supported"
-          )
-        end
+        handle_subscribe(id, params, server_module, conn)
 
       "resources/unsubscribe" ->
-        uri = Map.get(params, "uri")
-
-        if function_exported?(server_module, :handle_unsubscribe_resource, 2) do
-          case server_module.handle_unsubscribe_resource(conn, uri) do
-            {:ok, result} when is_map(result) ->
-              Protocol.success_response(id, result)
-
-            {:error, error} ->
-              Protocol.error_response(
-                id,
-                error["code"] || -32000,
-                error["message"] || "Unsubscribe failed"
-              )
-
-            other ->
-              Logger.error(
-                "Unexpected result from handle_unsubscribe_resource: #{inspect(other)}"
-              )
-
-              Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
-          end
-        else
-          Protocol.error_response(
-            id,
-            Protocol.method_not_found(),
-            "Resource subscriptions not supported"
-          )
-        end
+        handle_unsubscribe(id, params, server_module, conn)
 
       _ ->
         Protocol.error_response(id, Protocol.method_not_found(), "Method not found: #{method}")
@@ -427,6 +332,91 @@ defmodule ConduitMcp.Handler do
       }
 
       Protocol.success_response(id, result)
+    end
+  end
+
+  defp handle_completion(id, params, server_module, conn) do
+    ref = Map.get(params, "ref", %{})
+    argument = Map.get(params, "argument", %{})
+
+    if function_exported?(server_module, :handle_complete, 3) do
+      dispatch_callback(
+        id,
+        fn -> server_module.handle_complete(conn, ref, argument) end,
+        "handle_complete"
+      )
+    else
+      Protocol.success_response(id, %{
+        "completion" => %{"values" => [], "total" => 0, "hasMore" => false}
+      })
+    end
+  end
+
+  defp handle_logging(id, params, server_module, conn) do
+    level = Map.get(params, "level")
+
+    if function_exported?(server_module, :handle_set_log_level, 2) do
+      dispatch_callback(
+        id,
+        fn -> server_module.handle_set_log_level(conn, level) end,
+        "handle_set_log_level"
+      )
+    else
+      Protocol.success_response(id, %{})
+    end
+  end
+
+  defp handle_subscribe(id, params, server_module, conn) do
+    uri = Map.get(params, "uri")
+
+    if function_exported?(server_module, :handle_subscribe_resource, 2) do
+      dispatch_callback(
+        id,
+        fn -> server_module.handle_subscribe_resource(conn, uri) end,
+        "handle_subscribe_resource"
+      )
+    else
+      Protocol.error_response(
+        id,
+        Protocol.method_not_found(),
+        "Resource subscriptions not supported"
+      )
+    end
+  end
+
+  defp handle_unsubscribe(id, params, server_module, conn) do
+    uri = Map.get(params, "uri")
+
+    if function_exported?(server_module, :handle_unsubscribe_resource, 2) do
+      dispatch_callback(
+        id,
+        fn -> server_module.handle_unsubscribe_resource(conn, uri) end,
+        "handle_unsubscribe_resource"
+      )
+    else
+      Protocol.error_response(
+        id,
+        Protocol.method_not_found(),
+        "Resource subscriptions not supported"
+      )
+    end
+  end
+
+  defp dispatch_callback(id, callback_fn, callback_name) do
+    case callback_fn.() do
+      {:ok, result} when is_map(result) ->
+        Protocol.success_response(id, result)
+
+      {:error, error} ->
+        Protocol.error_response(
+          id,
+          error["code"] || -32000,
+          error["message"] || "#{callback_name} failed"
+        )
+
+      other ->
+        Logger.error("Unexpected result from #{callback_name}: #{inspect(other)}")
+        Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
     end
   end
 
