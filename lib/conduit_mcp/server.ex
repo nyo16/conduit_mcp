@@ -228,7 +228,8 @@ defmodule ConduitMcp.Server do
         end
 
         def handle_call_tool(_conn, _name, _params) do
-          {:error, %{"code" => -32601, "message" => "Tool not found"}}
+          {:error,
+           %{"code" => ConduitMcp.Errors.method_not_found(), "message" => "Tool not found"}}
         end
 
         def handle_list_resources(_conn) do
@@ -236,7 +237,8 @@ defmodule ConduitMcp.Server do
         end
 
         def handle_read_resource(_conn, _uri) do
-          {:error, %{"code" => -32601, "message" => "Resource not found"}}
+          {:error,
+           %{"code" => ConduitMcp.Errors.method_not_found(), "message" => "Resource not found"}}
         end
 
         def handle_list_prompts(_conn) do
@@ -244,7 +246,8 @@ defmodule ConduitMcp.Server do
         end
 
         def handle_get_prompt(_conn, _name, _args) do
-          {:error, %{"code" => -32601, "message" => "Prompt not found"}}
+          {:error,
+           %{"code" => ConduitMcp.Errors.method_not_found(), "message" => "Prompt not found"}}
         end
 
         defoverridable handle_list_tools: 1,

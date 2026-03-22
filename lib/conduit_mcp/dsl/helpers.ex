@@ -134,7 +134,7 @@ defmodule ConduitMcp.DSL.Helpers do
       error("Invalid parameters", -32602)
       # => {:error, %{"code" => -32602, "message" => "Invalid parameters"}}
   """
-  defmacro error(message, code \\ -32000) do
+  defmacro error(message, code \\ ConduitMcp.Errors.server_error()) do
     quote do
       {:error,
        %{

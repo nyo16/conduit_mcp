@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-03-22
+
+### Added
+
+- **Endpoint + Component mode** — third way to define MCP servers alongside DSL and Manual modes
+  - `ConduitMcp.Component` behaviour for defining tools, resources, and prompts as individual modules
+  - `ConduitMcp.Component.Schema` DSL (`schema do field ... end`) with automatic JSON Schema and NimbleOptions generation
+  - `ConduitMcp.Endpoint` aggregator with `component` macro, declarative rate_limit/message_rate_limit/auth config
+  - Auto-detected capabilities from registered component types
+  - Compile-time validation (duplicate names, invalid modules, missing callbacks)
+  - Atom-keyed params in `execute/2` for ergonomic pattern matching
+- **`ConduitMcp.Errors` module** — centralized JSON-RPC 2.0 and MCP error code constants
+  - `parse_error/0`, `invalid_request/0`, `method_not_found/0`, `invalid_params/0`, `internal_error/0`, `server_error/0`, `resource_not_found/0`
+  - Replaces hardcoded magic numbers across the codebase
+- **Transport auto-extraction** — StreamableHTTP and SSE transports auto-read endpoint config (name, version, rate_limit, auth) as fallback defaults
+- **Handler capability detection** — `build_capabilities/1` uses `__capabilities__/0` when available for selective capability advertisement
+- **6 new documentation guides** — choosing_a_mode, endpoint_mode, dsl_mode, manual_mode, authentication, rate_limiting
+
+### Improved
+
+- **Test coverage** expanded to 503 tests (up from 405)
+- **README restructured** with all 3 server modes, responses reference, MCP spec coverage table
+- **Error codes refactored** — `ConduitMcp.Protocol` now delegates to `ConduitMcp.Errors`
+
 ## [0.7.0] - 2026-03-21
 
 ### Added
@@ -239,6 +263,7 @@ None - This release is fully backward compatible.
 - Basic authentication
 - Phoenix integration example
 
+[0.8.0]: https://github.com/nyo16/conduit_mcp/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/nyo16/conduit_mcp/compare/v0.6.5...v0.7.0
 [0.6.5]: https://github.com/nyo16/conduit_mcp/compare/v0.5.0...v0.6.5
 [0.4.6]: https://github.com/nyo16/conduit_mcp/compare/v0.4.5...v0.4.6

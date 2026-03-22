@@ -56,15 +56,6 @@ defmodule ConduitMcp.DSLTest do
       end)
     end
 
-    # TODO: Add nested object support in future version
-    # tool "nested_object", "Tool with nested object" do
-    #   param :user, :object, "User data", required: true do
-    #     field :name, :string, "Full name", required: true
-    #     field :email, :string, "Email address", required: true
-    #   end
-    #   handle fn _conn, params -> text("User: #{params["user"]["name"]}") end
-    # end
-
     # MFA handler implementations
     def double_value(_conn, %{"value" => val}) do
       text("Result: #{val * 2}")
@@ -182,11 +173,6 @@ defmodule ConduitMcp.DSLTest do
       default_tool = Enum.find(result["tools"], fn t -> t["name"] == "with_default" end)
       assert default_tool["inputSchema"]["properties"]["name"]["default"] == "World"
     end
-
-    # TODO: Test nested objects when implemented
-    # test "handles nested objects correctly" do
-    #   ...
-    # end
   end
 
   describe "DSL tool execution" do
@@ -226,11 +212,6 @@ defmodule ConduitMcp.DSLTest do
 
       assert result["content"] == [%{"type" => "text", "text" => "Enabled: false, Count: 0"}]
     end
-
-    # TODO: Test nested objects when implemented
-    # test "executes tool with nested object parameter" do
-    #   ...
-    # end
 
     test "returns error for unknown tool" do
       conn = %Plug.Conn{}
@@ -562,10 +543,6 @@ defmodule ConduitMcp.DSLTest do
 
       assert schema["inputSchema"]["properties"]["opt"]["default"] == "default_val"
     end
-
-    # TODO: Test nested objects when fully implemented
-    # test "builds schema with nested object" do ...  end
-    # test "builds schema with array" do ... end
 
     test "builds prompt schema" do
       prompt_def = %{

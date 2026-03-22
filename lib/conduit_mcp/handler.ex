@@ -193,7 +193,7 @@ defmodule ConduitMcp.Handler do
         {:error, validation_errors} ->
           Protocol.error_response(
             id,
-            -32602,
+            ConduitMcp.Errors.invalid_params(),
             "Parameter validation failed",
             %{"errors" => ConduitMcp.Validation.format_validation_errors(validation_errors)}
           )
@@ -257,7 +257,7 @@ defmodule ConduitMcp.Handler do
         {:error, validation_errors} ->
           Protocol.error_response(
             id,
-            -32602,
+            ConduitMcp.Errors.invalid_params(),
             "Argument validation failed",
             %{"errors" => ConduitMcp.Validation.format_validation_errors(validation_errors)}
           )
@@ -304,7 +304,11 @@ defmodule ConduitMcp.Handler do
       :ok
     else
       {:error,
-       Protocol.error_response(nil, -32000, "Insufficient scope. Required: #{required_scope}")}
+       Protocol.error_response(
+         nil,
+         ConduitMcp.Errors.server_error(),
+         "Insufficient scope. Required: #{required_scope}"
+       )}
     end
   end
 
@@ -383,7 +387,7 @@ defmodule ConduitMcp.Handler do
       {:error, error} ->
         Protocol.error_response(
           id,
-          error["code"] || -32000,
+          error["code"] || ConduitMcp.Errors.server_error(),
           error["message"] || "#{callback_name} failed"
         )
 
@@ -411,13 +415,17 @@ defmodule ConduitMcp.Handler do
     end
   end
 
-  defp build_capabilities(_server_module) do
-    # All MCP servers (both DSL and manual mode) define all 6 callbacks,
-    # so we always advertise all capabilities.
-    %{
-      "tools" => %{"listChanged" => false},
-      "resources" => %{"listChanged" => false},
-      "prompts" => %{"listChanged" => false}
-    }
+  defp build_capabilities(server_module) do
+    if function_exported?(server_module, :__capabilities__, 0) do
+      server_module.__capabilities__()
+    else
+      # DSL and manual mode servers always define all 6 callbacks,
+      # so we advertise all capabilities by default.
+      %{
+        "tools" => %{"listChanged" => false},
+        "resources" => %{"listChanged" => false},
+        "prompts" => %{"listChanged" => false}
+      }
+    end
   end
 end

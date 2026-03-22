@@ -43,16 +43,6 @@ defmodule ConduitMcp.Protocol do
           data: any() | nil
         }
 
-  # JSON-RPC 2.0 Error Codes
-  @parse_error -32700
-  @invalid_request -32600
-  @method_not_found -32601
-  @invalid_params -32602
-  @internal_error -32603
-
-  # MCP-specific Error Codes
-  @resource_not_found -32002
-
   def protocol_version, do: @protocol_version
   def supported_versions, do: @supported_versions
 
@@ -68,13 +58,13 @@ defmodule ConduitMcp.Protocol do
     end
   end
 
-  # Error code constants
-  def parse_error, do: @parse_error
-  def invalid_request, do: @invalid_request
-  def method_not_found, do: @method_not_found
-  def invalid_params, do: @invalid_params
-  def internal_error, do: @internal_error
-  def resource_not_found, do: @resource_not_found
+  # Error code constants — delegate to ConduitMcp.Errors
+  defdelegate parse_error, to: ConduitMcp.Errors
+  defdelegate invalid_request, to: ConduitMcp.Errors
+  defdelegate method_not_found, to: ConduitMcp.Errors
+  defdelegate invalid_params, to: ConduitMcp.Errors
+  defdelegate internal_error, to: ConduitMcp.Errors
+  defdelegate resource_not_found, to: ConduitMcp.Errors
 
   @doc """
   Core MCP methods as defined in the specification.

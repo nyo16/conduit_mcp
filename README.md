@@ -2,35 +2,54 @@
 
 # ConduitMCP
 
-An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) specification. Build MCP servers to expose tools, resources, and prompts to LLM applications.
+An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) specification (2025-11-25). Build MCP servers to expose tools, resources, and prompts to LLM applications like Claude Desktop, VS Code, and Cursor.
 
-[![Tests](https://img.shields.io/badge/tests-309%20passing-brightgreen)]()
-[![Version](https://img.shields.io/badge/version-0.6.5-blue)]()
+[![Tests](https://img.shields.io/badge/tests-503%20passing-brightgreen)]()
+[![Version](https://img.shields.io/badge/version-0.8.0-blue)]()
+[![MCP Spec](https://img.shields.io/badge/MCP-2025--11--25-purple)]()
 
 ## Features
 
-- **Clean DSL** - Declarative tool definitions with automatic schema generation
-- **Runtime Validation** - Parameter validation with NimbleOptions, type coercion, and custom constraints
-- **Stateless Architecture** - Pure functions, no processes, maximum concurrency
-- **Flexible Authentication** - Bearer tokens, API keys, custom verification
-- **Full MCP Spec** - Tools, resources, prompts, and all MCP 2025-06-18 features
-- **Phoenix Ready** - Drop-in integration with Phoenix applications
-- **Rate Limiting** - HTTP-level and message-level rate limiting with Hammer
-- **Production Ready** - Comprehensive tests, telemetry, CORS support
+- **Three Ways to Build** — DSL macros, raw callbacks, or component modules — pick your level of control
+- **Full MCP Spec** — Tools, resources, prompts, completion, logging, subscriptions (MCP 2025-11-25 + 2025-06-18)
+- **Runtime Validation** — NimbleOptions-powered param validation with type coercion and custom constraints
+- **Stateless Architecture** — Pure functions, no processes, maximum concurrency via Bandit
+- **Authentication** — Bearer tokens, API keys, OAuth 2.1 (RFC 9728), custom verification
+- **Rate Limiting** — HTTP-level and message-level rate limiting with Hammer
+- **Session Management** — Pluggable session stores (ETS, Redis, PostgreSQL, Mnesia)
+- **Observability** — Telemetry events, optional Prometheus metrics via PromEx
+- **Phoenix Ready** — Drop-in integration with Phoenix routers
+- **CORS & Security** — Configurable origins, preflight handling, origin validation
 
 ## Installation
 
 ```elixir
 def deps do
   [
-    {:conduit_mcp, "~> 0.6.5"}
+    {:conduit_mcp, "~> 0.8.0"}
   ]
 end
 ```
 
-## Quick Start
+Requires Elixir ~> 1.18.
 
-### Basic DSL Example
+## Three Ways to Define Servers
+
+ConduitMCP gives you three modes. Each is a complete, independent way to build an MCP server — pick whichever fits your project.
+
+| | DSL Mode | Manual Mode | Endpoint Mode |
+|--|----------|-------------|---------------|
+| **Style** | Declarative macros | Raw callbacks | Component modules |
+| **Schema** | Auto-generated | You build the maps | Auto from `schema do field ... end` |
+| **Params** | String-keyed maps | String-keyed maps | Atom-keyed maps |
+| **Rate limiting** | Transport option | Transport option | Declarative in `use` opts |
+| **Best for** | Quick setup | Maximum control | Larger servers, team projects |
+
+---
+
+### 1. DSL Mode
+
+Everything in one module with compile-time macros. Schemas and validation generated automatically.
 
 ```elixir
 defmodule MyApp.MCPServer do
@@ -72,56 +91,13 @@ defmodule MyApp.MCPServer do
 end
 ```
 
-### Enhanced DSL with Validation
+**Response helpers** (auto-imported): `text/1`, `json/1`, `image/1`, `audio/2`, `error/1`, `raw/1`, `system/1`, `user/1`, `assistant/1` — see [Responses](#responses) for details and custom response patterns.
 
-```elixir
-defmodule MyApp.MCPServer do
-  use ConduitMcp.Server
+---
 
-  tool "create_user", "Create a new user with validation" do
-    # Basic types with constraints
-    param :name, :string, "Full name", required: true, min_length: 2, max_length: 50
-    param :age, :integer, "Age", min: 0, max: 150, required: true
-    param :email, :string, "Email address", validator: &ConduitMcp.Validation.Validators.email/1
+### 2. Manual Mode
 
-    # Enum validation with default
-    param :role, :string, "User role", enum: ["admin", "user", "guest"], default: "user"
-
-    # Numeric constraints with defaults
-    param :score, :number, "Performance score", min: 0.0, max: 100.0, default: 50.0
-
-    handle &UserService.create/2
-  end
-
-  tool "calculate", "Math with validation" do
-    param :operation, :string, "Math operation", enum: ~w(add subtract multiply divide), required: true
-    param :a, :number, "First number", required: true
-    param :b, :number, "Second number", required: true
-    param :precision, :integer, "Decimal places", min: 0, max: 10, default: 2
-
-    handle fn _conn, params ->
-      result = case params["operation"] do
-        "add" -> params["a"] + params["b"]
-        "subtract" -> params["a"] - params["b"]
-        "multiply" -> params["a"] * params["b"]
-        "divide" -> params["a"] / params["b"]
-      end
-
-      formatted = Float.round(result, params["precision"])
-      text("Result: #{formatted}")
-    end
-  end
-end
-```
-
-**Helper functions available:**
-- `text(string)` - Text response
-- `json(data)` - JSON response
-- `raw(data)` - Raw data response (bypasses MCP wrapping, for debugging)
-- `error(message)` or `error(message, code)` - Error response
-- `system(content)`, `user(content)`, `assistant(content)` - Prompt messages
-
-### Example without DSL (Manual)
+Full control. You implement callbacks directly with raw JSON Schema maps. No compile-time magic.
 
 ```elixir
 defmodule MyApp.MCPServer do
@@ -133,18 +109,14 @@ defmodule MyApp.MCPServer do
       "description" => "Greet someone",
       "inputSchema" => %{
         "type" => "object",
-        "properties" => %{
-          "name" => %{"type" => "string"}
-        },
+        "properties" => %{"name" => %{"type" => "string"}},
         "required" => ["name"]
       }
     }
   ]
 
   @impl true
-  def handle_list_tools(_conn) do
-    {:ok, %{"tools" => @tools}}
-  end
+  def handle_list_tools(_conn), do: {:ok, %{"tools" => @tools}}
 
   @impl true
   def handle_call_tool(_conn, "greet", %{"name" => name}) do
@@ -152,6 +124,72 @@ defmodule MyApp.MCPServer do
   end
 end
 ```
+
+---
+
+### 3. Endpoint + Component Mode
+
+Each tool, resource, or prompt is its own module. An Endpoint aggregates them with declarative config for rate limiting, auth, and server metadata.
+
+```elixir
+# Each tool is its own module
+defmodule MyApp.Echo do
+  use ConduitMcp.Component, type: :tool, description: "Echoes text back"
+
+  schema do
+    field :text, :string, "The text to echo", required: true, max_length: 500
+  end
+
+  @impl true
+  def execute(%{text: text}, _conn) do
+    text(text)
+  end
+end
+
+defmodule MyApp.ReadUser do
+  use ConduitMcp.Component,
+    type: :resource,
+    uri: "user://{id}",
+    description: "User by ID",
+    mime_type: "application/json"
+
+  @impl true
+  def execute(%{id: id}, _conn) do
+    user = MyApp.Users.get!(id)
+    {:ok, %{"contents" => [%{
+      "uri" => "user://#{id}",
+      "mimeType" => "application/json",
+      "text" => Jason.encode!(user)
+    }]}}
+  end
+end
+
+# Endpoint aggregates components
+defmodule MyApp.MCPServer do
+  use ConduitMcp.Endpoint,
+    name: "My App",
+    version: "1.0.0",
+    rate_limit: [backend: MyApp.RateLimiter, limit: 60, scale: 60_000],
+    message_rate_limit: [backend: MyApp.RateLimiter, limit: 50, scale: 300_000]
+
+  component MyApp.Echo
+  component MyApp.ReadUser
+end
+```
+
+Endpoint config is auto-extracted by transports — no duplication needed:
+
+```elixir
+{Bandit,
+ plug: {ConduitMcp.Transport.StreamableHTTP, server_module: MyApp.MCPServer},
+ port: 4001}
+```
+
+See the [Endpoint Mode Guide](guides/endpoint_mode.md) for full details on components, schema DSL, and options.
+
+---
+
+## Running Your Server
 
 ### Standalone with Bandit
 
@@ -171,306 +209,206 @@ end
 ### Phoenix Integration
 
 ```elixir
-# lib/my_app/mcp_server.ex
-defmodule MyApp.MCPServer do
-  use ConduitMcp.Server
-
-  alias MyApp.Accounts
-
-  tool "get_user", "Get user from database" do
-    param :user_id, :string, "User ID", required: true
-
-    handle fn _conn, %{"user_id" => id} ->
-      user = Accounts.get_user!(id)
-      json(%{id: user.id, name: user.name, email: user.email})
-    end
-  end
-
-  tool "search", "Search users" do
-    param :query, :string, "Search query", required: true
-    param :limit, :number, "Max results", default: 10
-
-    handle Accounts, :search_users
-  end
-end
-
 # lib/my_app_web/router.ex
-defmodule MyAppWeb.Router do
-  use MyAppWeb, :router
-
-  scope "/mcp" do
-    forward "/", ConduitMcp.Transport.StreamableHTTP,
-      server_module: MyApp.MCPServer,
-      auth: [
-        strategy: :bearer_token,
-        token: System.get_env("MCP_AUTH_TOKEN")
-      ]
-  end
+scope "/mcp" do
+  forward "/", ConduitMcp.Transport.StreamableHTTP,
+    server_module: MyApp.MCPServer,
+    auth: [strategy: :bearer_token, token: System.get_env("MCP_AUTH_TOKEN")]
 end
 ```
+
+### Transports
+
+| Transport | Module | Description |
+|-----------|--------|-------------|
+| **StreamableHTTP** | `ConduitMcp.Transport.StreamableHTTP` | Recommended. Single `POST /` endpoint for bidirectional communication |
+| **SSE** | `ConduitMcp.Transport.SSE` | Legacy. `GET /sse` for streaming, `POST /message` for requests |
+
+Both transports support authentication, rate limiting, CORS, and session management.
+
+## Responses
+
+All tool/resource/prompt handlers return `{:ok, map()}` or `{:error, map()}`. Helper macros are imported automatically in DSL and Endpoint modes.
+
+### Tool Response Helpers
+
+| Helper | What it returns | Use case |
+|--------|----------------|----------|
+| `text("hello")` | `{:ok, %{"content" => [%{"type" => "text", "text" => "hello"}]}}` | Plain text responses |
+| `json(%{a: 1})` | `{:ok, %{"content" => [%{"type" => "text", "text" => "{\"a\":1}"}]}}` | Structured data (Jason-encoded) |
+| `image(base64_data)` | `{:ok, %{"content" => [%{"type" => "image", "data" => ...}]}}` | Images (base64) |
+| `audio(data, "audio/wav")` | `{:ok, %{"content" => [%{"type" => "audio", "data" => ..., "mimeType" => ...}]}}` | Audio clips |
+| `error("fail")` | `{:error, %{"code" => -32000, "message" => "fail"}}` | Error with default code |
+| `error("fail", -32602)` | `{:error, %{"code" => -32602, "message" => "fail"}}` | Error with custom code |
+| `raw(any_map)` | `{:ok, any_map}` | Bypass MCP wrapping entirely |
+
+### Prompt Message Helpers
+
+| Helper | Returns |
+|--------|---------|
+| `system("You are a reviewer")` | `%{"role" => "system", "content" => %{"type" => "text", "text" => ...}}` |
+| `user("Review this code")` | `%{"role" => "user", "content" => %{"type" => "text", "text" => ...}}` |
+| `assistant("Here is my review")` | `%{"role" => "assistant", "content" => %{"type" => "text", "text" => ...}}` |
+
+### Multi-Content Responses
+
+Use `texts/1` to return multiple text items in a single response:
+
+```elixir
+{:ok, %{"content" => texts(["Line 1", "Line 2", "Line 3"])}}
+# => {:ok, %{"content" => [%{"type" => "text", "text" => "Line 1"}, ...]}}
+```
+
+### Raw / Fully Custom Responses
+
+For maximum control, skip the helpers entirely and return the map yourself:
+
+```elixir
+def execute(_params, _conn) do
+  {:ok, %{
+    "content" => [
+      %{"type" => "text", "text" => "Here is the chart:"},
+      %{"type" => "image", "data" => base64_png, "mimeType" => "image/png"},
+      %{"type" => "text", "text" => "Analysis complete."}
+    ]
+  }}
+end
+```
+
+The `raw/1` helper is a shortcut for returning any map without MCP content wrapping — useful for debugging or non-standard responses:
+
+```elixir
+raw(%{"custom_key" => "custom_value", "nested" => %{"data" => [1, 2, 3]}})
+# => {:ok, %{"custom_key" => "custom_value", "nested" => %{"data" => [1, 2, 3]}}}
+```
+
+> **Note:** `raw/1` bypasses the MCP content structure. Clients expecting standard `"content"` arrays won't parse it correctly. Use it for debugging or custom integrations.
+
+### Error Codes
+
+Standard JSON-RPC 2.0 error codes used by the protocol:
+
+| Code | Meaning |
+|------|---------|
+| `-32700` | Parse error |
+| `-32600` | Invalid request |
+| `-32601` | Method not found |
+| `-32602` | Invalid params |
+| `-32603` | Internal error |
+| `-32000` | Tool/server error (default for `error/1`) |
+| `-32002` | Resource not found |
 
 ## Parameter Validation
 
-ConduitMCP v0.6.0+ includes comprehensive runtime parameter validation using [NimbleOptions](https://hexdocs.pm/nimble_options). Validation includes type checking, constraints, and automatic type coercion.
+All three modes support runtime validation via [NimbleOptions](https://hexdocs.pm/nimble_options). DSL and Endpoint modes generate validation schemas automatically. Manual mode can opt in via `__validation_schema_for_tool__/1`.
 
-### Enhanced Parameter Options
+### Constraints
 
-```elixir
-tool "create_user", "Create a new user" do
-  # Basic types with constraints
-  param :name, :string, "Full name", required: true, min_length: 2, max_length: 50
-  param :age, :integer, "Age", min: 0, max: 150
-  param :email, :string, "Email address", validator: &ConduitMcp.Validation.Validators.email/1
-
-  # Enum validation
-  param :role, :string, "User role", enum: ["admin", "user", "guest"], default: "user"
-
-  # Numeric constraints
-  param :score, :number, "Performance score", min: 0.0, max: 100.0, default: 50.0
-
-  handle &UserService.create/2
-end
-```
+| Constraint | Types | Example |
+|------------|-------|---------|
+| `required: true` | All | `required: true` |
+| `min: N` / `max: N` | number, integer | `min: 0, max: 100` |
+| `min_length: N` / `max_length: N` | string | `min_length: 3, max_length: 255` |
+| `enum: [...]` | All | `enum: ["red", "green", "blue"]` |
+| `default: value` | All | `default: "guest"` |
+| `validator: fun` | All | `validator: &valid_email?/1` |
 
 ### Type Coercion
 
-Automatic type conversion when `type_coercion: true` (enabled by default):
+Enabled by default. Automatic conversion: `"25"` → `25`, `"true"` → `true`, `"85.5"` → `85.5`.
+
+### Configuration
 
 ```elixir
-# Client sends: {"age": "25", "active": "true", "score": "85.5"}
-# Server receives: %{"age" => 25, "active" => true, "score" => 85.5}
-```
-
-### Custom Validators
-
-Use built-in validators or create your own:
-
-```elixir
-# Built-in validators
-param :email, :string, "Email", validator: &ConduitMcp.Validation.Validators.email/1
-param :url, :string, "Website", validator: &ConduitMcp.Validation.Validators.url/1
-
-# Custom validator function
-param :username, :string, "Username", validator: fn username ->
-  String.match?(username, ~r/^[a-zA-Z0-9_]{3,20}$/)
-end
-
-# Module function validator
-param :priority, :string, "Priority", validator: {MyApp.Validators, :valid_priority?}
-```
-
-### Validation Configuration
-
-Configure validation behavior in your application config:
-
-```elixir
-# config/config.exs
 config :conduit_mcp, :validation,
-  runtime_validation: true,    # Enable validation (default: true)
-  strict_mode: true,           # Fail on validation errors (default: true)
-  type_coercion: true,         # Auto-convert types (default: true)
-  log_validation_errors: false # Log failures (default: false)
+  runtime_validation: true,
+  strict_mode: true,
+  type_coercion: true,
+  log_validation_errors: false
 ```
-
-### Error Responses
-
-Validation failures return detailed error information:
-
-```json
-{
-  "error": {
-    "code": -32602,
-    "message": "Parameter validation failed",
-    "data": {
-      "errors": [
-        {
-          "parameter": "age",
-          "value": -5,
-          "message": "must be greater than or equal to 0"
-        },
-        {
-          "parameter": "email",
-          "value": "invalid-email",
-          "message": "must be a valid email address"
-        }
-      ]
-    }
-  }
-}
-```
-
-### Supported Constraints
-
-| Constraint | Types | Description | Example |
-|------------|-------|-------------|---------|
-| `required: true` | All | Parameter must be present | `required: true` |
-| `min: N` | number, integer | Minimum value (inclusive) | `min: 0` |
-| `max: N` | number, integer | Maximum value (inclusive) | `max: 100` |
-| `min_length: N` | string | Minimum string length | `min_length: 3` |
-| `max_length: N` | string | Maximum string length | `max_length: 255` |
-| `enum: [...]` | All | Value must be in list | `enum: ["red", "green", "blue"]` |
-| `default: value` | All | Default if not provided | `default: "guest"` |
-| `validator: fun` | All | Custom validation function | `validator: &valid_email?/1` |
 
 ## Authentication
 
-Configure authentication in transport options:
+Configure in transport options or Endpoint `use` opts:
 
 ```elixir
-# No auth (development)
-auth: [enabled: false]
+# Bearer token
+auth: [strategy: :bearer_token, token: "your-secret-token"]
 
-# Static bearer token
-auth: [
-  strategy: :bearer_token,
-  token: "your-secret-token"
-]
-
-# Static API key
-auth: [
-  strategy: :api_key,
-  api_key: "your-api-key",
-  header: "x-api-key"
-]
+# API key
+auth: [strategy: :api_key, api_key: "your-key", header: "x-api-key"]
 
 # Custom verification
-auth: [
-  strategy: :function,
-  verify: fn token ->
-    case MyApp.Auth.verify(token) do
-      {:ok, user} -> {:ok, user}
-      _ -> {:error, "Invalid token"}
-    end
+auth: [strategy: :function, verify: fn token ->
+  case MyApp.Auth.verify(token) do
+    {:ok, user} -> {:ok, user}
+    _ -> {:error, "Invalid token"}
   end
-]
+end]
 
-# Database lookup
-auth: [
-  strategy: :function,
-  verify: fn token ->
-    case MyApp.Repo.get_by(ApiToken, token: token) do
-      %ApiToken{user: user} -> {:ok, user}
-      nil -> {:error, "Invalid token"}
-    end
-  end
-]
+# OAuth 2.1 (RFC 9728)
+auth: [strategy: :oauth, issuer: "https://auth.example.com", audience: "my-app"]
 ```
 
-Access authenticated user in tools:
-
-```elixir
-tool "profile", "Get profile" do
-  handle fn conn, _params ->
-    case conn.assigns[:current_user] do
-      nil -> error("Not authenticated")
-      user -> json(user)
-    end
-  end
-end
-```
+Authenticated user is available via `conn.assigns[:current_user]` in all callbacks.
 
 ## Rate Limiting
 
-ConduitMCP supports two layers of rate limiting using [Hammer](https://hex.pm/packages/hammer). Both are optional — omit the config and no rate limiting is applied.
-
-### Setup
-
-Add `hammer` to your dependencies:
+Two layers using [Hammer](https://hex.pm/packages/hammer) (optional dependency):
 
 ```elixir
-def deps do
-  [
-    {:conduit_mcp, "~> 0.6.5"},
-    {:hammer, "~> 7.2"}
-  ]
-end
-```
-
-Define a Hammer module and add it to your supervision tree:
-
-```elixir
+# Setup: add {:hammer, "~> 7.2"} to deps, then:
 defmodule MyApp.RateLimiter do
   use Hammer, backend: :ets
 end
-
-# In your application.ex
-children = [
-  {MyApp.RateLimiter, [clean_period: :timer.minutes(1)]}
-]
 ```
 
-### HTTP Rate Limiting
-
-Limits raw HTTP connections — prevents DDoS and connection flooding.
+**HTTP rate limiting** — limits raw connections:
 
 ```elixir
-{Bandit,
- plug: {ConduitMcp.Transport.StreamableHTTP,
-        server_module: MyApp.MCPServer,
-        rate_limit: [
-          backend: MyApp.RateLimiter,
-          scale: :timer.seconds(60),   # Time window (default: 60s)
-          limit: 100                    # Max requests per window (default: 60)
-        ]},
- port: 4001}
+rate_limit: [backend: MyApp.RateLimiter, limit: 100, scale: 60_000]
 ```
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `:backend` | required | Hammer module with `hit/3` |
-| `:enabled` | `true` | Toggle on/off |
-| `:scale` | `60_000` | Time window in ms |
-| `:limit` | `60` | Max requests per window |
-| `:key_func` | IP-based | `(Plug.Conn.t()) -> String.t()` |
-
-### Message Rate Limiting
-
-Limits MCP method calls (tool calls, resource reads, prompt gets) per time window. Think of it as: HTTP rate limit = "how fast can you knock on the door", message rate limit = "how many questions can you ask once inside."
+**Message rate limiting** — limits MCP method calls (tool calls, reads, prompts):
 
 ```elixir
-{Bandit,
- plug: {ConduitMcp.Transport.StreamableHTTP,
-        server_module: MyApp.MCPServer,
-        rate_limit: [backend: MyApp.RateLimiter, limit: 100, scale: 60_000],
-        message_rate_limit: [
-          backend: MyApp.RateLimiter,
-          scale: :timer.minutes(5),    # Time window (default: 5 min)
-          limit: 50,                    # Max messages per window (default: 50)
-          excluded_methods: ["initialize", "ping"]
-        ]},
- port: 4001}
-```
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `:backend` | required | Hammer module with `hit/3` |
-| `:enabled` | `true` | Toggle on/off |
-| `:scale` | `300_000` | Time window in ms (5 min) |
-| `:limit` | `50` | Max messages per window |
-| `:key_func` | user-aware | Uses `conn.assigns[:current_user]` if set, falls back to IP |
-| `:excluded_methods` | `[]` | Methods to skip (e.g., `["initialize", "ping"]`) |
-
-Key behaviors:
-- **POST only** — GET and OPTIONS requests pass through
-- **Notifications skipped** — JSON-RPC notifications (no `id` field) are not counted
-- **User-aware** — Default key uses authenticated user when Auth plug is in the pipeline
-- **Key prefix** — Keys are prefixed with `"msg:"` to avoid collision with HTTP rate limiter
-- **HTTP 429** — Returns JSON-RPC error with code `-32000` and `Retry-After` header
-
-### Per-user Rate Limiting
-
-```elixir
-rate_limit: [
+message_rate_limit: [
   backend: MyApp.RateLimiter,
-  limit: 100,
-  key_func: fn conn ->
-    case conn.assigns[:current_user] do
-      %{id: id} -> "user:#{id}"
-      _ -> conn.remote_ip |> :inet.ntoa() |> to_string()
-    end
-  end
+  limit: 50,
+  scale: 300_000,
+  excluded_methods: ["initialize", "ping"]
 ]
 ```
+
+Both support per-user keying via `:key_func`. Returns HTTP 429 with `Retry-After` header.
+
+## Session Management
+
+StreamableHTTP supports server-side sessions with pluggable stores:
+
+```elixir
+session: [store: ConduitMcp.Session.EtsStore]  # Default
+session: [store: MyApp.RedisSessionStore]       # Custom store
+session: false                                   # Disable
+```
+
+See guides: [Multi-Node Sessions](guides/multi_node_sessions.md)
+
+## Telemetry
+
+Events emitted for monitoring:
+
+| Event | Description |
+|-------|-------------|
+| `[:conduit_mcp, :request, :stop]` | All MCP requests |
+| `[:conduit_mcp, :tool, :execute]` | Tool executions |
+| `[:conduit_mcp, :resource, :read]` | Resource reads |
+| `[:conduit_mcp, :prompt, :get]` | Prompt retrievals |
+| `[:conduit_mcp, :rate_limit, :check]` | HTTP rate limit checks |
+| `[:conduit_mcp, :message_rate_limit, :check]` | Message rate limit checks |
+| `[:conduit_mcp, :auth, :verify]` | Authentication attempts |
+
+Optional Prometheus metrics via `ConduitMcp.PromEx` — see module docs.
 
 ## Client Configuration
 
@@ -502,154 +440,31 @@ rate_limit: [
 }
 ```
 
-## Telemetry
+## MCP Spec Coverage
 
-ConduitMCP emits telemetry events for monitoring:
+ConduitMCP implements the full [MCP specification](https://modelcontextprotocol.io/specification/):
 
-- `[:conduit_mcp, :request, :stop]` - All MCP requests
-- `[:conduit_mcp, :tool, :execute]` - Tool executions
-- `[:conduit_mcp, :resource, :read]` - Resource reads
-- `[:conduit_mcp, :prompt, :get]` - Prompt retrievals
-- `[:conduit_mcp, :rate_limit, :check]` - HTTP rate limit checks
-- `[:conduit_mcp, :message_rate_limit, :check]` - Message rate limit checks
-- `[:conduit_mcp, :auth, :verify]` - Authentication attempts
+| Feature | Status | Spec Version |
+|---------|--------|-------------|
+| Tools (list, call) | Supported | 2025-06-18 |
+| Resources (list, read, subscribe) | Supported | 2025-06-18 |
+| Prompts (list, get) | Supported | 2025-06-18 |
+| Completion | Supported | 2025-06-18 |
+| Logging | Supported | 2025-06-18 |
+| Protocol negotiation | Supported | 2025-11-25 |
+| Session management | Supported | 2025-11-25 |
+| OAuth 2.1 (RFC 9728) | Supported | 2025-11-25 |
+| StreamableHTTP transport | Supported | 2025-11-25 |
+| SSE transport (legacy) | Supported | 2025-06-18 |
 
-Example handler:
+## Guides
 
-```elixir
-:telemetry.attach(
-  "mcp-logger",
-  [:conduit_mcp, :tool, :execute],
-  fn _event, %{duration: duration}, %{tool_name: name}, _config ->
-    ms = System.convert_time_unit(duration, :native, :millisecond)
-    Logger.info("Tool #{name} executed in #{ms}ms")
-  end,
-  nil
-)
-```
-
-## Prometheus Metrics
-
-ConduitMCP includes an optional PromEx plugin for Prometheus monitoring.
-
-### Installation
-
-Add `:prom_ex` to your dependencies:
-
-```elixir
-def deps do
-  [
-    {:conduit_mcp, "~> 0.6.5"},
-    {:prom_ex, "~> 1.11"}
-  ]
-end
-```
-
-### Setup
-
-Add the ConduitMCP plugin to your PromEx configuration:
-
-```elixir
-defmodule MyApp.PromEx do
-  use PromEx, otp_app: :my_app
-
-  @impl true
-  def plugins do
-    [
-      PromEx.Plugins.Application,
-      PromEx.Plugins.Beam,
-      {ConduitMcp.PromEx, otp_app: :my_app}
-    ]
-  end
-
-  @impl true
-  def dashboard_assigns do
-    [
-      datasource_id: "prometheus",
-      default_selected_interval: "30s"
-    ]
-  end
-end
-```
-
-Add to your supervision tree:
-
-```elixir
-def start(_type, _args) do
-  children = [
-    MyApp.PromEx,
-    # ... other children ...
-  ]
-
-  Supervisor.start_link(children, strategy: :one_for_one)
-end
-```
-
-### Metrics Available
-
-All metrics are prefixed with `{otp_app}_conduit_mcp_`:
-
-**Request Metrics:**
-- `request_total{method, status}` - Total MCP requests
-- `request_duration_milliseconds{method, status}` - Request duration distribution
-
-**Tool Metrics:**
-- `tool_execution_total{tool_name, status}` - Total tool executions
-- `tool_duration_milliseconds{tool_name, status}` - Tool execution duration
-
-**Resource Metrics:**
-- `resource_read_total{status}` - Total resource reads
-- `resource_read_duration_milliseconds{status}` - Read duration
-
-**Prompt Metrics:**
-- `prompt_get_total{prompt_name, status}` - Total prompt retrievals
-- `prompt_get_duration_milliseconds{prompt_name, status}` - Retrieval duration
-
-**Rate Limit Metrics:**
-- `rate_limit_check_total{status}` - HTTP rate limit checks
-- `rate_limit_check_duration_milliseconds` - Check duration
-
-**Message Rate Limit Metrics:**
-- `message_rate_limit_check_total{status, method}` - Message rate limit checks
-- `message_rate_limit_check_duration_milliseconds{status, method}` - Check duration
-
-**Auth Metrics:**
-- `auth_verify_total{strategy, status}` - Total auth attempts
-- `auth_verify_duration_milliseconds{strategy, status}` - Verification duration
-
-### Example PromQL Queries
-
-**Request rate by method:**
-```promql
-rate(myapp_conduit_mcp_request_total[5m])
-```
-
-**Error rate percentage:**
-```promql
-100 * (
-  rate(myapp_conduit_mcp_request_total{status="error"}[5m])
-  /
-  rate(myapp_conduit_mcp_request_total[5m])
-)
-```
-
-**P95 tool execution duration:**
-```promql
-histogram_quantile(0.95,
-  rate(myapp_conduit_mcp_tool_duration_milliseconds_bucket[5m])
-)
-```
-
-**Authentication success rate:**
-```promql
-100 * (
-  rate(myapp_conduit_mcp_auth_verify_total{status="ok"}[5m])
-  /
-  rate(myapp_conduit_mcp_auth_verify_total[5m])
-)
-```
-
-See `ConduitMcp.PromEx` module documentation for complete details and alert examples.
+- [Choosing a Mode](guides/choosing_a_mode.md) — DSL vs Manual vs Endpoint comparison
+- [Endpoint Mode](guides/endpoint_mode.md) — Component modules, schema DSL, full walkthrough
+- [Authentication](guides/authentication.md) — All auth strategies in detail
+- [Rate Limiting](guides/rate_limiting.md) — HTTP and message rate limiting
+- [Multi-Node Sessions](guides/multi_node_sessions.md) — Redis, PostgreSQL, Mnesia session stores
+- [Oban Tasks](guides/oban_tasks.md) — Long-running tasks with Oban
 
 ## Documentation
 
