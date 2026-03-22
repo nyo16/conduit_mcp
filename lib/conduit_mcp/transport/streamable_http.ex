@@ -57,7 +57,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   plug(:validate_origin)
   plug(:add_cors_headers)
   plug(:match)
-  plug(Plug.Parsers, parsers: [:json], json_decoder: Jason)
+  plug(Plug.Parsers, parsers: [:json], json_decoder: JSON)
   plug(:maybe_authenticate)
   plug(:maybe_rate_limit)
   plug(:maybe_message_rate_limit)
@@ -94,7 +94,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
 
             conn
             |> put_resp_content_type("application/json")
-            |> send_resp(403, Jason.encode!(%{"error" => "Origin not allowed"}))
+            |> send_resp(403, JSON.encode!(%{"error" => "Origin not allowed"}))
             |> halt()
         end
     end
@@ -192,7 +192,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
           |> put_resp_content_type("application/json")
           |> send_resp(
             404,
-            Jason.encode!(
+            JSON.encode!(
               ConduitMcp.Protocol.error_response(
                 nil,
                 ConduitMcp.Protocol.invalid_request(),
@@ -267,7 +267,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     |> put_resp_content_type("application/json")
     |> send_resp(
       200,
-      Jason.encode!(%{
+      JSON.encode!(%{
         "transport" => "streamable-http",
         "version" => ConduitMcp.Protocol.protocol_version(),
         "status" => "ready"
@@ -303,7 +303,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
 
             conn
             |> put_resp_content_type("application/json")
-            |> send_resp(200, Jason.encode!(response_map))
+            |> send_resp(200, JSON.encode!(response_map))
         end
 
       _ ->
@@ -316,7 +316,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
 
         conn
         |> put_resp_content_type("application/json")
-        |> send_resp(400, Jason.encode!(error_response))
+        |> send_resp(400, JSON.encode!(error_response))
     end
   end
 
@@ -324,7 +324,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   get "/health" do
     conn
     |> put_resp_content_type("application/json")
-    |> send_resp(200, Jason.encode!(%{status: "ok"}))
+    |> send_resp(200, JSON.encode!(%{status: "ok"}))
   end
 
   # OAuth Protected Resource Metadata (RFC 9728)
@@ -338,7 +338,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
 
           conn
           |> put_resp_content_type("application/json")
-          |> send_resp(200, Jason.encode!(metadata))
+          |> send_resp(200, JSON.encode!(metadata))
         else
           send_resp(conn, 404, "Not found")
         end

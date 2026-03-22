@@ -25,7 +25,7 @@ defmodule ConduitMcp.Transport.AuthIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{
+          JSON.encode!(%{
             "jsonrpc" => "2.0",
             "id" => 1,
             "method" => "tools/list"
@@ -39,7 +39,7 @@ defmodule ConduitMcp.Transport.AuthIntegrationTest do
       refute result.halted
       assert result.status == 200
 
-      {:ok, response} = Jason.decode(result.resp_body)
+      {:ok, response} = JSON.decode(result.resp_body)
       assert response["result"]["tools"]
       assert is_list(response["result"]["tools"])
     end
@@ -49,7 +49,7 @@ defmodule ConduitMcp.Transport.AuthIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{
+          JSON.encode!(%{
             "jsonrpc" => "2.0",
             "id" => 1,
             "method" => "tools/list"
@@ -64,7 +64,7 @@ defmodule ConduitMcp.Transport.AuthIntegrationTest do
       assert result.halted
       assert result.status == 401
 
-      {:ok, response} = Jason.decode(result.resp_body)
+      {:ok, response} = JSON.decode(result.resp_body)
       assert response["error"] == "Unauthorized"
     end
 
@@ -73,7 +73,7 @@ defmodule ConduitMcp.Transport.AuthIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{
+          JSON.encode!(%{
             "jsonrpc" => "2.0",
             "id" => 1,
             "method" => "tools/call",
@@ -126,7 +126,7 @@ defmodule ConduitMcp.Transport.AuthIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{
+          JSON.encode!(%{
             "jsonrpc" => "2.0",
             "id" => 1,
             "method" => "ping"
@@ -156,7 +156,7 @@ defmodule ConduitMcp.Transport.AuthIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{
+          JSON.encode!(%{
             "jsonrpc" => "2.0",
             "id" => 1,
             "method" => "ping"
@@ -189,7 +189,7 @@ defmodule ConduitMcp.Transport.AuthIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{
+          JSON.encode!(%{
             "jsonrpc" => "2.0",
             "id" => 1,
             "method" => "tools/list"
@@ -203,7 +203,7 @@ defmodule ConduitMcp.Transport.AuthIntegrationTest do
       refute result.halted
       assert result.status == 200
 
-      {:ok, response} = Jason.decode(result.resp_body)
+      {:ok, response} = JSON.decode(result.resp_body)
       assert response["result"]["tools"]
     end
 
@@ -222,7 +222,7 @@ defmodule ConduitMcp.Transport.AuthIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{
+          JSON.encode!(%{
             "jsonrpc" => "2.0",
             "id" => 1,
             "method" => "tools/list"

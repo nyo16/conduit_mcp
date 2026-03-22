@@ -42,7 +42,7 @@ defmodule ConduitMcp.Transport.SSE do
   plug(Plug.Logger)
   plug(:add_cors_headers)
   plug(:match)
-  plug(Plug.Parsers, parsers: [:json], json_decoder: Jason)
+  plug(Plug.Parsers, parsers: [:json], json_decoder: JSON)
   plug(:maybe_authenticate)
   plug(:maybe_rate_limit)
   plug(:maybe_message_rate_limit)
@@ -169,7 +169,7 @@ defmodule ConduitMcp.Transport.SSE do
       |> put_resp_content_type("application/json")
       |> send_resp(
         406,
-        Jason.encode!(%{
+        JSON.encode!(%{
           error: "Not Acceptable",
           message: "Accept header must include 'text/event-stream'"
         })
@@ -195,7 +195,7 @@ defmodule ConduitMcp.Transport.SSE do
           response_map when is_map(response_map) ->
             conn
             |> put_resp_content_type("application/json")
-            |> send_resp(200, Jason.encode!(response_map))
+            |> send_resp(200, JSON.encode!(response_map))
         end
 
       _ ->
@@ -208,7 +208,7 @@ defmodule ConduitMcp.Transport.SSE do
 
         conn
         |> put_resp_content_type("application/json")
-        |> send_resp(400, Jason.encode!(error_response))
+        |> send_resp(400, JSON.encode!(error_response))
     end
   end
 
@@ -216,7 +216,7 @@ defmodule ConduitMcp.Transport.SSE do
   get "/health" do
     conn
     |> put_resp_content_type("application/json")
-    |> send_resp(200, Jason.encode!(%{status: "ok"}))
+    |> send_resp(200, JSON.encode!(%{status: "ok"}))
   end
 
   # Catch all

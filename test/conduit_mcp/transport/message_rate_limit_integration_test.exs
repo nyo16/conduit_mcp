@@ -14,7 +14,7 @@ defmodule ConduitMcp.Transport.MessageRateLimitIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "initialize", "id" => 1})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "initialize", "id" => 1})
         )
         |> put_req_header("content-type", "application/json")
 
@@ -43,7 +43,7 @@ defmodule ConduitMcp.Transport.MessageRateLimitIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "initialize", "id" => 1})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "initialize", "id" => 1})
         )
         |> put_req_header("content-type", "application/json")
 
@@ -55,14 +55,14 @@ defmodule ConduitMcp.Transport.MessageRateLimitIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "tools/list", "id" => 2})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/list", "id" => 2})
         )
         |> put_req_header("content-type", "application/json")
 
       result2 = ConduitMcp.Transport.StreamableHTTP.call(conn2, opts)
       assert result2.status == 429
 
-      {:ok, body} = Jason.decode(result2.resp_body)
+      {:ok, body} = JSON.decode(result2.resp_body)
       assert body["error"]["message"] == "Message rate limit exceeded"
     end
 
@@ -85,7 +85,7 @@ defmodule ConduitMcp.Transport.MessageRateLimitIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "initialize", "id" => 1})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "initialize", "id" => 1})
         )
         |> put_req_header("content-type", "application/json")
 
@@ -117,7 +117,7 @@ defmodule ConduitMcp.Transport.MessageRateLimitIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "initialize", "id" => 1})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "initialize", "id" => 1})
         )
         |> put_req_header("content-type", "application/json")
 
@@ -129,7 +129,7 @@ defmodule ConduitMcp.Transport.MessageRateLimitIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "tools/list", "id" => 2})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/list", "id" => 2})
         )
         |> put_req_header("content-type", "application/json")
 
@@ -141,7 +141,7 @@ defmodule ConduitMcp.Transport.MessageRateLimitIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "tools/list", "id" => 3})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/list", "id" => 3})
         )
         |> put_req_header("content-type", "application/json")
 
@@ -175,7 +175,7 @@ defmodule ConduitMcp.Transport.MessageRateLimitIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
         )
         |> put_req_header("content-type", "application/json")
 
@@ -187,14 +187,14 @@ defmodule ConduitMcp.Transport.MessageRateLimitIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 2})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 2})
         )
         |> put_req_header("content-type", "application/json")
 
       result2 = ConduitMcp.Transport.StreamableHTTP.call(conn2, opts)
       assert result2.status == 429
 
-      {:ok, body} = Jason.decode(result2.resp_body)
+      {:ok, body} = JSON.decode(result2.resp_body)
       assert body["error"]["message"] == "Message rate limit exceeded"
     end
   end
@@ -208,7 +208,7 @@ defmodule ConduitMcp.Transport.MessageRateLimitIntegrationTest do
         conn(
           :post,
           "/message",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "initialize", "id" => 1})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "initialize", "id" => 1})
         )
         |> put_req_header("content-type", "application/json")
 
@@ -237,7 +237,7 @@ defmodule ConduitMcp.Transport.MessageRateLimitIntegrationTest do
         conn(
           :post,
           "/message",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "initialize", "id" => 1})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "initialize", "id" => 1})
         )
         |> put_req_header("content-type", "application/json")
 
@@ -249,14 +249,14 @@ defmodule ConduitMcp.Transport.MessageRateLimitIntegrationTest do
         conn(
           :post,
           "/message",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "tools/list", "id" => 2})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/list", "id" => 2})
         )
         |> put_req_header("content-type", "application/json")
 
       result2 = ConduitMcp.Transport.SSE.call(conn2, opts)
       assert result2.status == 429
 
-      {:ok, body} = Jason.decode(result2.resp_body)
+      {:ok, body} = JSON.decode(result2.resp_body)
       assert body["error"]["message"] == "Message rate limit exceeded"
     end
   end

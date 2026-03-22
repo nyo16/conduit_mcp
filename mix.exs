@@ -47,7 +47,6 @@ defmodule ConduitMcp.MixProject do
   defp deps do
     [
       # Core dependencies
-      {:jason, "~> 1.4"},
       {:plug, "~> 1.19"},
       {:bandit, "~> 1.9"},
       {:nimble_options, "1.1.1"},
@@ -69,7 +68,11 @@ defmodule ConduitMcp.MixProject do
       {:ex_doc, "~> 0.39", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:excoveralls, "~> 0.18", only: :test, runtime: false}
+      {:excoveralls, "~> 0.18", only: :test, runtime: false},
+
+      # Benchmarking
+      {:benchee, "~> 1.3", only: :dev, runtime: false},
+      {:benchee_html, "~> 1.0", only: :dev, runtime: false}
     ]
   end
 

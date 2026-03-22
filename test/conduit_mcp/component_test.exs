@@ -109,7 +109,7 @@ defmodule ConduitMcp.ComponentTest do
            %{
              "uri" => "user://#{id}",
              "mimeType" => "application/json",
-             "text" => Jason.encode!(%{id: id, name: "User #{id}"})
+             "text" => JSON.encode!(%{id: id, name: "User #{id}"})
            }
          ]
        }}
@@ -360,7 +360,7 @@ defmodule ConduitMcp.ComponentTest do
       assert {:ok, %{"content" => [%{"type" => "text", "text" => json}]}} =
                MathTool.execute(%{a: 1.0, b: 2.0}, conn)
 
-      assert %{"result" => 3.0} = Jason.decode!(json)
+      assert %{"result" => 3.0} = JSON.decode!(json)
     end
 
     test "tool returns error response", %{conn: conn} do
@@ -377,7 +377,7 @@ defmodule ConduitMcp.ComponentTest do
       assert {:ok, %{"contents" => [%{"uri" => "user://42", "text" => json}]}} =
                UserResource.execute(%{id: "42"}, conn)
 
-      assert %{"id" => "42", "name" => "User 42"} = Jason.decode!(json)
+      assert %{"id" => "42", "name" => "User 42"} = JSON.decode!(json)
     end
 
     test "prompt returns messages", %{conn: conn} do

@@ -27,7 +27,7 @@ defmodule ConduitMcp.Transport.RateLimitIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{
+          JSON.encode!(%{
             "jsonrpc" => "2.0",
             "id" => 1,
             "method" => "tools/list"
@@ -40,7 +40,7 @@ defmodule ConduitMcp.Transport.RateLimitIntegrationTest do
       refute result.halted
       assert result.status == 200
 
-      {:ok, response} = Jason.decode(result.resp_body)
+      {:ok, response} = JSON.decode(result.resp_body)
       assert response["result"]["tools"]
     end
 
@@ -63,7 +63,7 @@ defmodule ConduitMcp.Transport.RateLimitIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{
+          JSON.encode!(%{
             "jsonrpc" => "2.0",
             "id" => 1,
             "method" => "ping"
@@ -80,7 +80,7 @@ defmodule ConduitMcp.Transport.RateLimitIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{
+          JSON.encode!(%{
             "jsonrpc" => "2.0",
             "id" => 2,
             "method" => "ping"
@@ -93,7 +93,7 @@ defmodule ConduitMcp.Transport.RateLimitIntegrationTest do
       assert result2.halted
       assert result2.status == 429
 
-      {:ok, body} = Jason.decode(result2.resp_body)
+      {:ok, body} = JSON.decode(result2.resp_body)
       assert body["error"]["code"] == -32000
       assert body["error"]["message"] == "Rate limit exceeded"
     end
@@ -123,7 +123,7 @@ defmodule ConduitMcp.Transport.RateLimitIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{
+          JSON.encode!(%{
             "jsonrpc" => "2.0",
             "id" => 1,
             "method" => "ping"
@@ -141,7 +141,7 @@ defmodule ConduitMcp.Transport.RateLimitIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{
+          JSON.encode!(%{
             "jsonrpc" => "2.0",
             "id" => 2,
             "method" => "ping"
@@ -165,7 +165,7 @@ defmodule ConduitMcp.Transport.RateLimitIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{
+          JSON.encode!(%{
             "jsonrpc" => "2.0",
             "id" => 1,
             "method" => "ping"
@@ -192,7 +192,7 @@ defmodule ConduitMcp.Transport.RateLimitIntegrationTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{
+          JSON.encode!(%{
             "jsonrpc" => "2.0",
             "id" => 1,
             "method" => "ping"

@@ -171,19 +171,12 @@ defmodule ConduitMcp.Validation do
 
   # Private functions
 
+  defp validation_config do
+    Application.get_env(:conduit_mcp, :validation, [])
+  end
+
   defp validation_enabled? do
-    Application.get_env(:conduit_mcp, :validation, [])
-    |> Keyword.get(:runtime_validation, true)
-  end
-
-  defp type_coercion_enabled? do
-    Application.get_env(:conduit_mcp, :validation, [])
-    |> Keyword.get(:type_coercion, true)
-  end
-
-  defp log_validation_errors? do
-    Application.get_env(:conduit_mcp, :validation, [])
-    |> Keyword.get(:log_validation_errors, false)
+    Keyword.get(validation_config(), :runtime_validation, true)
   end
 
   defp get_tool_validation_schema(server_module, tool_name) do
@@ -211,6 +204,7 @@ defmodule ConduitMcp.Validation do
   end
 
   defp validate_with_schema(schema, params, context) do
+    config = validation_config()
     # Convert string keys to atoms for validation
     atom_params = convert_keys_to_atoms(params)
 
@@ -223,7 +217,7 @@ defmodule ConduitMcp.Validation do
       {:ok, preprocessed_params} ->
         # Apply type coercion if enabled
         coerced_params =
-          if type_coercion_enabled?() do
+          if Keyword.get(config, :type_coercion, true) do
             apply_type_coercion(preprocessed_params, schema)
           else
             preprocessed_params
@@ -243,7 +237,7 @@ defmodule ConduitMcp.Validation do
           {:error, %NimbleOptions.ValidationError{} = error} ->
             formatted_errors = format_nimble_options_error(error, params)
 
-            if log_validation_errors?() do
+            if Keyword.get(config, :log_validation_errors, false) do
               Logger.warning("Validation failed for #{context}: #{inspect(formatted_errors)}")
             end
 
@@ -298,53 +292,21 @@ defmodule ConduitMcp.Validation do
     Map.new(error, fn {k, v} -> {to_string(k), v} end)
   end
 
-  # Custom constraint validation functions
+  # Custom constraint validation — single pass over the schema
 
   defp validate_custom_constraints(params, schema) do
-    with {:ok, params} <- validate_enum_constraints(params, schema),
-         {:ok, params} <- validate_numeric_constraints(params, schema),
-         {:ok, params} <- validate_string_length_constraints(params, schema),
-         {:ok, params} <- validate_custom_validator_constraints(params, schema) do
-      {:ok, params}
-    end
-  end
-
-  defp validate_enum_constraints(params, schema) do
-    Enum.reduce_while(schema, {:ok, params}, fn {param_name, param_opts}, {:ok, acc_params} ->
-      enum_values = Keyword.get(param_opts, :__enum_values__) || Keyword.get(param_opts, :enum)
-
-      case enum_values do
-        nil ->
-          {:cont, {:ok, acc_params}}
-
-        enum_values ->
-          param_value = Map.get(acc_params, param_name)
-
-          if param_value == nil or param_value in enum_values do
-            {:cont, {:ok, acc_params}}
-          else
-            error = %{
-              parameter: to_string(param_name),
-              value: param_value,
-              message: "must be one of #{inspect(enum_values)}"
-            }
-
-            {:halt, {:error, [error]}}
-          end
-      end
-    end)
-  end
-
-  defp validate_numeric_constraints(params, schema) do
     Enum.reduce_while(schema, {:ok, params}, fn {param_name, param_opts}, {:ok, acc_params} ->
       param_value = Map.get(acc_params, param_name)
 
-      # Skip validation if parameter is nil
       if param_value == nil do
         {:cont, {:ok, acc_params}}
       else
-        with {:ok, _} <- validate_min_value(param_name, param_value, param_opts),
-             {:ok, _} <- validate_max_value(param_name, param_value, param_opts) do
+        with :ok <- check_enum(param_name, param_value, param_opts),
+             :ok <- check_min_value(param_name, param_value, param_opts),
+             :ok <- check_max_value(param_name, param_value, param_opts),
+             :ok <- check_min_length(param_name, param_value, param_opts),
+             :ok <- check_max_length(param_name, param_value, param_opts),
+             :ok <- check_custom_validator(param_name, param_value, param_opts) do
           {:cont, {:ok, acc_params}}
         else
           {:error, error} -> {:halt, {:error, [error]}}
@@ -353,15 +315,36 @@ defmodule ConduitMcp.Validation do
     end)
   end
 
-  defp validate_min_value(param_name, value, opts) do
+  defp check_enum(param_name, value, opts) do
+    enum_values = Keyword.get(opts, :__enum_values__) || Keyword.get(opts, :enum)
+
+    case enum_values do
+      nil ->
+        :ok
+
+      enum_values ->
+        if value in enum_values do
+          :ok
+        else
+          {:error,
+           %{
+             parameter: to_string(param_name),
+             value: value,
+             message: "must be one of #{inspect(enum_values)}"
+           }}
+        end
+    end
+  end
+
+  defp check_min_value(param_name, value, opts) do
     min_val = Keyword.get(opts, :__min_value__) || Keyword.get(opts, :min)
 
     case min_val do
       nil ->
-        {:ok, value}
+        :ok
 
       min_val when is_number(value) and value >= min_val ->
-        {:ok, value}
+        :ok
 
       min_val when is_number(value) ->
         {:error,
@@ -371,21 +354,20 @@ defmodule ConduitMcp.Validation do
            message: "must be greater than or equal to #{min_val}"
          }}
 
-      # Not a number, skip min validation
       _ ->
-        {:ok, value}
+        :ok
     end
   end
 
-  defp validate_max_value(param_name, value, opts) do
+  defp check_max_value(param_name, value, opts) do
     max_val = Keyword.get(opts, :__max_value__) || Keyword.get(opts, :max)
 
     case max_val do
       nil ->
-        {:ok, value}
+        :ok
 
       max_val when is_number(value) and value <= max_val ->
-        {:ok, value}
+        :ok
 
       max_val when is_number(value) ->
         {:error,
@@ -395,39 +377,20 @@ defmodule ConduitMcp.Validation do
            message: "must be less than or equal to #{max_val}"
          }}
 
-      # Not a number, skip max validation
       _ ->
-        {:ok, value}
+        :ok
     end
   end
 
-  defp validate_string_length_constraints(params, schema) do
-    Enum.reduce_while(schema, {:ok, params}, fn {param_name, param_opts}, {:ok, acc_params} ->
-      param_value = Map.get(acc_params, param_name)
-
-      # Skip validation if parameter is nil
-      if param_value == nil do
-        {:cont, {:ok, acc_params}}
-      else
-        with {:ok, _} <- validate_min_length(param_name, param_value, param_opts),
-             {:ok, _} <- validate_max_length(param_name, param_value, param_opts) do
-          {:cont, {:ok, acc_params}}
-        else
-          {:error, error} -> {:halt, {:error, [error]}}
-        end
-      end
-    end)
-  end
-
-  defp validate_min_length(param_name, value, opts) do
+  defp check_min_length(param_name, value, opts) do
     min_len = Keyword.get(opts, :__min_length__) || Keyword.get(opts, :min_length)
 
     case min_len do
       nil ->
-        {:ok, value}
+        :ok
 
       min_len when is_binary(value) and byte_size(value) >= min_len ->
-        {:ok, value}
+        :ok
 
       min_len when is_binary(value) ->
         {:error,
@@ -437,21 +400,20 @@ defmodule ConduitMcp.Validation do
            message: "must be at least #{min_len} characters long"
          }}
 
-      # Not a string, skip length validation
       _ ->
-        {:ok, value}
+        :ok
     end
   end
 
-  defp validate_max_length(param_name, value, opts) do
+  defp check_max_length(param_name, value, opts) do
     max_len = Keyword.get(opts, :__max_length__) || Keyword.get(opts, :max_length)
 
     case max_len do
       nil ->
-        {:ok, value}
+        :ok
 
       max_len when is_binary(value) and byte_size(value) <= max_len ->
-        {:ok, value}
+        :ok
 
       max_len when is_binary(value) ->
         {:error,
@@ -461,88 +423,71 @@ defmodule ConduitMcp.Validation do
            message: "must be no more than #{max_len} characters long"
          }}
 
-      # Not a string, skip length validation
       _ ->
-        {:ok, value}
+        :ok
     end
   end
 
-  defp validate_custom_validator_constraints(params, schema) do
-    Enum.reduce_while(schema, {:ok, params}, fn {param_name, param_opts}, {:ok, acc_params} ->
-      param_value = Map.get(acc_params, param_name)
+  defp check_custom_validator(param_name, value, opts) do
+    case Keyword.get(opts, :validator) do
+      nil ->
+        :ok
 
-      case Keyword.get(param_opts, :validator) do
-        nil ->
-          {:cont, {:ok, acc_params}}
-
-        validator when is_function(validator, 1) ->
-          # Skip validation if parameter is nil
-          if param_value == nil do
-            {:cont, {:ok, acc_params}}
+      validator when is_function(validator, 1) ->
+        try do
+          if validator.(value) do
+            :ok
           else
-            try do
-              if validator.(param_value) do
-                {:cont, {:ok, acc_params}}
-              else
-                error = %{
-                  parameter: to_string(param_name),
-                  value: param_value,
-                  message: "failed custom validation"
-                }
-
-                {:halt, {:error, [error]}}
-              end
-            rescue
-              _ ->
-                error = %{
-                  parameter: to_string(param_name),
-                  value: param_value,
-                  message: "validation function error"
-                }
-
-                {:halt, {:error, [error]}}
-            end
+            {:error,
+             %{
+               parameter: to_string(param_name),
+               value: value,
+               message: "failed custom validation"
+             }}
           end
-      end
-    end)
+        rescue
+          _ ->
+            {:error,
+             %{
+               parameter: to_string(param_name),
+               value: value,
+               message: "validation function error"
+             }}
+        end
+    end
   end
 
+  @custom_constraint_markers [
+    :__enum_values__,
+    :__min_value__,
+    :__max_value__,
+    :__min_length__,
+    :__max_length__,
+    :validator,
+    :min,
+    :max,
+    :min_length,
+    :max_length,
+    :enum
+  ]
+
   defp remove_custom_constraint_markers(schema) do
-    custom_markers = [
-      :__enum_values__,
-      :__min_value__,
-      :__max_value__,
-      :__min_length__,
-      :__max_length__,
-      :validator,
-      :min,
-      :max,
-      :min_length,
-      :max_length,
-      :enum
-    ]
-
     Enum.map(schema, fn {param_name, param_opts} ->
-      clean_opts =
-        Enum.reduce(custom_markers, param_opts, fn marker, acc ->
-          Keyword.delete(acc, marker)
-        end)
-
-      {param_name, clean_opts}
+      {param_name, Keyword.drop(param_opts, @custom_constraint_markers)}
     end)
   end
 
   defp apply_type_coercion(params, schema) do
-    Enum.reduce(params, %{}, fn {param_name, value}, acc ->
-      case Enum.find(schema, fn {name, _opts} -> name == param_name end) do
-        {_name, param_opts} ->
-          type = Keyword.get(param_opts, :type)
-          coerced_value = coerce_value(value, type)
-          Map.put(acc, param_name, coerced_value)
+    # Build a map for O(1) lookup instead of O(n) Enum.find per param
+    schema_map = Map.new(schema)
 
+    Map.new(params, fn {param_name, value} ->
+      case Map.get(schema_map, param_name) do
         nil ->
-          # Parameter not in schema, keep as-is
-          Map.put(acc, param_name, value)
+          {param_name, value}
+
+        param_opts ->
+          {param_name, coerce_value(value, Keyword.get(param_opts, :type))}
       end
     end)
   end

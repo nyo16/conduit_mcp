@@ -74,7 +74,7 @@ defmodule ConduitMcp.DSL.Helpers do
   @doc """
   Creates a JSON-encoded text content response.
 
-  The data will be encoded to JSON using Jason.
+  The data will be encoded to JSON using the built-in JSON module.
 
   ## Example
 
@@ -90,7 +90,7 @@ defmodule ConduitMcp.DSL.Helpers do
          "content" => [
            %{
              "type" => "text",
-             "text" => Jason.encode!(unquote(data))
+             "text" => JSON.encode!(unquote(data))
            }
          ]
        }}

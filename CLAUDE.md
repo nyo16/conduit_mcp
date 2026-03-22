@@ -18,6 +18,9 @@ mix format                # Format code
 mix credo                 # Lint
 mix dialyzer              # Static analysis (slow first run)
 mix docs                  # Generate docs
+mix bench                 # Run all benchmarks
+mix bench validation      # Run a specific benchmark
+mix bench --list          # List available benchmarks
 MIX_ENV=test mix coveralls.html  # Coverage report
 ```
 

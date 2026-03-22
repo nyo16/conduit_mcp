@@ -194,7 +194,7 @@ defmodule ConduitMcp.Plugs.OAuthTest do
       assert www_auth =~ "insufficient_scope"
       assert www_auth =~ "scope=\"admin write\""
 
-      body = Jason.decode!(result.resp_body)
+      body = JSON.decode!(result.resp_body)
       assert body["error"] == "Forbidden"
       assert body["message"] =~ "Insufficient scope"
     end

@@ -42,7 +42,7 @@ defmodule ConduitMcp.Component do
           {:ok, %{"contents" => [%{
             "uri" => "user://\#{id}",
             "mimeType" => "application/json",
-            "text" => Jason.encode!(user)
+            "text" => JSON.encode!(user)
           }]}}
         end
       end

@@ -248,7 +248,7 @@ defmodule ConduitMcp.Plugs.Auth do
   defp unauthorized(conn, message) do
     conn
     |> put_resp_content_type("application/json")
-    |> send_resp(401, Jason.encode!(%{"error" => "Unauthorized", "message" => message}))
+    |> send_resp(401, JSON.encode!(%{"error" => "Unauthorized", "message" => message}))
     |> halt()
   end
 end

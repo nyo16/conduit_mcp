@@ -188,7 +188,7 @@ defmodule ConduitMcp.Plugs.MessageRateLimit do
         |> put_resp_header("retry-after", to_string(retry_after))
         |> send_resp(
           429,
-          Jason.encode!(%{
+          JSON.encode!(%{
             "jsonrpc" => "2.0",
             "id" => nil,
             "error" => %{
