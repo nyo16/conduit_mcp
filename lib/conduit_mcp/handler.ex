@@ -224,6 +224,7 @@ defmodule ConduitMcp.Handler do
         fn -> server_module.handle_read_resource(conn, uri) end,
         "handle_read_resource"
       )
+      |> ensure_resource_uri(uri)
 
     duration = System.monotonic_time() - start_time
 
@@ -414,6 +415,21 @@ defmodule ConduitMcp.Handler do
       apply(server_module, callback_name, [conn])
     end
   end
+
+  # Ensures each item in a resource read response includes the "uri" field.
+  # The MCP spec requires "uri" in every content item but resource handlers
+  # often omit it since they don't know the request URI.
+  defp ensure_resource_uri(%{"result" => %{"contents" => contents}} = response, uri)
+       when is_list(contents) do
+    updated =
+      Enum.map(contents, fn item ->
+        Map.put_new(item, "uri", uri)
+      end)
+
+    put_in(response, ["result", "contents"], updated)
+  end
+
+  defp ensure_resource_uri(response, _uri), do: response
 
   defp build_capabilities(server_module) do
     if function_exported?(server_module, :__capabilities__, 0) do
