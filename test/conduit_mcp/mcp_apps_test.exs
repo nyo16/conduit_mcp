@@ -174,7 +174,8 @@ defmodule ConduitMcp.McpAppsTest do
       tool = hd(result["tools"])
 
       assert tool["_meta"] == %{
-               "ui" => %{"resourceUri" => "ui://health/dashboard.html"}
+               "ui" => %{"resourceUri" => "ui://health/dashboard.html"},
+               "ui/resourceUri" => "ui://health/dashboard.html"
              }
     end
 
@@ -277,7 +278,11 @@ defmodule ConduitMcp.McpAppsTest do
   describe "Component ui: option" do
     test "component schema includes _meta" do
       schema = DashboardComponent.__component_schema__()
-      assert schema["_meta"] == %{"ui" => %{"resourceUri" => "ui://dashboard-component/app.html"}}
+
+      assert schema["_meta"] == %{
+               "ui" => %{"resourceUri" => "ui://dashboard-component/app.html"},
+               "ui/resourceUri" => "ui://dashboard-component/app.html"
+             }
     end
 
     test "component without ui: has no _meta" do
@@ -296,7 +301,8 @@ defmodule ConduitMcp.McpAppsTest do
       dashboard = Enum.find(tools, &(&1["name"] == "dashboard_component"))
 
       assert dashboard["_meta"] == %{
-               "ui" => %{"resourceUri" => "ui://dashboard-component/app.html"}
+               "ui" => %{"resourceUri" => "ui://dashboard-component/app.html"},
+               "ui/resourceUri" => "ui://dashboard-component/app.html"
              }
     end
 

@@ -262,7 +262,7 @@ defmodule ConduitMcp.Component do
   defp build_meta(nil), do: nil
 
   defp build_meta(resource_uri) when is_binary(resource_uri),
-    do: %{ui: %{resourceUri: resource_uri}}
+    do: %{ui: %{resourceUri: resource_uri}, "ui/resourceUri": resource_uri}
 
   defp build_validation_schema(fields) do
     ConduitMcp.Validation.SchemaConverter.dsl_params_to_nimble_options(fields)

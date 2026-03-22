@@ -260,7 +260,10 @@ defmodule ConduitMcp.DSL do
   """
   defmacro ui(resource_uri) do
     quote do
-      @mcp_current_tool_meta %{ui: %{resourceUri: unquote(resource_uri)}}
+      @mcp_current_tool_meta %{
+        ui: %{resourceUri: unquote(resource_uri)},
+        "ui/resourceUri": unquote(resource_uri)
+      }
     end
   end
 
@@ -810,8 +813,11 @@ defmodule ConduitMcp.DSL do
       app_filename = Path.basename(app_view_path)
       app_resource_uri = "ui://#{unquote(name)}/#{app_filename}"
 
-      # Store the tool with _meta.ui
-      @mcp_current_tool_meta %{ui: %{resourceUri: app_resource_uri}}
+      # Store the tool with _meta.ui (both nested and flat key for compatibility)
+      @mcp_current_tool_meta %{
+        ui: %{resourceUri: app_resource_uri},
+        "ui/resourceUri": app_resource_uri
+      }
 
       @mcp_tools %{
         name: @mcp_current_tool_name,
