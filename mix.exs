@@ -1,7 +1,7 @@
 defmodule ConduitMcp.MixProject do
   use Mix.Project
 
-  @version "0.6.5"
+  @version "0.8.0"
   @source_url "https://github.com/nyo16/conduit_mcp"
 
   def project do

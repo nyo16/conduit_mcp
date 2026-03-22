@@ -5,7 +5,7 @@
 An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) specification (2025-11-25). Build MCP servers to expose tools, resources, and prompts to LLM applications like Claude Desktop, VS Code, and Cursor.
 
 [![Tests](https://img.shields.io/badge/tests-503%20passing-brightgreen)]()
-[![Version](https://img.shields.io/badge/version-0.7.0-blue)]()
+[![Version](https://img.shields.io/badge/version-0.8.0-blue)]()
 [![MCP Spec](https://img.shields.io/badge/MCP-2025--11--25-purple)]()
 
 ## Features
@@ -26,7 +26,7 @@ An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcont
 ```elixir
 def deps do
   [
-    {:conduit_mcp, "~> 0.7.0"}
+    {:conduit_mcp, "~> 0.8.0"}
   ]
 end
 ```

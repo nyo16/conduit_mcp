@@ -7,64 +7,68 @@ defmodule ConduitMcp do
   specification version 2025-11-25 with support for both modern Streamable HTTP
   and legacy SSE transports.
 
-  ## Quick Example
+  ## Three Ways to Build
+
+  **DSL Mode** — declarative macros, everything in one module:
 
       defmodule MyApp.MCPServer do
         use ConduitMcp.Server
 
         tool "greet", "Greet someone" do
-          param :name, :string, "Name to greet", required: true
+          param :name, :string, "Name", required: true
+          handle fn _conn, %{"name" => name} -> text("Hello, \#{name}!") end
+        end
+      end
 
-          handle fn _conn, %{"name" => name} ->
-            text("Hello, \#{name}!")
-          end
+  **Manual Mode** — raw callbacks with full control:
+
+      defmodule MyApp.MCPServer do
+        use ConduitMcp.Server, dsl: false
+
+        @impl true
+        def handle_list_tools(_conn), do: {:ok, %{"tools" => [...]}}
+
+        @impl true
+        def handle_call_tool(_conn, "greet", %{"name" => name}), do: ...
+      end
+
+  **Endpoint + Component Mode** — each tool as its own module:
+
+      defmodule MyApp.Greet do
+        use ConduitMcp.Component, type: :tool, description: "Greet someone"
+
+        schema do
+          field :name, :string, "Name", required: true
         end
 
-        tool "calculate", "Math operations" do
-          param :op, :string, "Operation", enum: ~w(add sub mul div), required: true
-          param :a, :number, "First number", required: true
-          param :b, :number, "Second number", required: true
+        @impl true
+        def execute(%{name: name}, _conn), do: text("Hello, \#{name}!")
+      end
 
-          handle MyMath, :calculate
-        end
+      defmodule MyApp.MCPServer do
+        use ConduitMcp.Endpoint, name: "My App", version: "1.0.0"
+        component MyApp.Greet
       end
 
   ## Core Modules
 
+  - `ConduitMcp.Server` - Behaviour for DSL and manual mode servers
+  - `ConduitMcp.Endpoint` - Aggregates component modules into a server
+  - `ConduitMcp.Component` - Behaviour for individual tool/resource/prompt modules
   - `ConduitMcp.Protocol` - JSON-RPC 2.0 and MCP message types
-  - `ConduitMcp.Server` - Behaviour for implementing MCP servers
   - `ConduitMcp.Handler` - Request routing and method dispatch
-  - `ConduitMcp.Transport.StreamableHTTP` - Modern HTTP transport
-  - `ConduitMcp.Transport.SSE` - Server-Sent Events transport
+  - `ConduitMcp.Errors` - Standard JSON-RPC and MCP error codes
+  - `ConduitMcp.Transport.StreamableHTTP` - Modern HTTP transport (recommended)
+  - `ConduitMcp.Transport.SSE` - Server-Sent Events transport (legacy)
 
-  ## Transport Options
-
-  ### Streamable HTTP (Recommended)
+  ## Running a Server
 
       children = [
-        # No need to start the server module - it's just functions!
         {Bandit,
          plug: {ConduitMcp.Transport.StreamableHTTP,
                 server_module: MyApp.MCPServer},
          port: 4000}
       ]
-
-  ### SSE (Legacy)
-
-      children = [
-        # No need to start the server module - it's just functions!
-        {Bandit,
-         plug: {ConduitMcp.Transport.SSE,
-                server_module: MyApp.MCPServer},
-         port: 4000}
-      ]
-
-  ## Examples
-
-  See the `examples/` directory for complete working examples:
-
-  - `examples/simple_tools_server/` - Standalone MCP server
-  - `examples/phoenix_mcp/` - Phoenix integration
 
   ## Resources
 
