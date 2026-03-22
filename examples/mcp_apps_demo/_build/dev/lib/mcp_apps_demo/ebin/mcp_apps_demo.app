@@ -1,1 +1,0 @@
-{application,mcp_apps_demo,[{modules,['Elixir.McpAppsDemo.Application','Elixir.McpAppsDemo.Server']},{optional_applications,[]},{applications,[kernel,stdlib,elixir,logger,conduit_mcp]},{description,"mcp_apps_demo"},{registered,[]},{vsn,"0.1.0"},{mod,{'Elixir.McpAppsDemo.Application',[]}}]}.
