@@ -6,20 +6,20 @@
   <title>Server Health Dashboard</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #e2e8f0; padding: 20px; }
-    h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 16px; color: #94a3b8; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #ffffff; color: #1e293b; padding: 20px; }
+    h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 16px; color: #475569; }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
-    .card { background: #1e293b; border-radius: 12px; padding: 16px; border: 1px solid #334155; }
-    .card .label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin-bottom: 4px; }
+    .card { background: #f8fafc; border-radius: 12px; padding: 16px; border: 1px solid #e2e8f0; }
+    .card .label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-bottom: 4px; }
     .card .value { font-size: 1.75rem; font-weight: 700; }
-    .card.memory .value { color: #34d399; }
-    .card.processes .value { color: #60a5fa; }
-    .card.uptime .value { color: #fbbf24; }
-    .card.updated .value { color: #a78bfa; font-size: 0.875rem; }
+    .card.memory .value { color: #059669; }
+    .card.processes .value { color: #2563eb; }
+    .card.uptime .value { color: #d97706; }
+    .card.updated .value { color: #7c3aed; font-size: 0.875rem; }
     button { background: #3b82f6; color: white; border: none; border-radius: 8px; padding: 10px 20px; font-size: 0.875rem; cursor: pointer; width: 100%; }
     button:hover { background: #2563eb; }
     button:active { background: #1d4ed8; }
-    .status { text-align: center; margin-top: 8px; font-size: 0.75rem; color: #64748b; }
+    .status { text-align: center; margin-top: 8px; font-size: 0.75rem; color: #94a3b8; }
   </style>
 </head>
 <body>
@@ -43,16 +43,18 @@
     </div>
   </div>
   <button id="refresh">Refresh Metrics</button>
-  <div class="status" id="status">Waiting for data...</div>
+  <div class="status" id="status">Connecting...</div>
 
   <script type="module">
+    import { App } from "https://esm.sh/@anthropic-ai/mcp-app-sdk@0.1.0";
+
     function renderMetrics(data) {
       document.getElementById("memory").textContent = data.memory_mb + " MB";
       document.getElementById("processes").textContent = data.processes;
       document.getElementById("uptime").textContent = formatUptime(data.uptime_sec);
       document.getElementById("timestamp").textContent = data.timestamp
         ? new Date(data.timestamp).toLocaleTimeString()
-        : "now";
+        : new Date().toLocaleTimeString();
       document.getElementById("status").textContent = "Connected";
     }
 
@@ -66,25 +68,45 @@
       return s + "s";
     }
 
-    // MCP Apps SDK integration
-    // The host renders this HTML in a sandboxed iframe and communicates
-    // via postMessage JSON-RPC. In production, use the full SDK:
-    //
-    //   import { App } from "@modelcontextprotocol/ext-apps";
-    //   const app = new App({ name: "Server Health", version: "1.0.0" });
-    //   app.ontoolresult = (result) => { renderMetrics(JSON.parse(result.content[0].text)); };
-    //   document.getElementById("refresh").addEventListener("click", async () => {
-    //     const result = await app.callServerTool({ name: "get_live_metrics", arguments: {} });
-    //     renderMetrics(JSON.parse(result.content[0].text));
-    //   });
-    //   app.connect();
+    try {
+      const app = new App({ name: "Server Health", version: "1.0.0" });
 
-    document.getElementById("refresh").addEventListener("click", () => {
-      document.getElementById("status").textContent = "Refreshing...";
-    });
+      app.ontoolresult = (result) => {
+        const textItem = result.content?.find(c => c.type === "text");
+        if (textItem?.text) {
+          try {
+            renderMetrics(JSON.parse(textItem.text));
+          } catch (e) {
+            document.getElementById("status").textContent = "Parse error";
+          }
+        }
+      };
 
-    // Show placeholder data on load
-    renderMetrics({ memory_mb: 128, processes: 342, uptime_sec: 3661, timestamp: new Date().toISOString() });
+      document.getElementById("refresh").addEventListener("click", async () => {
+        document.getElementById("status").textContent = "Refreshing...";
+        try {
+          const result = await app.callServerTool({
+            name: "get_live_metrics",
+            arguments: {}
+          });
+          const textItem = result.content?.find(c => c.type === "text");
+          if (textItem?.text) {
+            renderMetrics(JSON.parse(textItem.text));
+          }
+          await app.updateModelContext({
+            content: [{ type: "text", text: "User refreshed server health metrics" }]
+          });
+        } catch (e) {
+          document.getElementById("status").textContent = "Refresh failed: " + e.message;
+        }
+      });
+
+      await app.connect();
+      document.getElementById("status").textContent = "Connected — waiting for tool result...";
+    } catch (e) {
+      document.getElementById("status").textContent = "SDK not available — showing static data";
+      renderMetrics({ memory_mb: 50, processes: 441, uptime_sec: 28, timestamp: new Date().toISOString() });
+    }
   </script>
 </body>
 </html>
