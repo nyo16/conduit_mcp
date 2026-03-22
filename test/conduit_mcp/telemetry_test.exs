@@ -220,7 +220,17 @@ defmodule ConduitMcp.TelemetryTest do
 
       Auth.call(conn, opts)
 
+      # Drain any stale telemetry events from concurrent tests, then match ours
       assert_receive {[:conduit_mcp, :auth, :verify], ^ref, _measurements, metadata}
+
+      metadata =
+        if metadata.strategy != :function do
+          assert_receive {[:conduit_mcp, :auth, :verify], ^ref, _measurements, m}
+          m
+        else
+          metadata
+        end
+
       assert metadata.strategy == :function
       assert metadata.status == :ok
     end
