@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-03-22
+
+### Added
+
+- **MCP Apps support** — first-class support for the [MCP Apps extension](https://modelcontextprotocol.io/docs/extensions/apps), enabling tools to return interactive UI components rendered as sandboxed iframes in host clients
+  - `meta/1` macro — attach arbitrary `_meta` metadata to tool definitions (generic, future-proof)
+  - `ui/1` macro — shortcut for declaring `_meta.ui.resourceUri` on a tool
+  - `app/2` macro — convenience that registers both a tool (with `_meta.ui`) and its `ui://` HTML resource in one declaration
+  - `raw_resource/2` helper — return raw content with a MIME type from resource handlers
+  - Component mode `ui:` option — `use ConduitMcp.Component, type: :tool, ui: "ui://..."`
+- **MCP Apps guide** — new HexDocs guide covering DSL, Component, and app macro usage with client-side build workflow
+- **MCP Apps example** — `examples/mcp_apps_demo/` with a server health dashboard demonstrating the full tool → UI resource → iframe pattern
+
 ## [0.8.5] - 2026-03-22
 
 ### Changed

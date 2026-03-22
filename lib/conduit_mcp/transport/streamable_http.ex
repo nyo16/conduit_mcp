@@ -121,7 +121,10 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
         strategy = Keyword.get(auth_opts, :strategy)
 
         if strategy == :oauth and Code.ensure_loaded?(ConduitMcp.Plugs.OAuth) do
-          ConduitMcp.Plugs.OAuth.call(conn, ConduitMcp.Plugs.OAuth.init(auth_opts))
+          apply(ConduitMcp.Plugs.OAuth, :call, [
+            conn,
+            apply(ConduitMcp.Plugs.OAuth, :init, [auth_opts])
+          ])
         else
           ConduitMcp.Plugs.Auth.call(conn, ConduitMcp.Plugs.Auth.init(auth_opts))
         end

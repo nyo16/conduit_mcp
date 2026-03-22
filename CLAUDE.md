@@ -11,7 +11,7 @@ ConduitMCP is an Elixir library implementing the [Model Context Protocol (MCP)](
 ```bash
 mix deps.get              # Install dependencies
 mix compile               # Compile
-mix test                  # Run all tests (~503 tests)
+mix test                  # Run all tests (~526 tests)
 mix test test/conduit_mcp/dsl_test.exs           # Run a single test file
 mix test test/conduit_mcp/dsl_test.exs:42        # Run a specific test line
 mix format                # Format code
@@ -42,13 +42,13 @@ HTTP Request → Transport (StreamableHTTP/SSE) → Auth Plug → Rate Limit Plu
 
 - **`ConduitMcp.Endpoint`** — Third mode: aggregates `ConduitMcp.Component` modules into a server. Uses `@before_compile` to generate all `ConduitMcp.Server` callbacks by dispatching to registered components. Carries declarative rate_limit/message_rate_limit/auth config via `__endpoint_config__/0`, auto-extracted by transports.
 
-- **`ConduitMcp.Component`** — Behaviour for individual tool/resource/prompt modules. Each component has `execute/2` callback receiving atom-keyed params and `Plug.Conn`. Uses `ConduitMcp.Component.Schema` for field definitions. `@before_compile` generates introspection functions (`__component_type__/0`, `__component_name__/0`, `__component_schema__/0`, `__validation_schema__/0`).
+- **`ConduitMcp.Component`** — Behaviour for individual tool/resource/prompt modules. Each component has `execute/2` callback receiving atom-keyed params and `Plug.Conn`. Uses `ConduitMcp.Component.Schema` for field definitions. `@before_compile` generates introspection functions (`__component_type__/0`, `__component_name__/0`, `__component_schema__/0`, `__validation_schema__/0`). Tool components support `ui:` option for MCP Apps.
 
-- **`ConduitMcp.DSL`** — Compile-time macro system. Accumulates `@mcp_tools`, `@mcp_prompts`, `@mcp_resources` module attributes via `tool`, `prompt`, `resource` macros. The `@before_compile` hook generates all callback implementations and validation schemas.
+- **`ConduitMcp.DSL`** — Compile-time macro system. Accumulates `@mcp_tools`, `@mcp_prompts`, `@mcp_resources` module attributes via `tool`, `prompt`, `resource`, `app` macros. The `@before_compile` hook generates all callback implementations and validation schemas. Tools support `meta/1` (arbitrary `_meta` metadata), `ui/1` (shortcut for `_meta.ui.resourceUri`), and `app/2` (registers both a tool with UI and its `ui://` resource).
 
 - **`ConduitMcp.DSL.SchemaBuilder`** — Dual schema generation: JSON Schema (for MCP client introspection) and NimbleOptions schema (for server-side runtime validation). Both are generated from the same DSL param definitions at compile time. Reused by `ConduitMcp.Component` for schema generation.
 
-- **`ConduitMcp.DSL.Helpers`** — Response helper macros (`text/1`, `json/1`, `raw/1`, `error/1`, `image/1`, `audio/2`, `system/1`, `user/1`, `assistant/1`). These are macros, not functions — they expand to `{:ok, %{...}}` or `{:error, %{...}}` tuples. Imported automatically in DSL and Component modes.
+- **`ConduitMcp.DSL.Helpers`** — Response helper macros (`text/1`, `json/1`, `raw/1`, `error/1`, `image/1`, `audio/2`, `raw_resource/2`, `system/1`, `user/1`, `assistant/1`). These are macros, not functions — they expand to `{:ok, %{...}}` or `{:error, %{...}}` tuples. Imported automatically in DSL and Component modes. `raw_resource/2` returns resource content with a specified MIME type.
 
 - **`ConduitMcp.Errors`** — Centralized JSON-RPC 2.0 and MCP error code constants. Used across all modules instead of hardcoded integers. `ConduitMcp.Protocol` delegates to this module.
 
@@ -77,7 +77,9 @@ The DSL uses module attribute accumulation during compilation:
 2. `@before_compile` in `ConduitMcp.DSL` triggers `SchemaBuilder` to generate JSON schemas and NimbleOptions schemas
 3. Generated code includes: `handle_list_*` callbacks returning schema lists, `handle_call_tool`/`handle_get_prompt`/`handle_read_resource` with pattern-matched clauses per tool/prompt/resource, catch-all clauses for unknown names, and `__validation_schema_for_tool__/1` / `__validation_schema_for_prompt__/1` lookup functions
 
-Handler types: `{:fn_ast, ast}` for anonymous functions/captures, `{:mfa, {module, function}}` for module function references.
+Handler types: `{:fn_ast, ast}` for anonymous functions/captures, `{:mfa, {module, function}}` for module function references, `{:app_view, path}` for MCP App view file handlers.
+
+Tools can carry `_meta` metadata via the `meta/1` macro (generic map) or `ui/1` shortcut (sets `_meta.ui.resourceUri`). The `_meta` field is included in `build_tool_schema/1` output when present, with atom keys deep-converted to strings via `stringify_keys/1`.
 
 ### Test Infrastructure
 
@@ -91,4 +93,5 @@ Handler types: `{:fn_ast, ast}` for anonymous functions/captures, `{:mfa, {modul
 - Callbacks return `{:ok, map()}` or `{:error, map()}` tuples
 - Tool params arrive as string-keyed maps; validation converts to atom keys internally then back to string keys
 - Resource URI templates use `{param}` syntax (e.g., `"user://{id}"`) — `ConduitMcp.DSL.extract_uri_params/2` handles matching
+- `ui://` scheme resources serve self-contained HTML for MCP Apps (e.g., `"ui://dashboard/app.html"`)
 - NimbleOptions version is pinned to exactly `1.1.1`

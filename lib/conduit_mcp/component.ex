@@ -216,12 +216,14 @@ defmodule ConduitMcp.Component do
 
   defp build_json_schema(:tool, name, description, fields, opts) do
     annotations = build_annotations(Keyword.get(opts, :annotations))
+    meta = build_meta(Keyword.get(opts, :ui))
 
     tool_def = %{
       name: name,
       description: description,
       params: fields,
-      annotations: annotations
+      annotations: annotations,
+      meta: meta
     }
 
     ConduitMcp.DSL.SchemaBuilder.build_tool_schema(tool_def)
@@ -256,6 +258,11 @@ defmodule ConduitMcp.Component do
   defp build_annotations(annotations) when is_list(annotations) do
     Map.new(annotations, fn {k, v} -> {Atom.to_string(k), v} end)
   end
+
+  defp build_meta(nil), do: nil
+
+  defp build_meta(resource_uri) when is_binary(resource_uri),
+    do: %{ui: %{resourceUri: resource_uri}, "ui/resourceUri": resource_uri}
 
   defp build_validation_schema(fields) do
     ConduitMcp.Validation.SchemaConverter.dsl_params_to_nimble_options(fields)

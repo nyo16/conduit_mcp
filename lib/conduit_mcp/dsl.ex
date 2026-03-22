@@ -109,6 +109,7 @@ defmodule ConduitMcp.DSL do
       @mcp_current_tool_handler nil
       @mcp_current_tool_annotations nil
       @mcp_current_tool_scope nil
+      @mcp_current_tool_meta nil
 
       unquote(block)
 
@@ -119,7 +120,8 @@ defmodule ConduitMcp.DSL do
         params: Enum.reverse(@mcp_current_tool_params),
         handler: @mcp_current_tool_handler,
         annotations: @mcp_current_tool_annotations,
-        scope: @mcp_current_tool_scope
+        scope: @mcp_current_tool_scope,
+        meta: @mcp_current_tool_meta
       }
 
       # Clean up
@@ -129,6 +131,7 @@ defmodule ConduitMcp.DSL do
       Module.delete_attribute(__MODULE__, :mcp_current_tool_handler)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_annotations)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_scope)
+      Module.delete_attribute(__MODULE__, :mcp_current_tool_meta)
     end
   end
 
@@ -209,6 +212,58 @@ defmodule ConduitMcp.DSL do
   defmacro scope(scope_string) do
     quote do
       @mcp_current_tool_scope unquote(scope_string)
+    end
+  end
+
+  @doc """
+  Attaches arbitrary `_meta` metadata to a tool definition.
+
+  The `_meta` field is an open extension point in the MCP spec. Any map
+  can be passed — atom keys are automatically converted to string keys
+  in the JSON output.
+
+  ## Example
+
+      tool "dashboard", "Health dashboard" do
+        meta %{ui: %{resourceUri: "ui://dashboard/app.html"}}
+        handle fn _conn, _params -> json(%{ok: true}) end
+      end
+
+  The tool's `tools/list` entry will include:
+
+      %{
+        "name" => "dashboard",
+        "_meta" => %{"ui" => %{"resourceUri" => "ui://dashboard/app.html"}}
+      }
+  """
+  defmacro meta(meta_map) do
+    quote do
+      @mcp_current_tool_meta unquote(meta_map)
+    end
+  end
+
+  @doc """
+  Shortcut for declaring a UI resource URI on a tool (MCP Apps).
+
+  This is sugar for `meta %{ui: %{resourceUri: uri}}`. It links the tool
+  to an interactive HTML resource that MCP Apps-compatible hosts will
+  render as a sandboxed iframe.
+
+  ## Example
+
+      tool "dashboard", "Health dashboard" do
+        ui "ui://dashboard/app.html"
+        handle fn _conn, _params -> json(%{ok: true}) end
+      end
+
+  See the [MCP Apps guide](guides/mcp_apps.md) for full details.
+  """
+  defmacro ui(resource_uri) do
+    quote do
+      @mcp_current_tool_meta %{
+        ui: %{resourceUri: unquote(resource_uri)},
+        "ui/resourceUri": unquote(resource_uri)
+      }
     end
   end
 
@@ -689,6 +744,132 @@ defmodule ConduitMcp.DSL do
     end
   end
 
+  # ============ MCP APPS ============
+
+  @doc """
+  Defines an MCP App — a tool with a linked UI resource.
+
+  The `app` macro is a convenience that registers both:
+  1. A **tool** with `_meta.ui.resourceUri` pointing to a `ui://` resource
+  2. A **resource** that serves the HTML file at that URI
+
+  Use `view/1` inside the block to specify the HTML file path.
+  The `ui://` URI is derived automatically from the tool name and filename.
+
+  ## Example
+
+      app "dashboard", "Health dashboard" do
+        param :format, :string, "Output format", default: "json"
+        view "priv/mcp_apps/dashboard.html"
+
+        handle fn _conn, params ->
+          json(%{cpu: 42, memory: 128})
+        end
+      end
+
+  This is equivalent to:
+
+      tool "dashboard", "Health dashboard" do
+        ui "ui://dashboard/dashboard.html"
+        param :format, :string, "Output format", default: "json"
+        handle fn _conn, params -> json(%{cpu: 42, memory: 128}) end
+      end
+
+      resource "ui://dashboard/dashboard.html" do
+        description "UI for dashboard"
+        mime_type "text/html;profile=mcp-app"
+        read fn _conn, _params, _opts ->
+          app_html(File.read!("priv/mcp_apps/dashboard.html"))
+        end
+      end
+
+  > **Note:** The `view` path is read with `File.read!/1` at runtime. For OTP
+  > releases where the working directory differs, use a manual `tool` + `resource`
+  > pair with `Application.app_dir/2` instead.
+  """
+  defmacro app(name, description, do: block) do
+    quote do
+      # Initialize tool attributes
+      @mcp_current_tool_name unquote(name)
+      @mcp_current_tool_description unquote(description)
+      @mcp_current_tool_params []
+      @mcp_current_tool_handler nil
+      @mcp_current_tool_annotations nil
+      @mcp_current_tool_scope nil
+      @mcp_current_tool_meta nil
+      @mcp_current_app_view nil
+
+      unquote(block)
+
+      # Derive the UI resource URI from tool name and view filename
+      app_view_path = @mcp_current_app_view
+
+      if is_nil(app_view_path) do
+        raise CompileError,
+          description:
+            "App '#{unquote(name)}' has no view defined. Use 'view \"priv/mcp_apps/file.html\"'"
+      end
+
+      app_filename = Path.basename(app_view_path)
+      app_resource_uri = "ui://#{unquote(name)}/#{app_filename}"
+
+      # Store the tool with _meta.ui (both nested and flat key for compatibility)
+      @mcp_current_tool_meta %{
+        ui: %{resourceUri: app_resource_uri},
+        "ui/resourceUri": app_resource_uri
+      }
+
+      @mcp_tools %{
+        name: @mcp_current_tool_name,
+        description: @mcp_current_tool_description,
+        params: Enum.reverse(@mcp_current_tool_params),
+        handler: @mcp_current_tool_handler,
+        annotations: @mcp_current_tool_annotations,
+        scope: @mcp_current_tool_scope,
+        meta: @mcp_current_tool_meta
+      }
+
+      # Store the resource for the UI HTML — use :app_view handler type
+      # which generate_resource_clauses will expand into File.read! at compile time
+      @mcp_resources %{
+        uri: app_resource_uri,
+        description: "UI for #{unquote(name)}",
+        mime_type: "text/html;profile=mcp-app",
+        handler: {:app_view, app_view_path},
+        completions: []
+      }
+
+      # Clean up
+      Module.delete_attribute(__MODULE__, :mcp_current_tool_name)
+      Module.delete_attribute(__MODULE__, :mcp_current_tool_description)
+      Module.delete_attribute(__MODULE__, :mcp_current_tool_params)
+      Module.delete_attribute(__MODULE__, :mcp_current_tool_handler)
+      Module.delete_attribute(__MODULE__, :mcp_current_tool_annotations)
+      Module.delete_attribute(__MODULE__, :mcp_current_tool_scope)
+      Module.delete_attribute(__MODULE__, :mcp_current_tool_meta)
+      Module.delete_attribute(__MODULE__, :mcp_current_app_view)
+    end
+  end
+
+  @doc """
+  Specifies the HTML file path for an MCP App.
+
+  Used inside an `app` block to set the HTML file that will be served
+  as the `ui://` resource.
+
+  ## Example
+
+      app "dashboard", "Health dashboard" do
+        view "priv/mcp_apps/dashboard.html"
+        handle fn _conn, _params -> json(%{ok: true}) end
+      end
+  """
+  defmacro view(path) do
+    quote do
+      @mcp_current_app_view unquote(path)
+    end
+  end
+
   # ============ CODE GENERATION (@before_compile) ============
 
   @doc false
@@ -915,6 +1096,29 @@ defmodule ConduitMcp.DSL do
                      ) do
                   {:ok, params} ->
                     apply(unquote(mod), unquote(fun), [conn, params, %{}])
+
+                  :no_match ->
+                    nil
+                end
+              end
+
+            {:app_view, view_path} ->
+              quote do
+                case ConduitMcp.DSL.extract_uri_params_compiled(
+                       uri,
+                       unquote(param_names),
+                       unquote(Macro.escape(regex))
+                     ) do
+                  {:ok, _params} ->
+                    {:ok,
+                     %{
+                       "contents" => [
+                         %{
+                           "mimeType" => "text/html;profile=mcp-app",
+                           "text" => File.read!(unquote(view_path))
+                         }
+                       ]
+                     }}
 
                   :no_match ->
                     nil
