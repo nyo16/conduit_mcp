@@ -264,16 +264,17 @@ defmodule ConduitMcp.DSL.Helpers do
   Creates a resource content response with a specified MIME type.
 
   Useful for returning raw HTML, XML, or other content types from
-  resource `read` handlers — especially for MCP Apps `ui://` resources.
+  resource `read` handlers. For MCP Apps `ui://` resources, prefer
+  `app_html/1` which uses the correct MIME type automatically.
 
   ## Example
 
-      resource "ui://dashboard/app.html" do
-        mime_type "text/html"
+      resource "config://settings.xml" do
+        mime_type "application/xml"
 
         read fn _conn, _params, _opts ->
-          html = File.read!("priv/mcp_apps/dashboard.html")
-          raw_resource(html, "text/html")
+          xml = File.read!("priv/settings.xml")
+          raw_resource(xml, "application/xml")
         end
       end
   """
@@ -284,6 +285,38 @@ defmodule ConduitMcp.DSL.Helpers do
          "contents" => [
            %{
              "mimeType" => unquote(mime_type),
+             "text" => unquote(content)
+           }
+         ]
+       }}
+    end
+  end
+
+  @doc """
+  Creates a resource content response for MCP Apps UI.
+
+  Shortcut for `raw_resource(content, "text/html;profile=mcp-app")`.
+  The `text/html;profile=mcp-app` MIME type is required by MCP Apps hosts
+  to render the HTML as a sandboxed iframe.
+
+  ## Example
+
+      resource "ui://dashboard/app.html" do
+        mime_type "text/html;profile=mcp-app"
+
+        read fn _conn, _params, _opts ->
+          html = File.read!("priv/mcp_apps/dashboard.html")
+          app_html(html)
+        end
+      end
+  """
+  defmacro app_html(content) do
+    quote do
+      {:ok,
+       %{
+         "contents" => [
+           %{
+             "mimeType" => "text/html;profile=mcp-app",
              "text" => unquote(content)
            }
          ]

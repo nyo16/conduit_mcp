@@ -774,9 +774,9 @@ defmodule ConduitMcp.DSL do
 
       resource "ui://dashboard/dashboard.html" do
         description "UI for dashboard"
-        mime_type "text/html"
+        mime_type "text/html;profile=mcp-app"
         read fn _conn, _params, _opts ->
-          raw_resource(File.read!("priv/mcp_apps/dashboard.html"), "text/html")
+          app_html(File.read!("priv/mcp_apps/dashboard.html"))
         end
       end
 
@@ -828,7 +828,7 @@ defmodule ConduitMcp.DSL do
       @mcp_resources %{
         uri: app_resource_uri,
         description: "UI for #{unquote(name)}",
-        mime_type: "text/html",
+        mime_type: "text/html;profile=mcp-app",
         handler: {:app_view, app_view_path},
         completions: []
       }
@@ -1108,7 +1108,7 @@ defmodule ConduitMcp.DSL do
                      %{
                        "contents" => [
                          %{
-                           "mimeType" => "text/html",
+                           "mimeType" => "text/html;profile=mcp-app",
                            "text" => File.read!(unquote(view_path))
                          }
                        ]

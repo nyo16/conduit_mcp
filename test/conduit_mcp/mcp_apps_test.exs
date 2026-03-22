@@ -49,10 +49,10 @@ defmodule ConduitMcp.McpAppsTest do
 
     resource "ui://viewer/app.html" do
       description("Data viewer UI")
-      mime_type("text/html")
+      mime_type("text/html;profile=mcp-app")
 
       read(fn _conn, _params, _opts ->
-        raw_resource("<html><body>Viewer</body></html>", "text/html")
+        app_html("<html><body>Viewer</body></html>")
       end)
     end
   end
@@ -199,7 +199,7 @@ defmodule ConduitMcp.McpAppsTest do
         )
 
       assert [content] = result["contents"]
-      assert content["mimeType"] == "text/html"
+      assert content["mimeType"] == "text/html;profile=mcp-app"
       assert content["text"] == "<html><body>Viewer</body></html>"
     end
   end
@@ -212,7 +212,7 @@ defmodule ConduitMcp.McpAppsTest do
       resource = Enum.find(result["resources"], &(&1["uri"] == "ui://viewer/app.html"))
 
       assert resource["description"] == "Data viewer UI"
-      assert resource["mimeType"] == "text/html"
+      assert resource["mimeType"] == "text/html;profile=mcp-app"
     end
 
     test "tool and resource coexist" do
@@ -243,7 +243,7 @@ defmodule ConduitMcp.McpAppsTest do
       {:ok, result} = AppMacroServer.handle_list_resources(%Plug.Conn{})
       resource = Enum.find(result["resources"], &(&1["uri"] == "ui://metrics/test_app.html"))
 
-      assert resource["mimeType"] == "text/html"
+      assert resource["mimeType"] == "text/html;profile=mcp-app"
       assert resource["description"] == "UI for metrics"
     end
 
@@ -255,7 +255,7 @@ defmodule ConduitMcp.McpAppsTest do
         )
 
       assert [content] = result["contents"]
-      assert content["mimeType"] == "text/html"
+      assert content["mimeType"] == "text/html;profile=mcp-app"
       assert content["text"] == "<html><body>Test App</body></html>"
     end
 
@@ -350,7 +350,7 @@ defmodule ConduitMcp.McpAppsTest do
       response = ConduitMcp.Handler.handle_request(request, UiResourceServer, %Plug.Conn{})
       contents = response["result"]["contents"]
 
-      assert [%{"mimeType" => "text/html", "text" => html}] = contents
+      assert [%{"mimeType" => "text/html;profile=mcp-app", "text" => html}] = contents
       assert html =~ "<body>Viewer</body>"
     end
   end

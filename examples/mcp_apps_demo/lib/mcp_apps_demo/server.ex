@@ -20,11 +20,11 @@ defmodule McpAppsDemo.Server do
   # The matching ui:// resource serves the bundled HTML file
   resource "ui://server-health/dashboard.html" do
     description("Server health dashboard UI")
-    mime_type("text/html")
+    mime_type("text/html;profile=mcp-app")
 
     read(fn _conn, _params, _opts ->
       html = File.read!(Application.app_dir(:mcp_apps_demo, "priv/mcp_apps/dashboard.html"))
-      raw_resource(html, "text/html")
+      app_html(html)
     end)
   end
 

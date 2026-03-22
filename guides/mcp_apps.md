@@ -33,11 +33,11 @@ defmodule MyApp.MCPServer do
   # Resource serving the HTML
   resource "ui://dashboard/app.html" do
     description "Dashboard UI"
-    mime_type "text/html"
+    mime_type "text/html;profile=mcp-app"
 
     read fn _conn, _params, _opts ->
       html = File.read!(Application.app_dir(:my_app, "priv/mcp_apps/dashboard.html"))
-      raw_resource(html, "text/html")
+      app_html(html)
     end
   end
 
@@ -82,13 +82,19 @@ end
 
 Atom keys are automatically converted to string keys in the JSON output.
 
-### Resource Helper — `raw_resource/2`
+### Resource Helpers
 
-The `raw_resource/2` helper makes it easy to return content with a MIME type from resource handlers:
+`app_html/1` returns HTML content with the MCP Apps MIME type (`text/html;profile=mcp-app`):
 
 ```elixir
-raw_resource(html_content, "text/html")
-# => {:ok, %{"contents" => [%{"mimeType" => "text/html", "text" => html_content}]}}
+app_html(html_content)
+# => {:ok, %{"contents" => [%{"mimeType" => "text/html;profile=mcp-app", "text" => html_content}]}}
+```
+
+For non-HTML resources, `raw_resource/2` accepts any MIME type:
+
+```elixir
+raw_resource(xml_content, "application/xml")
 ```
 
 ## The `app/2` Convenience Macro
@@ -138,12 +144,12 @@ defmodule MyApp.DashboardUI do
     type: :resource,
     uri: "ui://dashboard/app.html",
     description: "Dashboard UI",
-    mime_type: "text/html"
+    mime_type: "text/html;profile=mcp-app"
 
   @impl true
   def execute(_params, _conn) do
     html = File.read!(Application.app_dir(:my_app, "priv/mcp_apps/dashboard.html"))
-    raw_resource(html, "text/html")
+    app_html(html)
   end
 end
 
