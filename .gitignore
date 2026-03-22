@@ -25,5 +25,11 @@ conduit_mcp-*.tar
 # Benchmark output
 /bench/output/
 
+# Hex build artifacts
+conduit_mcp-*/
+
+# npm tarballs (from SDK research)
+*.tgz
+
 # macOS
 .DS_Store
