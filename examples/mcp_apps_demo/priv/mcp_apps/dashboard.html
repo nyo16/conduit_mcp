@@ -1,140 +1,50 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Server Health Dashboard</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: system-ui, -apple-system, sans-serif; background: #ffffff; color: #1e293b; padding: 20px; min-height: 200px; }
-    h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 16px; color: #475569; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
-    .card { background: #f8fafc; border-radius: 12px; padding: 16px; border: 1px solid #e2e8f0; }
-    .card .label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-bottom: 4px; }
-    .card .value { font-size: 1.75rem; font-weight: 700; }
-    .card.memory .value { color: #059669; }
-    .card.processes .value { color: #2563eb; }
-    .card.uptime .value { color: #d97706; }
-    .card.updated .value { color: #7c3aed; font-size: 0.875rem; }
-    button { background: #3b82f6; color: white; border: none; border-radius: 8px; padding: 10px 20px; font-size: 0.875rem; cursor: pointer; width: 100%; }
-    button:hover { background: #2563eb; }
-    button:active { background: #1d4ed8; }
-    .status { text-align: center; margin-top: 8px; font-size: 0.75rem; color: #94a3b8; }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Server Health</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,-apple-system,sans-serif;background:#fff;color:#1e293b;padding:16px}
+h1{font-size:1.1rem;font-weight:600;margin-bottom:12px;color:#475569}
+.g{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
+.c{background:#f8fafc;border-radius:10px;padding:12px;border:1px solid #e2e8f0}
+.l{font-size:.7rem;text-transform:uppercase;letter-spacing:.05em;color:#94a3b8;margin-bottom:2px}
+.v{font-size:1.5rem;font-weight:700}
+.m .v{color:#059669}
+.p .v{color:#2563eb}
+.u .v{color:#d97706}
+.t .v{color:#7c3aed;font-size:.8rem}
+</style>
 </head>
 <body>
-  <h1>Server Health</h1>
-  <div class="grid">
-    <div class="card memory">
-      <div class="label">Memory</div>
-      <div class="value" id="memory">—</div>
-    </div>
-    <div class="card processes">
-      <div class="label">Processes</div>
-      <div class="value" id="processes">—</div>
-    </div>
-    <div class="card uptime">
-      <div class="label">Uptime</div>
-      <div class="value" id="uptime">—</div>
-    </div>
-    <div class="card updated">
-      <div class="label">Last Updated</div>
-      <div class="value" id="timestamp">—</div>
-    </div>
-  </div>
-  <button id="refresh">Refresh Metrics</button>
-  <div class="status" id="status">Waiting for data...</div>
-
-  <script>
-    // MCP Apps communication via postMessage JSON-RPC
-    // Fully self-contained — no external dependencies
-    var requestId = 0;
-    var pendingRequests = {};
-
-    function sendToHost(method, params) {
-      return new Promise(function(resolve, reject) {
-        var id = ++requestId;
-        pendingRequests[id] = { resolve: resolve, reject: reject };
-        window.parent.postMessage({
-          jsonrpc: "2.0",
-          id: id,
-          method: method,
-          params: params || {}
-        }, "*");
-      });
-    }
-
-    window.addEventListener("message", function(event) {
-      var msg = event.data;
-      if (!msg || !msg.jsonrpc) return;
-
-      // Response to our request
-      if (msg.id && pendingRequests[msg.id]) {
-        var pending = pendingRequests[msg.id];
-        delete pendingRequests[msg.id];
-        if (msg.error) {
-          pending.reject(new Error(msg.error.message));
-        } else {
-          pending.resolve(msg.result);
-        }
-        return;
-      }
-
-      // Notification from host (e.g., tool result)
-      if (msg.method === "toolResult" || msg.method === "notifications/toolResult") {
-        var result = msg.params;
-        if (result && result.content) {
-          var textItem = result.content.find(function(c) { return c.type === "text"; });
-          if (textItem && textItem.text) {
-            try { renderMetrics(JSON.parse(textItem.text)); } catch(e) {}
-          }
-        }
-      }
-    });
-
-    function renderMetrics(data) {
-      document.getElementById("memory").textContent = (data.memory_mb || "—") + " MB";
-      document.getElementById("processes").textContent = data.processes || "—";
-      document.getElementById("uptime").textContent = formatUptime(data.uptime_sec);
-      document.getElementById("timestamp").textContent = data.timestamp
-        ? new Date(data.timestamp).toLocaleTimeString()
-        : new Date().toLocaleTimeString();
-      document.getElementById("status").textContent = "Connected";
-    }
-
-    function formatUptime(seconds) {
-      if (!seconds) return "—";
-      var h = Math.floor(seconds / 3600);
-      var m = Math.floor((seconds % 3600) / 60);
-      var s = seconds % 60;
-      if (h > 0) return h + "h " + m + "m";
-      if (m > 0) return m + "m " + s + "s";
-      return s + "s";
-    }
-
-    document.getElementById("refresh").addEventListener("click", function() {
-      document.getElementById("status").textContent = "Refreshing...";
-      sendToHost("tools/call", {
-        name: "get_live_metrics",
-        arguments: {}
-      }).then(function(result) {
-        if (result && result.content) {
-          var textItem = result.content.find(function(c) { return c.type === "text"; });
-          if (textItem && textItem.text) {
-            renderMetrics(JSON.parse(textItem.text));
-          }
-        }
-      }).catch(function(err) {
-        document.getElementById("status").textContent = "Error: " + err.message;
-      });
-    });
-
-    // Signal ready to host
-    window.parent.postMessage({
-      jsonrpc: "2.0",
-      method: "ready",
-      params: {}
-    }, "*");
-  </script>
+<h1>Server Health</h1>
+<div class="g">
+<div class="c m"><div class="l">Memory</div><div class="v" id="a">—</div></div>
+<div class="c p"><div class="l">Processes</div><div class="v" id="b">—</div></div>
+<div class="c u"><div class="l">Uptime</div><div class="v" id="c">—</div></div>
+<div class="c t"><div class="l">Updated</div><div class="v" id="d">—</div></div>
+</div>
+<script>
+function r(d){
+document.getElementById("a").textContent=(d.memory_mb||"—")+" MB";
+document.getElementById("b").textContent=d.processes||"—";
+var s=d.uptime_sec;
+document.getElementById("c").textContent=s?(s>3600?Math.floor(s/3600)+"h "+Math.floor(s%3600/60)+"m":s>60?Math.floor(s/60)+"m "+s%60+"s":s+"s"):"—";
+document.getElementById("d").textContent=d.timestamp?new Date(d.timestamp).toLocaleTimeString():new Date().toLocaleTimeString();
+}
+window.addEventListener("message",function(e){
+try{
+var m=e.data;
+if(!m)return;
+if(m.params&&m.params.content){
+var t=m.params.content.find(function(c){return c.type==="text"});
+if(t&&t.text)r(JSON.parse(t.text));
+}
+}catch(x){}
+});
+r({memory_mb:50,processes:441,uptime_sec:120,timestamp:new Date().toISOString()});
+</script>
 </body>
 </html>
