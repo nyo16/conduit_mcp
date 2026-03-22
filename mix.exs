@@ -92,6 +92,7 @@ defmodule ConduitMcp.MixProject do
       licenses: ["Apache-2.0"],
       links: %{
         "GitHub" => @source_url,
+        "Changelog" => "#{@source_url}/blob/master/CHANGELOG.md",
         "MCP Specification" => "https://modelcontextprotocol.io/specification/"
       },
       files: ~w(lib .formatter.exs mix.exs README.md CHANGELOG.md LICENSE)
