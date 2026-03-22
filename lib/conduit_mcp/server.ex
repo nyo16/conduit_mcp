@@ -112,8 +112,13 @@ defmodule ConduitMcp.Server do
 
   @doc """
   Handle listing available tools.
+
+  The arity-2 variant receives request params (e.g., `%{"cursor" => "..."}`)
+  for pagination support. Implement arity-2 to support cursor-based pagination.
   """
   @callback handle_list_tools(conn()) ::
+              {:ok, %{optional(String.t()) => any()}} | {:error, map()}
+  @callback handle_list_tools(conn(), params :: map()) ::
               {:ok, %{optional(String.t()) => any()}} | {:error, map()}
 
   @doc """
@@ -124,8 +129,12 @@ defmodule ConduitMcp.Server do
 
   @doc """
   Handle listing available resources.
+
+  The arity-2 variant receives request params for pagination support.
   """
   @callback handle_list_resources(conn()) ::
+              {:ok, %{optional(String.t()) => any()}} | {:error, map()}
+  @callback handle_list_resources(conn(), params :: map()) ::
               {:ok, %{optional(String.t()) => any()}} | {:error, map()}
 
   @doc """
@@ -136,8 +145,12 @@ defmodule ConduitMcp.Server do
 
   @doc """
   Handle listing available prompts.
+
+  The arity-2 variant receives request params for pagination support.
   """
   @callback handle_list_prompts(conn()) ::
+              {:ok, %{optional(String.t()) => any()}} | {:error, map()}
+  @callback handle_list_prompts(conn(), params :: map()) ::
               {:ok, %{optional(String.t()) => any()}} | {:error, map()}
 
   @doc """
@@ -146,13 +159,55 @@ defmodule ConduitMcp.Server do
   @callback handle_get_prompt(conn(), prompt_name(), prompt_args()) ::
               {:ok, messages :: map()} | {:error, error :: map()}
 
+  @doc """
+  Handle autocompletion for prompt arguments or resource template parameters.
+
+  Receives the reference type (`:prompt` or `:resource`), the reference name,
+  the argument/parameter name, and the partial value typed so far.
+
+  Should return `{:ok, %{"completion" => %{"values" => [...], "hasMore" => false}}}`.
+  """
+  @callback handle_complete(conn(), ref :: map(), argument :: map()) ::
+              {:ok, map()} | {:error, map()}
+
+  @doc """
+  Handle setting the log level for server-to-client logging.
+
+  Receives the desired log level as a string (e.g., "debug", "info", "warning", "error").
+  """
+  @callback handle_set_log_level(conn(), level :: String.t()) ::
+              {:ok, map()} | {:error, map()}
+
+  @doc """
+  Handle subscribing to resource changes.
+
+  Receives the resource URI to subscribe to.
+  """
+  @callback handle_subscribe_resource(conn(), uri()) ::
+              {:ok, map()} | {:error, map()}
+
+  @doc """
+  Handle unsubscribing from resource changes.
+
+  Receives the resource URI to unsubscribe from.
+  """
+  @callback handle_unsubscribe_resource(conn(), uri()) ::
+              {:ok, map()} | {:error, map()}
+
   @optional_callbacks [
     handle_list_tools: 1,
+    handle_list_tools: 2,
     handle_call_tool: 3,
     handle_list_resources: 1,
+    handle_list_resources: 2,
     handle_read_resource: 2,
     handle_list_prompts: 1,
-    handle_get_prompt: 3
+    handle_list_prompts: 2,
+    handle_get_prompt: 3,
+    handle_complete: 3,
+    handle_set_log_level: 2,
+    handle_subscribe_resource: 2,
+    handle_unsubscribe_resource: 2
   ]
 
   defmacro __using__(opts) do

@@ -916,4 +916,128 @@ defmodule ConduitMcp.DSLTest do
                ConduitMcp.DSL.extract_uri_params(template, uri)
     end
   end
+
+  describe "tool annotations DSL" do
+    defmodule AnnotatedToolServer do
+      use ConduitMcp.Server
+
+      tool "delete_item", "Deletes an item" do
+        annotations(destructive: true, idempotent: false)
+
+        param(:id, :string, "Item ID", required: true)
+
+        handle(fn _conn, %{"id" => id} ->
+          text("Deleted: #{id}")
+        end)
+      end
+
+      tool "fetch_item", "Fetches an item" do
+        annotations(read_only: true, open_world: false)
+
+        param(:id, :string, "Item ID", required: true)
+
+        handle(fn _conn, %{"id" => id} ->
+          text("Fetched: #{id}")
+        end)
+      end
+
+      tool "unannotated", "Tool without annotations" do
+        param(:value, :string, "A value")
+
+        handle(fn _conn, _params ->
+          text("ok")
+        end)
+      end
+    end
+
+    test "tool with annotations includes annotations in schema" do
+      conn = %Plug.Conn{}
+      {:ok, result} = AnnotatedToolServer.handle_list_tools(conn)
+
+      delete_tool = Enum.find(result["tools"], fn t -> t["name"] == "delete_item" end)
+      assert Map.has_key?(delete_tool, "annotations")
+      assert delete_tool["annotations"]["destructiveHint"] == true
+      assert delete_tool["annotations"]["idempotentHint"] == false
+    end
+
+    test "annotation keys use correct MCP hint naming" do
+      conn = %Plug.Conn{}
+      {:ok, result} = AnnotatedToolServer.handle_list_tools(conn)
+
+      fetch_tool = Enum.find(result["tools"], fn t -> t["name"] == "fetch_item" end)
+      annotations = fetch_tool["annotations"]
+
+      assert annotations["readOnlyHint"] == true
+      assert annotations["openWorldHint"] == false
+    end
+
+    test "tool without annotations does not have annotations field" do
+      conn = %Plug.Conn{}
+      {:ok, result} = AnnotatedToolServer.handle_list_tools(conn)
+
+      unannotated_tool = Enum.find(result["tools"], fn t -> t["name"] == "unannotated" end)
+      refute Map.has_key?(unannotated_tool, "annotations")
+    end
+
+    test "annotated tools still execute correctly" do
+      conn = %Plug.Conn{}
+
+      {:ok, result} =
+        AnnotatedToolServer.handle_call_tool(conn, "delete_item", %{"id" => "42"})
+
+      assert result["content"] == [%{"type" => "text", "text" => "Deleted: 42"}]
+    end
+  end
+
+  describe "audio helper macro" do
+    test "audio/2 creates proper audio response format" do
+      import ConduitMcp.DSL.Helpers
+
+      result = audio("base64audiodata==", "audio/wav")
+
+      assert result ==
+               {:ok,
+                %{
+                  "content" => [
+                    %{
+                      "type" => "audio",
+                      "data" => "base64audiodata==",
+                      "mimeType" => "audio/wav"
+                    }
+                  ]
+                }}
+    end
+
+    test "audio/2 works with different mime types" do
+      import ConduitMcp.DSL.Helpers
+
+      result = audio("mp3data", "audio/mpeg")
+
+      assert {:ok, %{"content" => [content]}} = result
+      assert content["type"] == "audio"
+      assert content["data"] == "mp3data"
+      assert content["mimeType"] == "audio/mpeg"
+    end
+
+    test "audio/2 works inside a DSL tool handler" do
+      defmodule AudioToolServer do
+        use ConduitMcp.Server
+
+        tool "play_sound", "Returns audio content" do
+          param(:data, :string, "Base64 audio data", required: true)
+
+          handle(fn _conn, %{"data" => data} ->
+            audio(data, "audio/wav")
+          end)
+        end
+      end
+
+      conn = %Plug.Conn{}
+      {:ok, result} = AudioToolServer.handle_call_tool(conn, "play_sound", %{"data" => "AAAA"})
+
+      assert result["content"] == [
+               %{"type" => "audio", "data" => "AAAA", "mimeType" => "audio/wav"}
+             ]
+    end
+  end
 end

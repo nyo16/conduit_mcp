@@ -21,3 +21,6 @@ conduit_mcp-*.tar
 
 # Temporary files, for example, from tests.
 /tmp/
+
+# macOS
+.DS_Store

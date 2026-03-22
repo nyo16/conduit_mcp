@@ -51,15 +51,54 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   require Logger
 
   alias ConduitMcp.Handler
+  alias ConduitMcp.Session
 
   plug(Plug.Logger)
+  plug(:validate_origin)
   plug(:add_cors_headers)
   plug(:match)
   plug(Plug.Parsers, parsers: [:json], json_decoder: Jason)
   plug(:maybe_authenticate)
   plug(:maybe_rate_limit)
   plug(:maybe_message_rate_limit)
+  plug(:validate_session)
   plug(:dispatch)
+
+  defp validate_origin(conn, _opts) do
+    allowed_origins = conn.private[:allowed_origins]
+
+    cond do
+      # No origin restriction configured, or explicitly set to "*"
+      is_nil(allowed_origins) or allowed_origins == "*" ->
+        conn
+
+      # OPTIONS requests skip origin validation (CORS preflight)
+      conn.method == "OPTIONS" ->
+        conn
+
+      true ->
+        origin = get_req_header(conn, "origin") |> List.first()
+
+        cond do
+          # No Origin header — allow (browser-less clients don't send it)
+          is_nil(origin) ->
+            conn
+
+          # Origin matches allowed list
+          is_list(allowed_origins) and origin in allowed_origins ->
+            conn
+
+          # Origin doesn't match
+          true ->
+            Logger.warning("Blocked request from disallowed origin: #{origin}")
+
+            conn
+            |> put_resp_content_type("application/json")
+            |> send_resp(403, Jason.encode!(%{"error" => "Origin not allowed"}))
+            |> halt()
+        end
+    end
+  end
 
   defp add_cors_headers(conn, _opts) do
     # Get CORS settings from private (set in call/2)
@@ -76,12 +115,16 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   defp maybe_authenticate(conn, _opts) do
     case conn.private[:auth_config] do
       nil ->
-        # No auth configured
         conn
 
       auth_opts ->
-        # Apply auth plug
-        ConduitMcp.Plugs.Auth.call(conn, ConduitMcp.Plugs.Auth.init(auth_opts))
+        strategy = Keyword.get(auth_opts, :strategy)
+
+        if strategy == :oauth and Code.ensure_loaded?(ConduitMcp.Plugs.OAuth) do
+          ConduitMcp.Plugs.OAuth.call(conn, ConduitMcp.Plugs.OAuth.init(auth_opts))
+        else
+          ConduitMcp.Plugs.Auth.call(conn, ConduitMcp.Plugs.Auth.init(auth_opts))
+        end
     end
   end
 
@@ -108,6 +151,60 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     end
   end
 
+  defp validate_session(conn, _opts) do
+    session_config = conn.private[:session_config]
+
+    cond do
+      # Sessions disabled
+      session_config == false ->
+        conn
+
+      # No session config (default: sessions optional, don't enforce)
+      is_nil(session_config) ->
+        conn
+
+      # POST requests need session validation (except initialize)
+      conn.method == "POST" ->
+        validate_session_header(conn, session_config)
+
+      true ->
+        conn
+    end
+  end
+
+  defp validate_session_header(conn, session_config) do
+    session_id = get_req_header(conn, "mcp-session-id") |> List.first()
+    store = Keyword.get(session_config, :store, Session.EtsStore)
+
+    if is_nil(session_id) do
+      # No session header — only allowed for initialize requests
+      conn
+    else
+      # Has session header — validate it exists in store
+      case Session.get(session_id, store) do
+        {:ok, session_data} ->
+          conn
+          |> Plug.Conn.put_private(:mcp_session_id, session_id)
+          |> Plug.Conn.put_private(:mcp_session_data, session_data)
+
+        {:error, :not_found} ->
+          conn
+          |> put_resp_content_type("application/json")
+          |> send_resp(
+            404,
+            Jason.encode!(
+              ConduitMcp.Protocol.error_response(
+                nil,
+                ConduitMcp.Protocol.invalid_request(),
+                "Session not found. Send an initialize request to create a new session."
+              )
+            )
+          )
+          |> halt()
+      end
+    end
+  end
+
   def init(opts) do
     server_module = Keyword.get(opts, :server_module)
 
@@ -126,15 +223,23 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     auth_config = Keyword.get(opts, :auth)
     rate_limit_config = Keyword.get(opts, :rate_limit)
     message_rate_limit_config = Keyword.get(opts, :message_rate_limit)
+    server_name = Keyword.get(opts, :server_name)
+    server_version = Keyword.get(opts, :server_version)
+    session_config = Keyword.get(opts, :session)
+    allowed_origins = Keyword.get(opts, :allowed_origins)
 
     conn
     |> Plug.Conn.put_private(:server_module, server_module)
+    |> Plug.Conn.put_private(:allowed_origins, allowed_origins)
     |> Plug.Conn.put_private(:cors_origin, cors_origin)
     |> Plug.Conn.put_private(:cors_methods, cors_methods)
     |> Plug.Conn.put_private(:cors_headers, cors_headers)
     |> Plug.Conn.put_private(:auth_config, auth_config)
     |> Plug.Conn.put_private(:rate_limit_config, rate_limit_config)
     |> Plug.Conn.put_private(:message_rate_limit_config, message_rate_limit_config)
+    |> Plug.Conn.put_private(:server_name, server_name)
+    |> Plug.Conn.put_private(:server_version, server_version)
+    |> Plug.Conn.put_private(:session_config, session_config)
     |> super(opts)
   end
 
@@ -151,7 +256,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
       200,
       Jason.encode!(%{
         "transport" => "streamable-http",
-        "version" => "2025-06-18",
+        "version" => ConduitMcp.Protocol.protocol_version(),
         "status" => "ready"
       })
     )
@@ -160,6 +265,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   # Main endpoint for bidirectional streaming
   post "/" do
     server_module = conn.private[:server_module]
+    session_config = conn.private[:session_config]
 
     case conn.body_params do
       params when is_map(params) ->
@@ -173,6 +279,15 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
             send_resp(conn, 204, "")
 
           response_map when is_map(response_map) ->
+            conn = add_mcp_protocol_version_header(conn)
+
+            conn =
+              if is_initialize_response?(response_map) and session_config != false do
+                create_session_for_initialize(conn, response_map, session_config)
+              else
+                conn
+              end
+
             conn
             |> put_resp_content_type("application/json")
             |> send_resp(200, Jason.encode!(response_map))
@@ -199,8 +314,59 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     |> send_resp(200, Jason.encode!(%{status: "ok"}))
   end
 
+  # OAuth Protected Resource Metadata (RFC 9728)
+  get "/.well-known/oauth-protected-resource" do
+    case conn.private[:auth_config] do
+      auth_config when is_list(auth_config) and auth_config != [] ->
+        strategy = Keyword.get(auth_config, :strategy)
+
+        if strategy == :oauth do
+          metadata = ConduitMcp.OAuth.ResourceMetadata.build(auth_config)
+
+          conn
+          |> put_resp_content_type("application/json")
+          |> send_resp(200, Jason.encode!(metadata))
+        else
+          send_resp(conn, 404, "Not found")
+        end
+
+      _ ->
+        send_resp(conn, 404, "Not found")
+    end
+  end
+
   # Catch all
   match _ do
     send_resp(conn, 404, "Not found")
+  end
+
+  defp add_mcp_protocol_version_header(conn) do
+    put_resp_header(conn, "mcp-protocol-version", ConduitMcp.Protocol.protocol_version())
+  end
+
+  defp is_initialize_response?(response_map) do
+    case response_map do
+      %{"result" => %{"protocolVersion" => _, "serverInfo" => _}} -> true
+      _ -> false
+    end
+  end
+
+  defp create_session_for_initialize(conn, response_map, session_config) do
+    store =
+      case session_config do
+        config when is_list(config) -> Keyword.get(config, :store, Session.EtsStore)
+        _ -> Session.EtsStore
+      end
+
+    session_id = Session.generate_id()
+    protocol_version = get_in(response_map, ["result", "protocolVersion"])
+
+    Session.create(
+      session_id,
+      %{"protocol_version" => protocol_version},
+      store
+    )
+
+    put_resp_header(conn, "mcp-session-id", session_id)
   end
 end
