@@ -101,10 +101,62 @@ defmodule ConduitMcp.MixProject do
       source_url: @source_url,
       extras: [
         "README.md",
-        "CHANGELOG.md"
+        "CHANGELOG.md",
+        "guides/multi_node_sessions.md",
+        "guides/oban_tasks.md"
       ],
       groups_for_extras: [
-        Changelog: ["CHANGELOG.md"]
+        Changelog: ["CHANGELOG.md"],
+        Guides: Path.wildcard("guides/*.md")
+      ],
+      groups_for_modules: [
+        Core: [
+          ConduitMcp,
+          ConduitMcp.Server,
+          ConduitMcp.DSL,
+          ConduitMcp.DSL.Helpers,
+          ConduitMcp.DSL.SchemaBuilder
+        ],
+        "Protocol & Handler": [
+          ConduitMcp.Protocol,
+          ConduitMcp.Handler
+        ],
+        Transport: [
+          ConduitMcp.Transport.StreamableHTTP,
+          ConduitMcp.Transport.SSE
+        ],
+        Authentication: [
+          ConduitMcp.Plugs.Auth,
+          ConduitMcp.Plugs.OAuth,
+          ConduitMcp.OAuth.KeyProvider,
+          ConduitMcp.OAuth.KeyProvider.JWKS,
+          ConduitMcp.OAuth.KeyProvider.Static,
+          ConduitMcp.OAuth.ResourceMetadata
+        ],
+        "Rate Limiting": [
+          ConduitMcp.Plugs.RateLimit,
+          ConduitMcp.Plugs.MessageRateLimit
+        ],
+        Sessions: [
+          ConduitMcp.Session,
+          ConduitMcp.Session.Store,
+          ConduitMcp.Session.EtsStore
+        ],
+        Tasks: [
+          ConduitMcp.Tasks
+        ],
+        Client: [
+          ConduitMcp.Client
+        ],
+        Validation: [
+          ConduitMcp.Validation,
+          ConduitMcp.Validation.SchemaConverter,
+          ConduitMcp.Validation.Validators
+        ],
+        Observability: [
+          ConduitMcp.Telemetry,
+          ConduitMcp.PromEx
+        ]
       ]
     ]
   end
