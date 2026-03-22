@@ -46,15 +46,6 @@
   <div class="status" id="status">Waiting for data...</div>
 
   <script type="module">
-    // In production, import from @modelcontextprotocol/ext-apps:
-    //   import { App } from "@modelcontextprotocol/ext-apps";
-    //   const app = new App({ name: "Server Health", version: "1.0.0" });
-    //   app.ontoolresult = (result) => { ... };
-    //   app.connect();
-    //
-    // For this demo, we show the UI structure and rendering logic.
-    // The actual MCP Apps SDK handles the postMessage communication.
-
     function renderMetrics(data) {
       document.getElementById("memory").textContent = data.memory_mb + " MB";
       document.getElementById("processes").textContent = data.processes;
@@ -75,17 +66,24 @@
       return s + "s";
     }
 
-    // When using the MCP Apps SDK, the host sends the tool result
-    // automatically via app.ontoolresult. The refresh button would
-    // call app.callServerTool({ name: "get_live_metrics", arguments: {} })
-    // to fetch updated data.
+    // MCP Apps SDK integration
+    // The host renders this HTML in a sandboxed iframe and communicates
+    // via postMessage JSON-RPC. In production, use the full SDK:
+    //
+    //   import { App } from "@modelcontextprotocol/ext-apps";
+    //   const app = new App({ name: "Server Health", version: "1.0.0" });
+    //   app.ontoolresult = (result) => { renderMetrics(JSON.parse(result.content[0].text)); };
+    //   document.getElementById("refresh").addEventListener("click", async () => {
+    //     const result = await app.callServerTool({ name: "get_live_metrics", arguments: {} });
+    //     renderMetrics(JSON.parse(result.content[0].text));
+    //   });
+    //   app.connect();
 
     document.getElementById("refresh").addEventListener("click", () => {
       document.getElementById("status").textContent = "Refreshing...";
-      // In production: await app.callServerTool({ name: "get_live_metrics", arguments: {} });
     });
 
-    // Demo: show placeholder data
+    // Show placeholder data on load
     renderMetrics({ memory_mb: 128, processes: 342, uptime_sec: 3661, timestamp: new Date().toISOString() });
   </script>
 </body>

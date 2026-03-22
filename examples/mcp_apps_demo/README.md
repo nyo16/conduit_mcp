@@ -1,69 +1,58 @@
 # MCP Apps Demo
 
-This example demonstrates how to build an MCP server with interactive UI using the [MCP Apps extension](https://modelcontextprotocol.io/docs/extensions/apps).
+A standalone MCP server demonstrating [MCP Apps](https://modelcontextprotocol.io/docs/extensions/apps) — interactive UI rendered as sandboxed iframes in host clients.
 
-## What is MCP Apps?
+## Quick Start
 
-MCP Apps lets tools return interactive HTML UI that hosts render as sandboxed iframes. The pattern:
-
-1. A **tool** declares `_meta.ui.resourceUri` pointing to a `ui://` resource
-2. A **resource** serves self-contained HTML at that URI
-3. The host fetches the HTML via `resources/read` and renders it in an iframe
-
-## Files
-
-- `server.ex` — MCP server with a health dashboard tool and linked `ui://` resource
-- `priv/mcp_apps/dashboard.html` — Self-contained HTML dashboard
-
-## How It Works
-
-### Server Side (Elixir)
-
-```elixir
-# Link tool to UI via ui/1 macro
-tool "server_health", "Live server health dashboard" do
-  ui "ui://server-health/dashboard.html"
-  handle fn _conn, _params -> json(metrics) end
-end
-
-# Serve the HTML file as a ui:// resource
-resource "ui://server-health/dashboard.html" do
-  mime_type "text/html"
-  read fn _conn, _params, _opts ->
-    raw_resource(File.read!("priv/mcp_apps/dashboard.html"), "text/html")
-  end
-end
+```bash
+cd examples/mcp_apps_demo
+mix deps.get
+mix run --no-halt
 ```
 
-### Client Side (JavaScript)
+The server starts on `http://localhost:4001` (override with `PORT=5000 mix run --no-halt`).
 
-The HTML file uses `@modelcontextprotocol/ext-apps` to communicate with the host:
+## Connect with Claude Desktop
 
-```javascript
-import { App } from "@modelcontextprotocol/ext-apps";
-const app = new App({ name: "Server Health", version: "1.0.0" });
+Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 
-app.ontoolresult = (result) => {
-  // Render initial tool result
-  renderMetrics(JSON.parse(result.content[0].text));
-};
-
-// Call back to the server for live updates
-const result = await app.callServerTool({
-  name: "get_live_metrics",
-  arguments: {}
-});
-
-app.connect();
+```json
+{
+  "mcpServers": {
+    "mcp-apps-demo": {
+      "url": "http://localhost:4001/"
+    }
+  }
+}
 ```
 
-## Building Production UIs
+Restart Claude Desktop, then ask Claude to use the `server_health` tool. The host will see the `_meta.ui` field and render the dashboard as an interactive iframe.
 
-For production MCP Apps, bundle your UI into a single HTML file:
+## What's in the box
 
-1. Create a JS/TS project with `@modelcontextprotocol/ext-apps`
-2. Use [Vite](https://vitejs.dev/) + [vite-plugin-singlefile](https://www.npmjs.com/package/vite-plugin-singlefile) to bundle
-3. Place the output `.html` in `priv/mcp_apps/`
-4. Register the `ui://` resource in your MCP server
+- **`server_health` tool** — returns BEAM metrics (memory, processes, uptime) and links to the dashboard UI via `_meta.ui.resourceUri`
+- **`ui://server-health/dashboard.html` resource** — serves the self-contained HTML dashboard
+- **`get_live_metrics` tool** — the UI can call this for refreshed data
 
-See the [MCP Apps Guide](../../guides/mcp_apps.md) for detailed instructions.
+## How it works
+
+```
+tools/list response:
+{
+  "name": "server_health",
+  "_meta": { "ui": { "resourceUri": "ui://server-health/dashboard.html" } }
+}
+
+Host sees _meta.ui → fetches resource via resources/read → renders in iframe
+```
+
+## Project structure
+
+```
+├── mix.exs                              # Deps on conduit_mcp (path: "../..")
+├── lib/mcp_apps_demo/
+│   ├── application.ex                   # Starts Bandit on port 4001
+│   └── server.ex                        # MCP server with tools + ui:// resource
+└── priv/mcp_apps/
+    └── dashboard.html                   # Self-contained HTML dashboard
+```

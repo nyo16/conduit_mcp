@@ -1,18 +1,7 @@
-# MCP Apps Demo Server
-#
-# This example shows how to build an MCP server with interactive UI
-# using the MCP Apps extension. Tools can link to HTML resources that
-# hosts render as sandboxed iframes.
-#
-# Run with: elixir examples/mcp_apps_demo/server.ex
-# (Requires conduit_mcp as a dependency in your project)
-
 defmodule McpAppsDemo.Server do
   use ConduitMcp.Server
 
-  # ---- Option 1: Explicit tool + resource pair ----
-
-  # Tool with ui/1 — declares that this tool has a linked UI
+  # Tool with linked UI — the host sees _meta.ui.resourceUri and renders the iframe
   tool "server_health", "Live server health dashboard" do
     ui("ui://server-health/dashboard.html")
 
@@ -34,7 +23,7 @@ defmodule McpAppsDemo.Server do
     mime_type("text/html")
 
     read(fn _conn, _params, _opts ->
-      html = File.read!(Path.join(__DIR__, "priv/mcp_apps/dashboard.html"))
+      html = File.read!(Application.app_dir(:mcp_apps_demo, "priv/mcp_apps/dashboard.html"))
       raw_resource(html, "text/html")
     end)
   end
@@ -49,18 +38,4 @@ defmodule McpAppsDemo.Server do
       })
     end)
   end
-
-  # ---- Option 2: app/2 convenience macro ----
-  # (Uncomment below to try the shorthand version)
-  #
-  # app "quick_metrics", "Quick metrics view" do
-  #   view "examples/mcp_apps_demo/priv/mcp_apps/dashboard.html"
-  #
-  #   handle fn _conn, _params ->
-  #     json(%{
-  #       memory_mb: div(:erlang.memory(:total), 1_048_576),
-  #       processes: :erlang.system_info(:process_count)
-  #     })
-  #   end
-  # end
 end
