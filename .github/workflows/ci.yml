@@ -153,9 +153,17 @@ jobs:
             ${{ runner.os }}-plt-${{ env.ELIXIR_VERSION }}-${{ env.OTP_VERSION }}-
 
       - run: mix deps.get
+        env:
+          MIX_ENV: dev
       - run: mix deps.compile
+        env:
+          MIX_ENV: dev
       - run: mix compile
+        env:
+          MIX_ENV: dev
       - run: mix dialyzer
+        env:
+          MIX_ENV: dev
 
   publish:
     name: Publish to Hex
