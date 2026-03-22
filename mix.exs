@@ -1,7 +1,7 @@
 defmodule ConduitMcp.MixProject do
   use Mix.Project
 
-  @version "0.8.5"
+  @version "0.9.0"
   @source_url "https://github.com/nyo16/conduit_mcp"
 
   def project do
@@ -114,7 +114,8 @@ defmodule ConduitMcp.MixProject do
         "guides/authentication.md",
         "guides/rate_limiting.md",
         "guides/multi_node_sessions.md",
-        "guides/oban_tasks.md"
+        "guides/oban_tasks.md",
+        "guides/mcp_apps.md"
       ],
       groups_for_extras: [
         Changelog: ["CHANGELOG.md"],
@@ -128,7 +129,8 @@ defmodule ConduitMcp.MixProject do
           "guides/authentication.md",
           "guides/rate_limiting.md",
           "guides/multi_node_sessions.md",
-          "guides/oban_tasks.md"
+          "guides/oban_tasks.md",
+          "guides/mcp_apps.md"
         ]
       ],
       groups_for_modules: [

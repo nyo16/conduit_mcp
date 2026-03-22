@@ -261,6 +261,37 @@ defmodule ConduitMcp.DSL.Helpers do
   end
 
   @doc """
+  Creates a resource content response with a specified MIME type.
+
+  Useful for returning raw HTML, XML, or other content types from
+  resource `read` handlers — especially for MCP Apps `ui://` resources.
+
+  ## Example
+
+      resource "ui://dashboard/app.html" do
+        mime_type "text/html"
+
+        read fn _conn, _params, _opts ->
+          html = File.read!("priv/mcp_apps/dashboard.html")
+          raw_resource(html, "text/html")
+        end
+      end
+  """
+  defmacro raw_resource(content, mime_type) do
+    quote do
+      {:ok,
+       %{
+         "contents" => [
+           %{
+             "mimeType" => unquote(mime_type),
+             "text" => unquote(content)
+           }
+         ]
+       }}
+    end
+  end
+
+  @doc """
   Creates multiple text content items.
 
   Useful for returning multiple pieces of content in a single response.

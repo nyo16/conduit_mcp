@@ -5,12 +5,13 @@
 An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) specification (2025-11-25). Build MCP servers to expose tools, resources, and prompts to LLM applications like Claude Desktop, VS Code, and Cursor.
 
 [![CI](https://github.com/nyo16/conduit_mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/nyo16/conduit_mcp/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-503%20passing-brightgreen)]()
-[![Version](https://img.shields.io/badge/version-0.8.0-blue)]()
+[![Tests](https://img.shields.io/badge/tests-526%20passing-brightgreen)]()
+[![Version](https://img.shields.io/badge/version-0.9.0-blue)]()
 [![MCP Spec](https://img.shields.io/badge/MCP-2025--11--25-purple)]()
 
 ## Features
 
+- **MCP Apps** — Tools can return interactive UI rendered as sandboxed iframes in host clients
 - **Three Ways to Build** — DSL macros, raw callbacks, or component modules — pick your level of control
 - **Full MCP Spec** — Tools, resources, prompts, completion, logging, subscriptions (MCP 2025-11-25 + 2025-06-18)
 - **Runtime Validation** — NimbleOptions-powered param validation with type coercion and custom constraints
@@ -27,7 +28,7 @@ An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcont
 ```elixir
 def deps do
   [
-    {:conduit_mcp, "~> 0.8.0"}
+    {:conduit_mcp, "~> 0.9.0"}
   ]
 end
 ```
@@ -92,7 +93,7 @@ defmodule MyApp.MCPServer do
 end
 ```
 
-**Response helpers** (auto-imported): `text/1`, `json/1`, `image/1`, `audio/2`, `error/1`, `raw/1`, `system/1`, `user/1`, `assistant/1` — see [Responses](#responses) for details and custom response patterns.
+**Response helpers** (auto-imported): `text/1`, `json/1`, `image/1`, `audio/2`, `error/1`, `raw/1`, `raw_resource/2`, `system/1`, `user/1`, `assistant/1` — see [Responses](#responses) for details and custom response patterns.
 
 ---
 
@@ -242,6 +243,7 @@ All tool/resource/prompt handlers return `{:ok, map()}` or `{:error, map()}`. He
 | `error("fail")` | `{:error, %{"code" => -32000, "message" => "fail"}}` | Error with default code |
 | `error("fail", -32602)` | `{:error, %{"code" => -32602, "message" => "fail"}}` | Error with custom code |
 | `raw(any_map)` | `{:ok, any_map}` | Bypass MCP wrapping entirely |
+| `raw_resource(html, "text/html")` | `{:ok, %{"contents" => [%{"mimeType" => ..., "text" => ...}]}}` | Resource content with MIME type |
 
 ### Prompt Message Helpers
 
@@ -457,6 +459,7 @@ ConduitMCP implements the full [MCP specification](https://modelcontextprotocol.
 | OAuth 2.1 (RFC 9728) | Supported | 2025-11-25 |
 | StreamableHTTP transport | Supported | 2025-11-25 |
 | SSE transport (legacy) | Supported | 2025-06-18 |
+| MCP Apps (ext-apps) | Supported | Extension |
 
 ## Guides
 
@@ -466,6 +469,7 @@ ConduitMCP implements the full [MCP specification](https://modelcontextprotocol.
 - [Rate Limiting](guides/rate_limiting.md) — HTTP and message rate limiting
 - [Multi-Node Sessions](guides/multi_node_sessions.md) — Redis, PostgreSQL, Mnesia session stores
 - [Oban Tasks](guides/oban_tasks.md) — Long-running tasks with Oban
+- [MCP Apps](guides/mcp_apps.md) — Interactive UI from MCP tools
 
 ## Documentation
 
@@ -477,6 +481,7 @@ ConduitMCP implements the full [MCP specification](https://modelcontextprotocol.
 
 - [Simple Server Example](https://github.com/nyo16/conduit_mcp/tree/master/examples/simple_tools_server)
 - [Phoenix Integration](https://github.com/nyo16/conduit_mcp/tree/master/examples/phoenix_mcp)
+- [MCP Apps Demo](https://github.com/nyo16/conduit_mcp/tree/master/examples/mcp_apps_demo)
 
 ## License
 

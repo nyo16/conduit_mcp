@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Server Health Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #e2e8f0; padding: 20px; }
+    h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 16px; color: #94a3b8; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+    .card { background: #1e293b; border-radius: 12px; padding: 16px; border: 1px solid #334155; }
+    .card .label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin-bottom: 4px; }
+    .card .value { font-size: 1.75rem; font-weight: 700; }
+    .card.memory .value { color: #34d399; }
+    .card.processes .value { color: #60a5fa; }
+    .card.uptime .value { color: #fbbf24; }
+    .card.updated .value { color: #a78bfa; font-size: 0.875rem; }
+    button { background: #3b82f6; color: white; border: none; border-radius: 8px; padding: 10px 20px; font-size: 0.875rem; cursor: pointer; width: 100%; }
+    button:hover { background: #2563eb; }
+    button:active { background: #1d4ed8; }
+    .status { text-align: center; margin-top: 8px; font-size: 0.75rem; color: #64748b; }
+  </style>
+</head>
+<body>
+  <h1>Server Health</h1>
+  <div class="grid">
+    <div class="card memory">
+      <div class="label">Memory</div>
+      <div class="value" id="memory">—</div>
+    </div>
+    <div class="card processes">
+      <div class="label">Processes</div>
+      <div class="value" id="processes">—</div>
+    </div>
+    <div class="card uptime">
+      <div class="label">Uptime</div>
+      <div class="value" id="uptime">—</div>
+    </div>
+    <div class="card updated">
+      <div class="label">Last Updated</div>
+      <div class="value" id="timestamp">—</div>
+    </div>
+  </div>
+  <button id="refresh">Refresh Metrics</button>
+  <div class="status" id="status">Waiting for data...</div>
+
+  <script type="module">
+    // In production, import from @modelcontextprotocol/ext-apps:
+    //   import { App } from "@modelcontextprotocol/ext-apps";
+    //   const app = new App({ name: "Server Health", version: "1.0.0" });
+    //   app.ontoolresult = (result) => { ... };
+    //   app.connect();
+    //
+    // For this demo, we show the UI structure and rendering logic.
+    // The actual MCP Apps SDK handles the postMessage communication.
+
+    function renderMetrics(data) {
+      document.getElementById("memory").textContent = data.memory_mb + " MB";
+      document.getElementById("processes").textContent = data.processes;
+      document.getElementById("uptime").textContent = formatUptime(data.uptime_sec);
+      document.getElementById("timestamp").textContent = data.timestamp
+        ? new Date(data.timestamp).toLocaleTimeString()
+        : "now";
+      document.getElementById("status").textContent = "Connected";
+    }
+
+    function formatUptime(seconds) {
+      if (!seconds) return "—";
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      const s = seconds % 60;
+      if (h > 0) return h + "h " + m + "m";
+      if (m > 0) return m + "m " + s + "s";
+      return s + "s";
+    }
+
+    // When using the MCP Apps SDK, the host sends the tool result
+    // automatically via app.ontoolresult. The refresh button would
+    // call app.callServerTool({ name: "get_live_metrics", arguments: {} })
+    // to fetch updated data.
+
+    document.getElementById("refresh").addEventListener("click", () => {
+      document.getElementById("status").textContent = "Refreshing...";
+      // In production: await app.callServerTool({ name: "get_live_metrics", arguments: {} });
+    });
+
+    // Demo: show placeholder data
+    renderMetrics({ memory_mb: 128, processes: 342, uptime_sec: 3661, timestamp: new Date().toISOString() });
+  </script>
+</body>
+</html>

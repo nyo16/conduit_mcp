@@ -54,12 +54,29 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
       "inputSchema" => build_input_schema(params)
     }
 
-    case Map.get(tool, :annotations) do
+    schema =
+      case Map.get(tool, :annotations) do
+        nil -> schema
+        annotations when map_size(annotations) == 0 -> schema
+        annotations -> Map.put(schema, "annotations", annotations)
+      end
+
+    case Map.get(tool, :meta) do
       nil -> schema
-      annotations when map_size(annotations) == 0 -> schema
-      annotations -> Map.put(schema, "annotations", annotations)
+      meta when is_map(meta) and map_size(meta) == 0 -> schema
+      meta -> Map.put(schema, "_meta", stringify_keys(meta))
     end
   end
+
+  @doc false
+  def stringify_keys(value) when is_map(value) do
+    Map.new(value, fn
+      {k, v} when is_atom(k) -> {Atom.to_string(k), stringify_keys(v)}
+      {k, v} -> {k, stringify_keys(v)}
+    end)
+  end
+
+  def stringify_keys(value), do: value
 
   @doc """
   Builds a JSON Schema input schema from parameter definitions.
