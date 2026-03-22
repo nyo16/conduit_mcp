@@ -6,7 +6,7 @@
   <title>Server Health Dashboard</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: system-ui, -apple-system, sans-serif; background: #ffffff; color: #1e293b; padding: 20px; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #ffffff; color: #1e293b; padding: 20px; min-height: 200px; }
     h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 16px; color: #475569; }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
     .card { background: #f8fafc; border-radius: 12px; padding: 16px; border: 1px solid #e2e8f0; }
@@ -43,14 +43,58 @@
     </div>
   </div>
   <button id="refresh">Refresh Metrics</button>
-  <div class="status" id="status">Connecting...</div>
+  <div class="status" id="status">Waiting for data...</div>
 
-  <script type="module">
-    import { App } from "https://esm.sh/@anthropic-ai/mcp-app-sdk@0.1.0";
+  <script>
+    // MCP Apps communication via postMessage JSON-RPC
+    // Fully self-contained — no external dependencies
+    var requestId = 0;
+    var pendingRequests = {};
+
+    function sendToHost(method, params) {
+      return new Promise(function(resolve, reject) {
+        var id = ++requestId;
+        pendingRequests[id] = { resolve: resolve, reject: reject };
+        window.parent.postMessage({
+          jsonrpc: "2.0",
+          id: id,
+          method: method,
+          params: params || {}
+        }, "*");
+      });
+    }
+
+    window.addEventListener("message", function(event) {
+      var msg = event.data;
+      if (!msg || !msg.jsonrpc) return;
+
+      // Response to our request
+      if (msg.id && pendingRequests[msg.id]) {
+        var pending = pendingRequests[msg.id];
+        delete pendingRequests[msg.id];
+        if (msg.error) {
+          pending.reject(new Error(msg.error.message));
+        } else {
+          pending.resolve(msg.result);
+        }
+        return;
+      }
+
+      // Notification from host (e.g., tool result)
+      if (msg.method === "toolResult" || msg.method === "notifications/toolResult") {
+        var result = msg.params;
+        if (result && result.content) {
+          var textItem = result.content.find(function(c) { return c.type === "text"; });
+          if (textItem && textItem.text) {
+            try { renderMetrics(JSON.parse(textItem.text)); } catch(e) {}
+          }
+        }
+      }
+    });
 
     function renderMetrics(data) {
-      document.getElementById("memory").textContent = data.memory_mb + " MB";
-      document.getElementById("processes").textContent = data.processes;
+      document.getElementById("memory").textContent = (data.memory_mb || "—") + " MB";
+      document.getElementById("processes").textContent = data.processes || "—";
       document.getElementById("uptime").textContent = formatUptime(data.uptime_sec);
       document.getElementById("timestamp").textContent = data.timestamp
         ? new Date(data.timestamp).toLocaleTimeString()
@@ -60,53 +104,37 @@
 
     function formatUptime(seconds) {
       if (!seconds) return "—";
-      const h = Math.floor(seconds / 3600);
-      const m = Math.floor((seconds % 3600) / 60);
-      const s = seconds % 60;
+      var h = Math.floor(seconds / 3600);
+      var m = Math.floor((seconds % 3600) / 60);
+      var s = seconds % 60;
       if (h > 0) return h + "h " + m + "m";
       if (m > 0) return m + "m " + s + "s";
       return s + "s";
     }
 
-    try {
-      const app = new App({ name: "Server Health", version: "1.0.0" });
-
-      app.ontoolresult = (result) => {
-        const textItem = result.content?.find(c => c.type === "text");
-        if (textItem?.text) {
-          try {
-            renderMetrics(JSON.parse(textItem.text));
-          } catch (e) {
-            document.getElementById("status").textContent = "Parse error";
-          }
-        }
-      };
-
-      document.getElementById("refresh").addEventListener("click", async () => {
-        document.getElementById("status").textContent = "Refreshing...";
-        try {
-          const result = await app.callServerTool({
-            name: "get_live_metrics",
-            arguments: {}
-          });
-          const textItem = result.content?.find(c => c.type === "text");
-          if (textItem?.text) {
+    document.getElementById("refresh").addEventListener("click", function() {
+      document.getElementById("status").textContent = "Refreshing...";
+      sendToHost("tools/call", {
+        name: "get_live_metrics",
+        arguments: {}
+      }).then(function(result) {
+        if (result && result.content) {
+          var textItem = result.content.find(function(c) { return c.type === "text"; });
+          if (textItem && textItem.text) {
             renderMetrics(JSON.parse(textItem.text));
           }
-          await app.updateModelContext({
-            content: [{ type: "text", text: "User refreshed server health metrics" }]
-          });
-        } catch (e) {
-          document.getElementById("status").textContent = "Refresh failed: " + e.message;
         }
+      }).catch(function(err) {
+        document.getElementById("status").textContent = "Error: " + err.message;
       });
+    });
 
-      await app.connect();
-      document.getElementById("status").textContent = "Connected — waiting for tool result...";
-    } catch (e) {
-      document.getElementById("status").textContent = "SDK not available — showing static data";
-      renderMetrics({ memory_mb: 50, processes: 441, uptime_sec: 28, timestamp: new Date().toISOString() });
-    }
+    // Signal ready to host
+    window.parent.postMessage({
+      jsonrpc: "2.0",
+      method: "ready",
+      params: {}
+    }, "*");
   </script>
 </body>
 </html>
