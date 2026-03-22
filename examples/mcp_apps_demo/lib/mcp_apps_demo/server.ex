@@ -34,6 +34,7 @@ defmodule McpAppsDemo.Server do
       json(%{
         memory_mb: div(:erlang.memory(:total), 1_048_576),
         processes: :erlang.system_info(:process_count),
+        uptime_sec: div(elem(:erlang.statistics(:wall_clock), 0), 1000),
         timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
       })
     end)
