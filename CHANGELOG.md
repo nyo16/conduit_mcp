@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-03-21
+
+### Added
+
+- **MCP spec 2025-11-25 support** with backward compatibility for 2025-06-18
+  - Protocol version negotiation in `initialize` (supports both versions)
+  - `MCP-Protocol-Version` response header on all POST responses
+  - `MCP-Session-Id` header with session creation and validation
+- **Pluggable session store** (`ConduitMcp.Session.Store` behaviour)
+  - Default ETS store included (`ConduitMcp.Session.EtsStore`)
+  - Documentation for Redis, PostgreSQL, and Mnesia stores
+- **Cursor-based pagination** via arity-2 list callbacks (backward compatible with arity-1)
+- **Tool annotations DSL** (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`)
+- **`_meta` field passthrough** for `progressToken` support
+- **`listChanged` capability declarations**
+- **Origin header validation** for DNS rebinding prevention
+- **New handler methods**: `completion/complete`, `logging/setLevel`, `resources/subscribe`, `resources/unsubscribe`
+- **`audio/2` helper macro** for audio content type
+- **`ConduitMcp.Tasks`** module for long-running operation state machine
+- **`ConduitMcp.Client`** module for server-to-client requests (sampling, elicitation, roots)
+- **OAuth 2.1 authentication** (`ConduitMcp.Plugs.OAuth`) with JWT validation
+  - JWKS key provider with HTTP fetching (`ConduitMcp.OAuth.KeyProvider.JWKS`)
+  - Static key provider (`ConduitMcp.OAuth.KeyProvider.Static`)
+  - Resource metadata endpoint (`ConduitMcp.OAuth.ResourceMetadata`)
+  - Tool-level scope enforcement
+- **New error code** `-32002` (resource not found)
+- **CI/CD pipeline** with compile, format, credo, test, dialyzer, and hex publish jobs
+- **Configurable initialize response** (`server_name`, `server_version` via `conn.private`)
+
+### Improved
+
+- **Test coverage** expanded to 405 tests (up from 309)
+- **Dependencies updated**: bandit 1.10.3, credo 1.7.17, ex_doc 0.40.1, telemetry 1.4.1
+- **Handler refactored** to reduce cyclomatic complexity with extracted helper functions
+
+### Fixed
+
+- Version mismatch where handler returned hardcoded version instead of app version
+- Hardcoded protocol version in transport (now uses `Protocol.protocol_version/0`)
+- Flaky telemetry tests caused by async race conditions
+- Flaky StreamableHTTP tests caused by shared ETS state in async mode
+- Elixir 1.20 compilation warnings
+
 ## [0.6.5] - 2026-02-07
 
 ### Added
@@ -196,6 +239,7 @@ None - This release is fully backward compatible.
 - Basic authentication
 - Phoenix integration example
 
+[0.7.0]: https://github.com/nyo16/conduit_mcp/compare/v0.6.5...v0.7.0
 [0.6.5]: https://github.com/nyo16/conduit_mcp/compare/v0.5.0...v0.6.5
 [0.4.6]: https://github.com/nyo16/conduit_mcp/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/nyo16/conduit_mcp/compare/v0.4.0...v0.4.5

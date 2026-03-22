@@ -90,7 +90,7 @@ defmodule ConduitMcp.MixProject do
         "GitHub" => @source_url,
         "MCP Specification" => "https://modelcontextprotocol.io/specification/"
       },
-      files: ~w(lib .formatter.exs mix.exs README.md LICENSE)
+      files: ~w(lib .formatter.exs mix.exs README.md CHANGELOG.md LICENSE)
     ]
   end
 
