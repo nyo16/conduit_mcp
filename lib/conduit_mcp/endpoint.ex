@@ -140,7 +140,11 @@ defmodule ConduitMcp.Endpoint do
       unquote(tool_clauses)
 
       def handle_call_tool(_conn, tool_name, _params) do
-        {:error, %{"code" => -32601, "message" => "Tool not found: #{tool_name}"}}
+        {:error,
+         %{
+           "code" => ConduitMcp.Errors.method_not_found(),
+           "message" => "Tool not found: #{tool_name}"
+         }}
       end
 
       # --- Resource callbacks ---
@@ -154,7 +158,11 @@ defmodule ConduitMcp.Endpoint do
       # Only generate catch-all if no resources defined their own handler
       if unquote(is_nil(resource_clause)) do
         def handle_read_resource(_conn, uri) do
-          {:error, %{"code" => -32002, "message" => "Resource not found: #{uri}"}}
+          {:error,
+           %{
+             "code" => ConduitMcp.Errors.resource_not_found(),
+             "message" => "Resource not found: #{uri}"
+           }}
         end
       end
 
@@ -167,7 +175,11 @@ defmodule ConduitMcp.Endpoint do
       unquote(prompt_clauses)
 
       def handle_get_prompt(_conn, prompt_name, _args) do
-        {:error, %{"code" => -32601, "message" => "Prompt not found: #{prompt_name}"}}
+        {:error,
+         %{
+           "code" => ConduitMcp.Errors.method_not_found(),
+           "message" => "Prompt not found: #{prompt_name}"
+         }}
       end
 
       # --- Validation schema lookups ---
@@ -305,7 +317,11 @@ defmodule ConduitMcp.Endpoint do
               nil
           end
         end) ||
-          {:error, %{"code" => -32002, "message" => "Resource not found: #{uri}"}}
+          {:error,
+           %{
+             "code" => ConduitMcp.Errors.resource_not_found(),
+             "message" => "Resource not found: #{uri}"
+           }}
       end
     end
   end

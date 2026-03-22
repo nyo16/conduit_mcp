@@ -141,7 +141,8 @@ defmodule ConduitMcp.MixProject do
         ],
         "Protocol & Handler": [
           ConduitMcp.Protocol,
-          ConduitMcp.Handler
+          ConduitMcp.Handler,
+          ConduitMcp.Errors
         ],
         Transport: [
           ConduitMcp.Transport.StreamableHTTP,

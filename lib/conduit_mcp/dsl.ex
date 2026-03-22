@@ -769,7 +769,11 @@ defmodule ConduitMcp.DSL do
       # Catch-all for unknown tools
       if unquote(length(tools)) > 0 do
         def handle_call_tool(_conn, tool_name, _params) do
-          {:error, %{"code" => -32601, "message" => "Tool not found: #{tool_name}"}}
+          {:error,
+           %{
+             "code" => ConduitMcp.Errors.method_not_found(),
+             "message" => "Tool not found: #{tool_name}"
+           }}
         end
       end
 
@@ -784,7 +788,11 @@ defmodule ConduitMcp.DSL do
       # Catch-all for unknown prompts
       if unquote(length(prompts)) > 0 do
         def handle_get_prompt(_conn, prompt_name, _args) do
-          {:error, %{"code" => -32601, "message" => "Prompt not found: #{prompt_name}"}}
+          {:error,
+           %{
+             "code" => ConduitMcp.Errors.method_not_found(),
+             "message" => "Prompt not found: #{prompt_name}"
+           }}
         end
       end
 
@@ -799,7 +807,11 @@ defmodule ConduitMcp.DSL do
       # Catch-all for unknown resources (only if no resources with handlers were generated)
       if unquote(length(resources)) > 0 and unquote(Enum.empty?(resource_clauses)) do
         def handle_read_resource(_conn, uri) do
-          {:error, %{"code" => -32601, "message" => "Resource not found: #{uri}"}}
+          {:error,
+           %{
+             "code" => ConduitMcp.Errors.method_not_found(),
+             "message" => "Resource not found: #{uri}"
+           }}
         end
       end
     end
@@ -917,7 +929,11 @@ defmodule ConduitMcp.DSL do
             case result do
               nil ->
                 # No match found, fall through to catch-all
-                {:error, %{"code" => -32601, "message" => "Resource not found: #{uri}"}}
+                {:error,
+                 %{
+                   "code" => ConduitMcp.Errors.method_not_found(),
+                   "message" => "Resource not found: #{uri}"
+                 }}
 
               result ->
                 result

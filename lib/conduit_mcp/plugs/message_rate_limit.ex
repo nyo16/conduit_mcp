@@ -191,7 +191,10 @@ defmodule ConduitMcp.Plugs.MessageRateLimit do
           Jason.encode!(%{
             "jsonrpc" => "2.0",
             "id" => nil,
-            "error" => %{"code" => -32000, "message" => "Message rate limit exceeded"}
+            "error" => %{
+              "code" => ConduitMcp.Errors.server_error(),
+              "message" => "Message rate limit exceeded"
+            }
           })
         )
         |> halt()
