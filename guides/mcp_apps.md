@@ -453,9 +453,9 @@ MCP Apps is supported by:
 
 See the [client matrix](https://modelcontextprotocol.io/extensions/client-matrix) for the full list.
 
-## Testing with VS Code
+## Testing Locally
 
-The simplest way to test locally:
+### VS Code (Copilot Chat)
 
 1. Start your server: `mix run --no-halt`
 2. Add to VS Code settings (JSON):
@@ -471,6 +471,47 @@ The simplest way to test locally:
 }
 ```
 3. Open Copilot Chat and ask to use your tool
+
+### Claude (claude.ai)
+
+claude.ai requires an HTTPS URL, so you need a tunnel for local development:
+
+1. Start your server: `mix run --no-halt`
+2. Start a tunnel (e.g., ngrok or cloudflared):
+```bash
+# Option A
+ngrok http 4001
+
+# Option B (no account needed)
+cloudflared tunnel --url http://localhost:4001
+```
+3. In claude.ai, go to **Settings → Connectors → Add custom connector**
+4. Paste the tunnel HTTPS URL
+5. **Important:** In the connector settings, set **allowed domains to all** (or add your tunnel domain). Without this, the iframe will load but appear blank because the host blocks the content.
+
+### Claude Desktop
+
+Claude Desktop uses stdio, not HTTP. Use `mcp-remote` as a bridge:
+
+1. Start your server: `mix run --no-halt`
+2. Create a wrapper script (needed for asdf/nvm users whose `node` isn't in the system PATH):
+```bash
+#!/bin/bash
+export PATH="/path/to/your/node/bin:$PATH"
+exec npx -y mcp-remote http://localhost:4001/
+```
+3. Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "/path/to/wrapper.sh",
+      "args": []
+    }
+  }
+}
+```
+4. Restart Claude Desktop
 
 ## Security
 
