@@ -411,13 +411,17 @@ defmodule ConduitMcp.Handler do
     end
   end
 
-  defp build_capabilities(_server_module) do
-    # All MCP servers (both DSL and manual mode) define all 6 callbacks,
-    # so we always advertise all capabilities.
-    %{
-      "tools" => %{"listChanged" => false},
-      "resources" => %{"listChanged" => false},
-      "prompts" => %{"listChanged" => false}
-    }
+  defp build_capabilities(server_module) do
+    if function_exported?(server_module, :__capabilities__, 0) do
+      server_module.__capabilities__()
+    else
+      # DSL and manual mode servers always define all 6 callbacks,
+      # so we advertise all capabilities by default.
+      %{
+        "tools" => %{"listChanged" => false},
+        "resources" => %{"listChanged" => false},
+        "prompts" => %{"listChanged" => false}
+      }
+    end
   end
 end

@@ -217,14 +217,27 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
 
   def call(conn, opts) do
     server_module = Keyword.get(opts, :server_module)
+
+    # Extract endpoint config as defaults (explicit transport opts always win)
+    endpoint_config =
+      if server_module && function_exported?(server_module, :__endpoint_config__, 0),
+        do: server_module.__endpoint_config__(),
+        else: []
+
     cors_origin = Keyword.get(opts, :cors_origin, "*")
     cors_methods = Keyword.get(opts, :cors_methods, "GET, POST, OPTIONS")
     cors_headers = Keyword.get(opts, :cors_headers, "content-type, authorization")
-    auth_config = Keyword.get(opts, :auth)
-    rate_limit_config = Keyword.get(opts, :rate_limit)
-    message_rate_limit_config = Keyword.get(opts, :message_rate_limit)
-    server_name = Keyword.get(opts, :server_name)
-    server_version = Keyword.get(opts, :server_version)
+    auth_config = Keyword.get(opts, :auth) || Keyword.get(endpoint_config, :auth)
+
+    rate_limit_config =
+      Keyword.get(opts, :rate_limit) || Keyword.get(endpoint_config, :rate_limit)
+
+    message_rate_limit_config =
+      Keyword.get(opts, :message_rate_limit) ||
+        Keyword.get(endpoint_config, :message_rate_limit)
+
+    server_name = Keyword.get(opts, :server_name) || Keyword.get(endpoint_config, :name)
+    server_version = Keyword.get(opts, :server_version) || Keyword.get(endpoint_config, :version)
     session_config = Keyword.get(opts, :session)
     allowed_origins = Keyword.get(opts, :allowed_origins)
 

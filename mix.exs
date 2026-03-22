@@ -102,12 +102,29 @@ defmodule ConduitMcp.MixProject do
       extras: [
         "README.md",
         "CHANGELOG.md",
+        "guides/choosing_a_mode.md",
+        "guides/endpoint_mode.md",
+        "guides/dsl_mode.md",
+        "guides/manual_mode.md",
+        "guides/authentication.md",
+        "guides/rate_limiting.md",
         "guides/multi_node_sessions.md",
         "guides/oban_tasks.md"
       ],
       groups_for_extras: [
         Changelog: ["CHANGELOG.md"],
-        Guides: Path.wildcard("guides/*.md")
+        "Getting Started": [
+          "guides/choosing_a_mode.md",
+          "guides/endpoint_mode.md",
+          "guides/dsl_mode.md",
+          "guides/manual_mode.md"
+        ],
+        Features: [
+          "guides/authentication.md",
+          "guides/rate_limiting.md",
+          "guides/multi_node_sessions.md",
+          "guides/oban_tasks.md"
+        ]
       ],
       groups_for_modules: [
         Core: [
@@ -116,6 +133,11 @@ defmodule ConduitMcp.MixProject do
           ConduitMcp.DSL,
           ConduitMcp.DSL.Helpers,
           ConduitMcp.DSL.SchemaBuilder
+        ],
+        "Endpoint Mode": [
+          ConduitMcp.Endpoint,
+          ConduitMcp.Component,
+          ConduitMcp.Component.Schema
         ],
         "Protocol & Handler": [
           ConduitMcp.Protocol,
