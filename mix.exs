@@ -17,7 +17,8 @@ defmodule ConduitMcp.MixProject do
       name: "ConduitMCP",
       source_url: @source_url,
       test_coverage: [tool: ExCoveralls],
-      elixirc_paths: elixirc_paths(Mix.env())
+      elixirc_paths: elixirc_paths(Mix.env()),
+      dialyzer: [plt_add_apps: [:mix]]
     ]
   end
 
