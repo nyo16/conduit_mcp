@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Unit Converter</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,-apple-system,sans-serif;background:#fff;color:#1e293b;padding:16px}
+h1{font-size:1.1rem;font-weight:600;margin-bottom:12px;color:#475569}
+.tabs{display:flex;gap:4px;margin-bottom:16px}
+.tab{padding:6px 14px;border-radius:6px;border:1px solid #e2e8f0;background:#f8fafc;font-size:.8rem;cursor:pointer;color:#475569}
+.tab.active{background:#3b82f6;color:#fff;border-color:#3b82f6}
+.row{display:flex;gap:8px;align-items:center;margin-bottom:12px}
+input[type=number]{flex:1;padding:10px;border:1px solid #e2e8f0;border-radius:8px;font-size:1.1rem;font-weight:600;outline:none;font-family:inherit}
+input:focus{border-color:#3b82f6}
+select{padding:10px;border:1px solid #e2e8f0;border-radius:8px;font-size:.85rem;background:#f8fafc;outline:none;cursor:pointer;min-width:120px}
+.swap{background:none;border:none;font-size:1.2rem;cursor:pointer;padding:4px 8px;border-radius:4px;color:#3b82f6}
+.swap:hover{background:#eff6ff}
+.result{background:#f0fdf4;border-radius:10px;padding:16px;border:1px solid #bbf7d0;text-align:center}
+.result .val{font-size:2rem;font-weight:700;color:#059669}
+.result .label{font-size:.8rem;color:#64748b;margin-top:4px}
+.s{text-align:center;margin-top:10px;font-size:.7rem;color:#94a3b8}
+</style>
+</head>
+<body>
+<h1>Unit Converter</h1>
+<div class="tabs" id="tabs"></div>
+<div class="row">
+<input type="number" id="val" value="1" step="any">
+<select id="from"></select>
+<button class="swap" id="swap" title="Swap units">&#8644;</button>
+<select id="to"></select>
+</div>
+<div class="result">
+<div class="val" id="out">—</div>
+<div class="label" id="lbl"></div>
+</div>
+<div class="s" id="st">Connecting...</div>
+<script>
+(function(){
+  var reqId=0,pending={},notifH={},reqH={};
+  function send(m){window.parent.postMessage(m,"*")}
+  function request(method,params){return new Promise(function(res,rej){var id=++reqId;pending[id]={resolve:res,reject:rej};send({jsonrpc:"2.0",id:id,method:method,params:params||{}})})}
+  function notification(m,p){send({jsonrpc:"2.0",method:m,params:p||{}})}
+  window.addEventListener("message",function(ev){
+    var m=ev.data;if(!m||m.jsonrpc!=="2.0")return;
+    if(m.id!=null&&pending[m.id]){var p=pending[m.id];delete pending[m.id];m.error?p.reject(new Error(m.error.message)):p.resolve(m.result);return}
+    if(m.id!=null&&m.method){var h=reqH[m.method];send({jsonrpc:"2.0",id:m.id,result:h?h(m.params):{}});return}
+    if(m.method){var nh=notifH[m.method];if(nh)nh(m.params)}
+  });
+  reqH["ping"]=function(){return{}};
+
+  var categories={},currentCat=null;
+
+  function init(data){
+    categories=data.categories||{};
+    var tabs=document.getElementById("tabs");
+    tabs.textContent="";
+    var cats=Object.keys(categories);
+    cats.forEach(function(cat,i){
+      var btn=document.createElement("button");
+      btn.className="tab"+(i===0?" active":"");
+      btn.textContent=cat.charAt(0).toUpperCase()+cat.slice(1);
+      btn.addEventListener("click",function(){selectCat(cat)});
+      tabs.appendChild(btn);
+    });
+    if(cats.length>0)selectCat(cats[0]);
+    document.getElementById("st").textContent="";
+  }
+
+  function selectCat(cat){
+    currentCat=cat;
+    document.querySelectorAll(".tab").forEach(function(t){
+      t.className="tab"+(t.textContent.toLowerCase()===cat?" active":"");
+    });
+    var info=categories[cat];
+    var units=info.units||[];
+    populateSelect("from",units,0);
+    populateSelect("to",units,Math.min(1,units.length-1));
+    convert();
+  }
+
+  function populateSelect(id,units,defaultIdx){
+    var sel=document.getElementById(id);
+    sel.textContent="";
+    units.forEach(function(u,i){
+      var opt=document.createElement("option");
+      opt.value=u;opt.textContent=u.charAt(0).toUpperCase()+u.slice(1);
+      if(i===defaultIdx)opt.selected=true;
+      sel.appendChild(opt);
+    });
+  }
+
+  function convert(){
+    if(!currentCat)return;
+    var info=categories[currentCat];
+    var val=parseFloat(document.getElementById("val").value)||0;
+    var from=document.getElementById("from").value;
+    var to=document.getElementById("to").value;
+    var result;
+
+    if(info.rates==="special"){
+      // Temperature conversion
+      var celsius;
+      if(from==="celsius")celsius=val;
+      else if(from==="fahrenheit")celsius=(val-32)*5/9;
+      else celsius=val-273.15;
+
+      if(to==="celsius")result=celsius;
+      else if(to==="fahrenheit")result=celsius*9/5+32;
+      else result=celsius+273.15;
+    } else {
+      var rates=info.rates;
+      var fromRate=rates[from]||1;
+      var toRate=rates[to]||1;
+      var baseVal=val/fromRate;
+      result=baseVal*toRate;
+    }
+
+    var display=result%1===0?result.toString():result.toFixed(4).replace(/0+$/,"").replace(/\.$/,"");
+    document.getElementById("out").textContent=display;
+    document.getElementById("lbl").textContent=val+" "+from+" = "+display+" "+to;
+  }
+
+  document.getElementById("val").addEventListener("input",convert);
+  document.getElementById("from").addEventListener("change",convert);
+  document.getElementById("to").addEventListener("change",convert);
+  document.getElementById("swap").addEventListener("click",function(){
+    var f=document.getElementById("from"),t=document.getElementById("to");
+    var tmp=f.value;f.value=t.value;t.value=tmp;convert();
+  });
+
+  function parseContent(p){if(!p)return null;var c=p.content||(p.result&&p.result.content);if(!c)return null;for(var i=0;i<c.length;i++)if(c[i].type==="text"&&c[i].text)try{return JSON.parse(c[i].text)}catch(e){};return null}
+
+  notifH["ui/notifications/tool-result"]=function(p){var d=parseContent(p);if(d&&d.categories)init(d)};
+
+  request("ui/initialize",{appInfo:{name:"Unit Converter",version:"1.0.0"},appCapabilities:{},protocolVersion:"2026-01-26"}).then(function(){notification("ui/notifications/initialized")});
+})();
+</script>
+</body>
+</html>

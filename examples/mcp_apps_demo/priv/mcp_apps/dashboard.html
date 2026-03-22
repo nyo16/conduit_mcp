@@ -30,7 +30,10 @@ button:disabled{background:#94a3b8;cursor:default}
 <div class="c u"><div class="l">Uptime</div><div class="v" id="up">—</div></div>
 <div class="c t"><div class="l">Updated</div><div class="v" id="ts">—</div></div>
 </div>
-<button id="btn">Refresh Metrics</button>
+<div style="display:flex;gap:8px">
+<button id="btn" style="flex:1">Refresh</button>
+<button id="auto" style="flex:1;background:#059669">Auto: OFF</button>
+</div>
 <div class="s" id="st">Connecting...</div>
 <script>
 (function(){
@@ -149,6 +152,27 @@ button:disabled{background:#94a3b8;cursor:default}
         btn.disabled = false;
       });
   });
+
+  // Auto-refresh toggle
+  var autoTimer = null;
+  var autoBtn = document.getElementById("auto");
+  autoBtn.addEventListener("click", function() {
+    if (autoTimer) {
+      clearInterval(autoTimer); autoTimer = null;
+      autoBtn.textContent = "Auto: OFF"; autoBtn.style.background = "#059669";
+    } else {
+      autoTimer = setInterval(doRefresh, 3000);
+      autoBtn.textContent = "Auto: ON"; autoBtn.style.background = "#dc2626";
+    }
+  });
+
+  function doRefresh() {
+    return request("tools/call", { name: "get_live_metrics", arguments: {} })
+      .then(function(result) {
+        var data = parseToolContent(result);
+        if (data) render(data);
+      });
+  }
 
   // --- MCP Apps Handshake ---
   async function connect() {

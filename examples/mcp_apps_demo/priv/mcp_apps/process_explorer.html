@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Process Explorer</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,-apple-system,sans-serif;background:#fff;color:#1e293b;padding:16px}
+h1{font-size:1.1rem;font-weight:600;margin-bottom:4px;color:#475569}
+.sub{font-size:.75rem;color:#94a3b8;margin-bottom:12px}
+table{width:100%;border-collapse:collapse;font-size:.8rem}
+th{text-align:left;padding:8px 6px;background:#f1f5f9;color:#64748b;font-weight:600;font-size:.7rem;text-transform:uppercase;letter-spacing:.03em;cursor:pointer;user-select:none;border-bottom:2px solid #e2e8f0}
+th:hover{background:#e2e8f0}
+th.sorted{color:#2563eb}
+td{padding:6px;border-bottom:1px solid #f1f5f9}
+tr:hover{background:#f8fafc}
+.bar{display:flex;gap:8px;margin-top:10px;align-items:center}
+button{background:#3b82f6;color:#fff;border:none;border-radius:6px;padding:8px 16px;font-size:.8rem;cursor:pointer;flex:1}
+button:hover{background:#2563eb}
+button:disabled{background:#94a3b8;cursor:default}
+button.auto{background:#059669}
+button.auto.on{background:#dc2626}
+.s{text-align:center;margin-top:6px;font-size:.7rem;color:#94a3b8}
+</style>
+</head>
+<body>
+<h1>Process Explorer</h1>
+<div class="sub" id="total">Loading...</div>
+<table>
+<thead><tr>
+<th data-col="name" class="sorted">Name</th>
+<th data-col="pid">PID</th>
+<th data-col="memory_kb">Memory</th>
+<th data-col="msg_queue">Queue</th>
+<th data-col="current_fn">Function</th>
+</tr></thead>
+<tbody id="tbody"></tbody>
+</table>
+<div class="bar">
+<button id="btn">Refresh</button>
+<button id="auto" class="auto">Auto: OFF</button>
+</div>
+<div class="s" id="st">Connecting...</div>
+<script>
+(function(){
+  var reqId=0,pending={},notifH={},reqH={};
+  function send(m){window.parent.postMessage(m,"*")}
+  function request(method,params){return new Promise(function(res,rej){var id=++reqId;pending[id]={resolve:res,reject:rej};send({jsonrpc:"2.0",id:id,method:method,params:params||{}})})}
+  function notification(m,p){send({jsonrpc:"2.0",method:m,params:p||{}})}
+  window.addEventListener("message",function(ev){
+    var m=ev.data;if(!m||m.jsonrpc!=="2.0")return;
+    if(m.id!=null&&pending[m.id]){var p=pending[m.id];delete pending[m.id];m.error?p.reject(new Error(m.error.message)):p.resolve(m.result);return}
+    if(m.id!=null&&m.method){var h=reqH[m.method];send({jsonrpc:"2.0",id:m.id,result:h?h(m.params):{}});return}
+    if(m.method){var nh=notifH[m.method];if(nh)nh(m.params)}
+  });
+  reqH["ping"]=function(){return{}};
+
+  var procs=[],sortCol="memory_kb",sortAsc=false;
+
+  function render(data){
+    procs=data.processes||[];
+    document.getElementById("total").textContent="Showing "+procs.length+" of "+data.total+" processes";
+    sortAndDraw();
+  }
+
+  function sortAndDraw(){
+    procs.sort(function(a,b){
+      var va=a[sortCol]||"",vb=b[sortCol]||"";
+      if(typeof va==="number")return sortAsc?va-vb:vb-va;
+      return sortAsc?String(va).localeCompare(String(vb)):String(vb).localeCompare(String(va));
+    });
+    var tb=document.getElementById("tbody");
+    tb.textContent="";
+    procs.forEach(function(p){
+      var tr=document.createElement("tr");
+      var td1=document.createElement("td");td1.textContent=p.name||"—";td1.style.color="#7c3aed";td1.style.fontWeight="500";
+      var td2=document.createElement("td");td2.textContent=p.pid;td2.style.color="#64748b";td2.style.fontFamily="monospace";td2.style.fontSize=".75rem";
+      var td3=document.createElement("td");td3.textContent=p.memory_kb+" KB";td3.style.fontWeight="600";td3.style.color="#059669";
+      var td4=document.createElement("td");td4.textContent=p.msg_queue;td4.style.fontWeight="600";if(p.msg_queue>100)td4.style.color="#dc2626";else if(p.msg_queue>10)td4.style.color="#d97706";
+      var td5=document.createElement("td");td5.textContent=p.current_fn||"—";td5.style.color="#64748b";td5.style.fontFamily="monospace";td5.style.fontSize=".7rem";td5.style.maxWidth="200px";td5.style.overflow="hidden";td5.style.textOverflow="ellipsis";td5.style.whiteSpace="nowrap";td5.title=p.current_fn||"";
+      tr.appendChild(td1);tr.appendChild(td2);tr.appendChild(td3);tr.appendChild(td4);tr.appendChild(td5);
+      tb.appendChild(tr);
+    });
+    document.getElementById("st").textContent="Live";
+  }
+
+  document.querySelectorAll("th").forEach(function(th){
+    th.addEventListener("click",function(){
+      var col=th.getAttribute("data-col");
+      if(sortCol===col)sortAsc=!sortAsc;else{sortCol=col;sortAsc=false}
+      document.querySelectorAll("th").forEach(function(t){t.className=""});
+      th.className="sorted";
+      sortAndDraw();
+    });
+  });
+
+  function parseContent(p){if(!p)return null;var c=p.content||(p.result&&p.result.content);if(!c)return null;for(var i=0;i<c.length;i++)if(c[i].type==="text"&&c[i].text)try{return JSON.parse(c[i].text)}catch(e){};return null}
+
+  notifH["ui/notifications/tool-result"]=function(p){var d=parseContent(p);if(d)render(d)};
+
+  function doRefresh(){
+    return request("tools/call",{name:"process_explorer",arguments:{}}).then(function(r){var d=parseContent(r);if(d)render(d)});
+  }
+
+  document.getElementById("btn").addEventListener("click",function(){
+    this.disabled=true;var self=this;document.getElementById("st").textContent="Refreshing...";
+    doRefresh().then(function(){self.disabled=false}).catch(function(){self.disabled=false});
+  });
+
+  // Auto-refresh every 3 seconds
+  var autoTimer=null;
+  document.getElementById("auto").addEventListener("click",function(){
+    if(autoTimer){clearInterval(autoTimer);autoTimer=null;this.textContent="Auto: OFF";this.className="auto"}
+    else{autoTimer=setInterval(doRefresh,3000);this.textContent="Auto: ON";this.className="auto on"}
+  });
+
+  request("ui/initialize",{appInfo:{name:"Process Explorer",version:"1.0.0"},appCapabilities:{},protocolVersion:"2026-01-26"}).then(function(){notification("ui/notifications/initialized")});
+})();
+</script>
+</body>
+</html>

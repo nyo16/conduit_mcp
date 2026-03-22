@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Notepad</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:system-ui,-apple-system,sans-serif;background:#fff;color:#1e293b;padding:16px}
+h1{font-size:1.1rem;font-weight:600;margin-bottom:12px;color:#475569}
+.form{display:flex;flex-direction:column;gap:8px;margin-bottom:16px;padding:12px;background:#f8fafc;border-radius:10px;border:1px solid #e2e8f0}
+input,textarea{padding:8px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:.85rem;font-family:inherit;outline:none}
+input:focus,textarea:focus{border-color:#3b82f6}
+textarea{resize:vertical;min-height:60px}
+.form button{background:#3b82f6;color:#fff;border:none;border-radius:6px;padding:8px 16px;font-size:.85rem;cursor:pointer}
+.form button:hover{background:#2563eb}
+.form button:disabled{background:#94a3b8}
+.notes{display:flex;flex-direction:column;gap:8px}
+.note{background:#f8fafc;border-radius:10px;padding:12px;border:1px solid #e2e8f0;position:relative}
+.note h3{font-size:.9rem;font-weight:600;margin-bottom:4px;color:#1e293b}
+.note p{font-size:.8rem;color:#475569;line-height:1.4}
+.note .time{font-size:.7rem;color:#94a3b8;margin-top:4px}
+.note .del{position:absolute;top:8px;right:8px;background:none;border:none;color:#dc2626;cursor:pointer;font-size:.8rem;padding:4px 8px;border-radius:4px}
+.note .del:hover{background:#fef2f2}
+.empty{text-align:center;color:#94a3b8;font-size:.85rem;padding:24px 0}
+.s{text-align:center;margin-top:8px;font-size:.7rem;color:#94a3b8}
+.count{font-size:.75rem;color:#94a3b8;margin-bottom:8px}
+</style>
+</head>
+<body>
+<h1>Notepad</h1>
+<div class="form">
+<input type="text" id="title" placeholder="Note title...">
+<textarea id="content" placeholder="Write your note..."></textarea>
+<button id="save">Save Note</button>
+</div>
+<div class="count" id="count"></div>
+<div class="notes" id="notes"><div class="empty">No notes yet</div></div>
+<div class="s" id="st">Connecting...</div>
+<script>
+(function(){
+  var reqId=0,pending={},notifH={},reqH={};
+  function send(m){window.parent.postMessage(m,"*")}
+  function request(method,params){return new Promise(function(res,rej){var id=++reqId;pending[id]={resolve:res,reject:rej};send({jsonrpc:"2.0",id:id,method:method,params:params||{}})})}
+  function notification(m,p){send({jsonrpc:"2.0",method:m,params:p||{}})}
+  window.addEventListener("message",function(ev){
+    var m=ev.data;if(!m||m.jsonrpc!=="2.0")return;
+    if(m.id!=null&&pending[m.id]){var p=pending[m.id];delete pending[m.id];m.error?p.reject(new Error(m.error.message)):p.resolve(m.result);return}
+    if(m.id!=null&&m.method){var h=reqH[m.method];send({jsonrpc:"2.0",id:m.id,result:h?h(m.params):{}});return}
+    if(m.method){var nh=notifH[m.method];if(nh)nh(m.params)}
+  });
+  reqH["ping"]=function(){return{}};
+
+  var notes=[];
+
+  function render(data){
+    notes=data.notes||[];
+    var container=document.getElementById("notes");
+    container.textContent="";
+    document.getElementById("count").textContent=notes.length+" note"+(notes.length!==1?"s":"");
+    if(notes.length===0){
+      var empty=document.createElement("div");empty.className="empty";empty.textContent="No notes yet";
+      container.appendChild(empty);
+    } else {
+      notes.forEach(function(n){
+        var div=document.createElement("div");div.className="note";
+        var h3=document.createElement("h3");h3.textContent=n.title;
+        var p=document.createElement("p");p.textContent=n.content;
+        var time=document.createElement("div");time.className="time";time.textContent=new Date(n.created_at).toLocaleString();
+        var del=document.createElement("button");del.className="del";del.textContent="Delete";
+        del.addEventListener("click",function(){deleteNote(n.id)});
+        div.appendChild(h3);div.appendChild(p);div.appendChild(time);div.appendChild(del);
+        container.appendChild(div);
+      });
+    }
+    document.getElementById("st").textContent="";
+  }
+
+  function parseContent(p){if(!p)return null;var c=p.content||(p.result&&p.result.content);if(!c)return null;for(var i=0;i<c.length;i++)if(c[i].type==="text"&&c[i].text)try{return JSON.parse(c[i].text)}catch(e){};return null}
+
+  notifH["ui/notifications/tool-result"]=function(p){var d=parseContent(p);if(d&&d.notes)render(d)};
+
+  function refreshNotes(){
+    return request("tools/call",{name:"notepad",arguments:{}}).then(function(r){var d=parseContent(r);if(d)render(d)});
+  }
+
+  document.getElementById("save").addEventListener("click",function(){
+    var title=document.getElementById("title").value.trim();
+    var content=document.getElementById("content").value.trim();
+    if(!title||!content)return;
+    this.disabled=true;var self=this;
+    document.getElementById("st").textContent="Saving...";
+    request("tools/call",{name:"save_note",arguments:{title:title,content:content}})
+      .then(function(){
+        document.getElementById("title").value="";
+        document.getElementById("content").value="";
+        self.disabled=false;
+        return refreshNotes();
+      })
+      .catch(function(e){document.getElementById("st").textContent="Error: "+e.message;self.disabled=false});
+  });
+
+  function deleteNote(id){
+    document.getElementById("st").textContent="Deleting...";
+    request("tools/call",{name:"delete_note",arguments:{id:id}})
+      .then(function(){return refreshNotes()})
+      .catch(function(e){document.getElementById("st").textContent="Error: "+e.message});
+  }
+
+  request("ui/initialize",{appInfo:{name:"Notepad",version:"1.0.0"},appCapabilities:{},protocolVersion:"2026-01-26"}).then(function(){notification("ui/notifications/initialized")});
+})();
+</script>
+</body>
+</html>
