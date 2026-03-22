@@ -417,7 +417,7 @@ defmodule ConduitMcp.DSLTest do
       assert content["type"] == "text"
 
       # Verify it's valid JSON
-      assert {:ok, data} = Jason.decode(content["text"])
+      assert {:ok, data} = JSON.decode(content["text"])
       assert is_map(data)
     end
 
@@ -441,7 +441,7 @@ defmodule ConduitMcp.DSLTest do
       assert content["type"] == "text"
 
       # Verify parameter was extracted and used
-      {:ok, data} = Jason.decode(content["text"])
+      {:ok, data} = JSON.decode(content["text"])
       assert data["id"] == "123"
       assert data["name"] == "User 123"
       assert data["email"] == "user123@example.com"
@@ -454,7 +454,7 @@ defmodule ConduitMcp.DSLTest do
       {:ok, result} = DSLTestServer.handle_read_resource(conn, "user://456")
 
       content = hd(result["content"])
-      {:ok, data} = Jason.decode(content["text"])
+      {:ok, data} = JSON.decode(content["text"])
       assert data["id"] == "456"
       assert data["name"] == "User 456"
     end
@@ -484,7 +484,7 @@ defmodule ConduitMcp.DSLTest do
       {:ok, result} = DSLTestServer.handle_read_resource(conn, "user://{id}")
 
       content_text = hd(result["content"])["text"]
-      assert {:ok, _data} = Jason.decode(content_text)
+      assert {:ok, _data} = JSON.decode(content_text)
     end
   end
 
@@ -594,7 +594,7 @@ defmodule ConduitMcp.DSLTest do
 
       result = json(%{key: "value", count: 42})
       assert {:ok, %{"content" => [%{"type" => "text", "text" => json_str}]}} = result
-      assert {:ok, %{"key" => "value", "count" => 42}} = Jason.decode(json_str)
+      assert {:ok, %{"key" => "value", "count" => 42}} = JSON.decode(json_str)
     end
 
     test "raw/1 returns data directly without MCP wrapping" do

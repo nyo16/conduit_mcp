@@ -289,7 +289,7 @@ if Code.ensure_loaded?(Joken) do
       |> put_resp_content_type("application/json")
       |> send_resp(
         401,
-        Jason.encode!(%{"error" => "Unauthorized", "message" => message})
+        JSON.encode!(%{"error" => "Unauthorized", "message" => message})
       )
       |> halt()
     end
@@ -312,7 +312,7 @@ if Code.ensure_loaded?(Joken) do
       |> put_resp_content_type("application/json")
       |> send_resp(
         403,
-        Jason.encode!(%{
+        JSON.encode!(%{
           "error" => "Forbidden",
           "message" => "Insufficient scope. Required: #{Enum.join(required_scopes, ", ")}"
         })

@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.5] - 2026-03-22
+
+### Changed
+
+- **Removed Jason dependency** — replaced with Elixir 1.18+ built-in `JSON` module across all lib, test, and transport code (one fewer dependency)
+
+### Performance
+
+- **Pre-compiled URI template regex** — resource URI matching regex is now compiled once at compile time instead of rebuilt on every request (2.4x faster resource reads in DSL mode, 1.7x in Endpoint mode)
+- **Single-pass constraint validation** — merged 4 separate schema traversals (enum, numeric, string length, custom) into a single `Enum.reduce_while` pass (1.6x faster)
+- **Optimized marker removal** — replaced 11-iteration `Enum.reduce` with `Keyword.drop/2` (2.2x faster)
+- **Single config fetch** — validation reads `Application.get_env` once per call instead of 3 times (1.3x faster)
+- **O(1) schema lookup in type coercion** — replaced `Enum.find` per parameter with pre-built `Map` lookup
+
+### Added
+
+- **Benchee benchmark suite** (`mix bench`) with 6 benchmark files:
+  - `uri_template_bench` — dynamic regex vs pre-compiled vs String.split
+  - `validation_bench` — full pipeline, key conversion, constraint passes, marker removal, config lookups
+  - `handler_bench` — method dispatch, `function_exported?` overhead, telemetry cost
+  - `json_bench` — built-in JSON encode/decode at varying payload sizes
+  - `protocol_bench` — request validation and response construction baseline
+  - `full_request_bench` — DSL vs Manual vs Endpoint mode comparison
+- **`mix bench` task** — run all benchmarks, run specific (`mix bench validation`), or list (`mix bench --list`)
+- **HTML benchmark reports** generated in `bench/output/`
+
 ## [0.8.0] - 2026-03-22
 
 ### Added
@@ -263,6 +289,7 @@ None - This release is fully backward compatible.
 - Basic authentication
 - Phoenix integration example
 
+[0.8.5]: https://github.com/nyo16/conduit_mcp/compare/v0.8.0...v0.8.5
 [0.8.0]: https://github.com/nyo16/conduit_mcp/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/nyo16/conduit_mcp/compare/v0.6.5...v0.7.0
 [0.6.5]: https://github.com/nyo16/conduit_mcp/compare/v0.5.0...v0.6.5

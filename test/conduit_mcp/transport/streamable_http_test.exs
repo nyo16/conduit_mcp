@@ -71,7 +71,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
       assert conn.status == 200
       assert get_resp_header(conn, "content-type") == ["application/json; charset=utf-8"]
 
-      body = Jason.decode!(conn.resp_body)
+      body = JSON.decode!(conn.resp_body)
       assert body["transport"] == "streamable-http"
       assert body["version"] == "2025-11-25"
       assert body["status"] == "ready"
@@ -87,7 +87,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
       assert conn.status == 200
       assert get_resp_header(conn, "content-type") == ["application/json; charset=utf-8"]
 
-      body = Jason.decode!(conn.resp_body)
+      body = JSON.decode!(conn.resp_body)
       assert body["status"] == "ok"
     end
   end
@@ -95,7 +95,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
   describe "POST / with valid requests" do
     test "handles ping request" do
       request_body =
-        Jason.encode!(%{
+        JSON.encode!(%{
           "jsonrpc" => "2.0",
           "id" => 1,
           "method" => "ping"
@@ -109,7 +109,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
       assert conn.status == 200
       assert get_resp_header(conn, "content-type") == ["application/json; charset=utf-8"]
 
-      response = Jason.decode!(conn.resp_body)
+      response = JSON.decode!(conn.resp_body)
       assert response["jsonrpc"] == "2.0"
       assert response["id"] == 1
       assert response["result"] == %{}
@@ -117,7 +117,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
 
     test "handles initialize request" do
       request_body =
-        Jason.encode!(%{
+        JSON.encode!(%{
           "jsonrpc" => "2.0",
           "id" => 1,
           "method" => "initialize",
@@ -134,14 +134,14 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
         |> StreamableHTTP.call(@opts)
 
       assert conn.status == 200
-      response = Jason.decode!(conn.resp_body)
+      response = JSON.decode!(conn.resp_body)
       assert response["result"]["protocolVersion"] == "2025-06-18"
       assert response["result"]["serverInfo"]["name"] == "conduit-mcp"
     end
 
     test "handles tools/list request" do
       request_body =
-        Jason.encode!(%{
+        JSON.encode!(%{
           "jsonrpc" => "2.0",
           "id" => 2,
           "method" => "tools/list"
@@ -153,14 +153,14 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
         |> StreamableHTTP.call(@opts)
 
       assert conn.status == 200
-      response = Jason.decode!(conn.resp_body)
+      response = JSON.decode!(conn.resp_body)
       assert response["result"]["tools"]
       assert is_list(response["result"]["tools"])
     end
 
     test "handles tools/call request" do
       request_body =
-        Jason.encode!(%{
+        JSON.encode!(%{
           "jsonrpc" => "2.0",
           "id" => 3,
           "method" => "tools/call",
@@ -176,7 +176,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
         |> StreamableHTTP.call(@opts)
 
       assert conn.status == 200
-      response = Jason.decode!(conn.resp_body)
+      response = JSON.decode!(conn.resp_body)
       assert response["result"]["content"] == [%{"type" => "text", "text" => "Hello"}]
     end
   end
@@ -184,7 +184,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
   describe "POST / with notifications" do
     test "handles notifications with 204 status" do
       request_body =
-        Jason.encode!(%{
+        JSON.encode!(%{
           "jsonrpc" => "2.0",
           "method" => "notifications/initialized"
         })
@@ -218,7 +218,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
 
     test "returns error for unknown method" do
       request_body =
-        Jason.encode!(%{
+        JSON.encode!(%{
           "jsonrpc" => "2.0",
           "id" => 100,
           "method" => "unknown/method"
@@ -230,7 +230,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
         |> StreamableHTTP.call(@opts)
 
       assert conn.status == 200
-      response = Jason.decode!(conn.resp_body)
+      response = JSON.decode!(conn.resp_body)
       assert response["error"]["code"] == -32601
       assert String.contains?(response["error"]["message"], "Method not found")
     end
@@ -268,7 +268,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
     end
 
     defp initialize_request_body do
-      Jason.encode!(%{
+      JSON.encode!(%{
         "jsonrpc" => "2.0",
         "id" => 1,
         "method" => "initialize",
@@ -310,7 +310,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
 
       # Now send a request with the session ID
       ping_body =
-        Jason.encode!(%{
+        JSON.encode!(%{
           "jsonrpc" => "2.0",
           "id" => 2,
           "method" => "ping"
@@ -324,13 +324,13 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
 
       assert conn.status == 200
 
-      response = Jason.decode!(conn.resp_body)
+      response = JSON.decode!(conn.resp_body)
       assert response["result"] == %{}
     end
 
     test "request with invalid session ID gets 404" do
       ping_body =
-        Jason.encode!(%{
+        JSON.encode!(%{
           "jsonrpc" => "2.0",
           "id" => 1,
           "method" => "ping"
@@ -344,7 +344,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
 
       assert conn.status == 404
 
-      response = Jason.decode!(conn.resp_body)
+      response = JSON.decode!(conn.resp_body)
       assert response["error"]
       assert response["error"]["message"] =~ "Session not found"
     end
@@ -375,7 +375,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
         )
 
       ping_body =
-        Jason.encode!(%{
+        JSON.encode!(%{
           "jsonrpc" => "2.0",
           "id" => 1,
           "method" => "ping"
@@ -389,7 +389,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
 
       assert conn.status == 200
 
-      response = Jason.decode!(conn.resp_body)
+      response = JSON.decode!(conn.resp_body)
       assert response["result"] == %{}
     end
 
@@ -401,7 +401,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
         )
 
       ping_body =
-        Jason.encode!(%{
+        JSON.encode!(%{
           "jsonrpc" => "2.0",
           "id" => 1,
           "method" => "ping"
@@ -415,7 +415,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
 
       assert conn.status == 403
 
-      response = Jason.decode!(conn.resp_body)
+      response = JSON.decode!(conn.resp_body)
       assert response["error"] == "Origin not allowed"
     end
 
@@ -427,7 +427,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
         )
 
       ping_body =
-        Jason.encode!(%{
+        JSON.encode!(%{
           "jsonrpc" => "2.0",
           "id" => 1,
           "method" => "ping"
@@ -440,7 +440,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
 
       assert conn.status == 200
 
-      response = Jason.decode!(conn.resp_body)
+      response = JSON.decode!(conn.resp_body)
       assert response["result"] == %{}
     end
 
@@ -463,7 +463,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
   describe "MCP-Protocol-Version header" do
     test "POST responses include MCP-Protocol-Version header" do
       ping_body =
-        Jason.encode!(%{
+        JSON.encode!(%{
           "jsonrpc" => "2.0",
           "id" => 1,
           "method" => "ping"

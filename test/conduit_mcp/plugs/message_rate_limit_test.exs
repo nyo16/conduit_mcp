@@ -101,10 +101,10 @@ defmodule ConduitMcp.Plugs.MessageRateLimitTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "notifications/cancelled"})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "notifications/cancelled"})
         )
         |> put_req_header("content-type", "application/json")
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
+        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
 
       result = MessageRateLimit.call(conn, opts)
 
@@ -130,10 +130,10 @@ defmodule ConduitMcp.Plugs.MessageRateLimitTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "initialize", "id" => 1})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "initialize", "id" => 1})
         )
         |> put_req_header("content-type", "application/json")
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
+        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
 
       result1 = MessageRateLimit.call(conn1, opts)
       refute result1.halted
@@ -143,10 +143,10 @@ defmodule ConduitMcp.Plugs.MessageRateLimitTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "initialize", "id" => 2})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "initialize", "id" => 2})
         )
         |> put_req_header("content-type", "application/json")
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
+        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
 
       result2 = MessageRateLimit.call(conn2, opts)
       refute result2.halted
@@ -169,10 +169,10 @@ defmodule ConduitMcp.Plugs.MessageRateLimitTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
         )
         |> put_req_header("content-type", "application/json")
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
+        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
 
       result = MessageRateLimit.call(conn, opts)
 
@@ -199,10 +199,10 @@ defmodule ConduitMcp.Plugs.MessageRateLimitTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
         )
         |> put_req_header("content-type", "application/json")
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
+        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
 
       MessageRateLimit.call(conn, opts)
 
@@ -232,10 +232,10 @@ defmodule ConduitMcp.Plugs.MessageRateLimitTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
         )
         |> put_req_header("content-type", "application/json")
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
+        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
 
       result1 = MessageRateLimit.call(conn1, opts)
       refute result1.halted
@@ -245,17 +245,17 @@ defmodule ConduitMcp.Plugs.MessageRateLimitTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 2})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 2})
         )
         |> put_req_header("content-type", "application/json")
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
+        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
 
       result2 = MessageRateLimit.call(conn2, opts)
 
       assert result2.halted
       assert result2.status == 429
 
-      {:ok, body} = Jason.decode(result2.resp_body)
+      {:ok, body} = JSON.decode(result2.resp_body)
       assert body["jsonrpc"] == "2.0"
       assert body["id"] == nil
       assert body["error"]["code"] == -32000
@@ -278,10 +278,10 @@ defmodule ConduitMcp.Plugs.MessageRateLimitTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
         )
         |> put_req_header("content-type", "application/json")
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
+        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
 
       MessageRateLimit.call(conn1, opts)
 
@@ -290,10 +290,10 @@ defmodule ConduitMcp.Plugs.MessageRateLimitTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 2})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 2})
         )
         |> put_req_header("content-type", "application/json")
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
+        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
 
       result = MessageRateLimit.call(conn2, opts)
 
@@ -323,10 +323,10 @@ defmodule ConduitMcp.Plugs.MessageRateLimitTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
         )
         |> put_req_header("content-type", "application/json")
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
+        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
 
       MessageRateLimit.call(conn1, opts)
 
@@ -339,10 +339,10 @@ defmodule ConduitMcp.Plugs.MessageRateLimitTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 2})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 2})
         )
         |> put_req_header("content-type", "application/json")
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
+        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
 
       MessageRateLimit.call(conn2, opts)
 
@@ -380,10 +380,10 @@ defmodule ConduitMcp.Plugs.MessageRateLimitTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => id})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => id})
         )
         |> put_req_header("content-type", "application/json")
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
+        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
       end
 
       # User 1 exhausts their limit
@@ -435,10 +435,10 @@ defmodule ConduitMcp.Plugs.MessageRateLimitTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
         )
         |> put_req_header("content-type", "application/json")
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
+        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
         |> assign(:current_user, %{id: key})
 
       # Should use "msg:user:<key>" as the key - just verify it doesn't crash
@@ -460,10 +460,10 @@ defmodule ConduitMcp.Plugs.MessageRateLimitTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
         )
         |> put_req_header("content-type", "application/json")
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
+        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
         |> assign(:current_user, user_string)
 
       result = MessageRateLimit.call(conn, opts)
@@ -482,10 +482,10 @@ defmodule ConduitMcp.Plugs.MessageRateLimitTest do
         conn(
           :post,
           "/",
-          Jason.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
+          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
         )
         |> put_req_header("content-type", "application/json")
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: Jason))
+        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
 
       result = MessageRateLimit.call(conn, opts)
       refute result.halted

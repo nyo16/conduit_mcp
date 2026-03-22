@@ -100,7 +100,7 @@ defmodule ConduitMcp.Plugs.AuthTest do
       assert result.status == 401
       assert get_resp_header(result, "content-type") == ["application/json; charset=utf-8"]
 
-      {:ok, body} = Jason.decode(result.resp_body)
+      {:ok, body} = JSON.decode(result.resp_body)
       assert body["error"] == "Unauthorized"
     end
 
@@ -428,7 +428,7 @@ defmodule ConduitMcp.Plugs.AuthTest do
       assert result.halted
       assert result.status == 401
 
-      {:ok, body} = Jason.decode(result.resp_body)
+      {:ok, body} = JSON.decode(result.resp_body)
       assert body["message"] == "Authentication failed"
     end
   end

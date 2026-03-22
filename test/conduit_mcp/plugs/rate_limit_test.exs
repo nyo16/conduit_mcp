@@ -125,7 +125,7 @@ defmodule ConduitMcp.Plugs.RateLimitTest do
       assert result2.halted
       assert result2.status == 429
 
-      {:ok, body} = Jason.decode(result2.resp_body)
+      {:ok, body} = JSON.decode(result2.resp_body)
       assert body["jsonrpc"] == "2.0"
       assert body["id"] == nil
       assert body["error"]["code"] == -32000

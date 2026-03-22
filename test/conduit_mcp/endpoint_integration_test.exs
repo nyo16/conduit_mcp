@@ -48,7 +48,7 @@ defmodule ConduitMcp.EndpointIntegrationTest do
            %{
              "uri" => "user://#{id}",
              "mimeType" => "application/json",
-             "text" => Jason.encode!(%{id: id, name: "User #{id}"})
+             "text" => JSON.encode!(%{id: id, name: "User #{id}"})
            }
          ]
        }}
@@ -117,7 +117,7 @@ defmodule ConduitMcp.EndpointIntegrationTest do
   end
 
   defp parse_response(conn) do
-    Jason.decode!(conn.resp_body)
+    JSON.decode!(conn.resp_body)
   end
 
   # === Tests ===
@@ -254,7 +254,7 @@ defmodule ConduitMcp.EndpointIntegrationTest do
       contents = parse_response(conn)["result"]["contents"]
       assert hd(contents)["uri"] == "user://42"
 
-      user = Jason.decode!(hd(contents)["text"])
+      user = JSON.decode!(hd(contents)["text"])
       assert user["id"] == "42"
     end
 

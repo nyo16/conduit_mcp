@@ -297,18 +297,20 @@ defmodule ConduitMcp.Endpoint do
   defp generate_resource_clause([]), do: nil
 
   defp generate_resource_clause(resources) do
-    # Build a list of {template, module} pairs at compile time
-    resource_pairs =
+    # Pre-compile URI template regexes at compile time
+    resource_compiled =
       Enum.map(resources, fn mod ->
-        {Keyword.fetch!(mod.__component_opts__(), :uri), mod}
+        template = Keyword.fetch!(mod.__component_opts__(), :uri)
+        {param_names, regex} = ConduitMcp.DSL.compile_uri_template(template)
+        {param_names, regex, mod}
       end)
 
     quote do
-      @__resource_pairs unquote(Macro.escape(resource_pairs))
+      @__resource_compiled unquote(Macro.escape(resource_compiled))
 
       def handle_read_resource(conn, uri) do
-        Enum.find_value(@__resource_pairs, fn {template, mod} ->
-          case ConduitMcp.DSL.extract_uri_params(template, uri) do
+        Enum.find_value(@__resource_compiled, fn {param_names, regex, mod} ->
+          case ConduitMcp.DSL.extract_uri_params_compiled(uri, param_names, regex) do
             {:ok, params} ->
               atom_params = Map.new(params, fn {k, v} -> {String.to_atom(k), v} end)
               mod.execute(atom_params, conn)

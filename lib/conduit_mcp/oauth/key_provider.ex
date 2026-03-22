@@ -23,11 +23,11 @@ defmodule ConduitMcp.OAuth.KeyProvider do
             {:ok, nil} ->
               # Cache miss — fetch from upstream and cache
               {:ok, keys} = fetch_from_upstream(config)
-              Redix.command(:redix, ["SET", "oauth:jwks", Jason.encode!(keys), "EX", "3600"])
+              Redix.command(:redix, ["SET", "oauth:jwks", JSON.encode!(keys), "EX", "3600"])
               {:ok, keys}
 
             {:ok, cached} ->
-              {:ok, Jason.decode!(cached)}
+              {:ok, JSON.decode!(cached)}
           end
         end
 

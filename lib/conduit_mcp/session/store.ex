@@ -15,7 +15,7 @@ defmodule ConduitMcp.Session.Store do
 
         @impl true
         def create(session_id, metadata) do
-          data = Jason.encode!(metadata)
+          data = JSON.encode!(metadata)
           Redix.command(:redix, ["SET", key(session_id), data, "EX", "3600"])
           :ok
         end
@@ -24,7 +24,7 @@ defmodule ConduitMcp.Session.Store do
         def get(session_id) do
           case Redix.command(:redix, ["GET", key(session_id)]) do
             {:ok, nil} -> {:error, :not_found}
-            {:ok, data} -> {:ok, Jason.decode!(data)}
+            {:ok, data} -> {:ok, JSON.decode!(data)}
           end
         end
 

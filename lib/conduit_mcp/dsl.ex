@@ -885,12 +885,19 @@ defmodule ConduitMcp.DSL do
       []
     else
       # Generate a single function that tries each resource
+      # Pre-compile URI template regexes at compile time
       template_clauses =
         Enum.map(resources_with_handlers, fn %{uri: res_uri, handler: handler} ->
+          {param_names, regex} = ConduitMcp.DSL.compile_uri_template(res_uri)
+
           case handler do
             {:fn_ast, handler_ast} ->
               quote do
-                case ConduitMcp.DSL.extract_uri_params(unquote(res_uri), uri) do
+                case ConduitMcp.DSL.extract_uri_params_compiled(
+                       uri,
+                       unquote(param_names),
+                       unquote(Macro.escape(regex))
+                     ) do
                   {:ok, params} ->
                     unquote(handler_ast).(conn, params, %{})
 
@@ -901,7 +908,11 @@ defmodule ConduitMcp.DSL do
 
             {:mfa, {mod, fun}} ->
               quote do
-                case ConduitMcp.DSL.extract_uri_params(unquote(res_uri), uri) do
+                case ConduitMcp.DSL.extract_uri_params_compiled(
+                       uri,
+                       unquote(param_names),
+                       unquote(Macro.escape(regex))
+                     ) do
                   {:ok, params} ->
                     apply(unquote(mod), unquote(fun), [conn, params, %{}])
 
@@ -946,36 +957,42 @@ defmodule ConduitMcp.DSL do
 
   @doc false
   def extract_uri_params(template, uri) do
-    # Parse template to extract parameter names and create regex pattern
-    # Template: "user://{id}/posts/{post_id}"
-    # URI: "user://123/posts/456"
-    # Result: %{"id" => "123", "post_id" => "456"}
+    {param_names, regex} = compile_uri_template(template)
+    extract_uri_params_compiled(uri, param_names, regex)
+  end
 
-    # Extract parameter names first (before escaping)
+  @doc """
+  Pre-compiles a URI template into a regex and parameter name list.
+
+  Returns `{param_names, compiled_regex}` suitable for passing to
+  `extract_uri_params_compiled/3`. Call this at compile time and store
+  the result to avoid re-compiling the regex on every request.
+  """
+  def compile_uri_template(template) do
     param_names =
       Regex.scan(~r/\{([^}]+)\}/, template)
       |> Enum.map(fn [_full, name] -> name end)
 
-    # Replace {param} with a placeholder token before escaping
     template_with_tokens = Regex.replace(~r/\{[^}]+\}/, template, "<<<PARAM>>>")
-
-    # Escape special regex characters
     escaped_template = Regex.escape(template_with_tokens)
-
-    # Replace placeholder tokens with capture groups
     pattern = String.replace(escaped_template, "<<<PARAM>>>", "([^/]+)")
+    {:ok, regex} = Regex.compile("^#{pattern}$")
 
-    # Try to match the URI against the pattern
-    case Regex.run(~r/^#{pattern}$/, uri) do
+    {param_names, regex}
+  end
+
+  @doc """
+  Matches a URI against a pre-compiled template regex.
+
+  Uses the output of `compile_uri_template/1` to avoid runtime regex compilation.
+  """
+  def extract_uri_params_compiled(uri, param_names, regex) do
+    case Regex.run(regex, uri) do
       nil ->
         :no_match
 
       [_full | captured_values] ->
-        params =
-          Enum.zip(param_names, captured_values)
-          |> Enum.into(%{})
-
-        {:ok, params}
+        {:ok, Map.new(Enum.zip(param_names, captured_values))}
     end
   end
 end
