@@ -91,7 +91,7 @@ defmodule MyApp.MCPServer do
 end
 ```
 
-**Response helpers:** `text/1`, `json/1`, `error/1`, `error/2`, `image/1`, `audio/2`, `raw/1`, `system/1`, `user/1`, `assistant/1`
+**Response helpers** (auto-imported): `text/1`, `json/1`, `image/1`, `audio/2`, `error/1`, `raw/1`, `system/1`, `user/1`, `assistant/1` — see [Responses](#responses) for details and custom response patterns.
 
 ---
 
@@ -225,6 +225,78 @@ end
 | **SSE** | `ConduitMcp.Transport.SSE` | Legacy. `GET /sse` for streaming, `POST /message` for requests |
 
 Both transports support authentication, rate limiting, CORS, and session management.
+
+## Responses
+
+All tool/resource/prompt handlers return `{:ok, map()}` or `{:error, map()}`. Helper macros are imported automatically in DSL and Endpoint modes.
+
+### Tool Response Helpers
+
+| Helper | What it returns | Use case |
+|--------|----------------|----------|
+| `text("hello")` | `{:ok, %{"content" => [%{"type" => "text", "text" => "hello"}]}}` | Plain text responses |
+| `json(%{a: 1})` | `{:ok, %{"content" => [%{"type" => "text", "text" => "{\"a\":1}"}]}}` | Structured data (Jason-encoded) |
+| `image(base64_data)` | `{:ok, %{"content" => [%{"type" => "image", "data" => ...}]}}` | Images (base64) |
+| `audio(data, "audio/wav")` | `{:ok, %{"content" => [%{"type" => "audio", "data" => ..., "mimeType" => ...}]}}` | Audio clips |
+| `error("fail")` | `{:error, %{"code" => -32000, "message" => "fail"}}` | Error with default code |
+| `error("fail", -32602)` | `{:error, %{"code" => -32602, "message" => "fail"}}` | Error with custom code |
+| `raw(any_map)` | `{:ok, any_map}` | Bypass MCP wrapping entirely |
+
+### Prompt Message Helpers
+
+| Helper | Returns |
+|--------|---------|
+| `system("You are a reviewer")` | `%{"role" => "system", "content" => %{"type" => "text", "text" => ...}}` |
+| `user("Review this code")` | `%{"role" => "user", "content" => %{"type" => "text", "text" => ...}}` |
+| `assistant("Here is my review")` | `%{"role" => "assistant", "content" => %{"type" => "text", "text" => ...}}` |
+
+### Multi-Content Responses
+
+Use `texts/1` to return multiple text items in a single response:
+
+```elixir
+{:ok, %{"content" => texts(["Line 1", "Line 2", "Line 3"])}}
+# => {:ok, %{"content" => [%{"type" => "text", "text" => "Line 1"}, ...]}}
+```
+
+### Raw / Fully Custom Responses
+
+For maximum control, skip the helpers entirely and return the map yourself:
+
+```elixir
+def execute(_params, _conn) do
+  {:ok, %{
+    "content" => [
+      %{"type" => "text", "text" => "Here is the chart:"},
+      %{"type" => "image", "data" => base64_png, "mimeType" => "image/png"},
+      %{"type" => "text", "text" => "Analysis complete."}
+    ]
+  }}
+end
+```
+
+The `raw/1` helper is a shortcut for returning any map without MCP content wrapping — useful for debugging or non-standard responses:
+
+```elixir
+raw(%{"custom_key" => "custom_value", "nested" => %{"data" => [1, 2, 3]}})
+# => {:ok, %{"custom_key" => "custom_value", "nested" => %{"data" => [1, 2, 3]}}}
+```
+
+> **Note:** `raw/1` bypasses the MCP content structure. Clients expecting standard `"content"` arrays won't parse it correctly. Use it for debugging or custom integrations.
+
+### Error Codes
+
+Standard JSON-RPC 2.0 error codes used by the protocol:
+
+| Code | Meaning |
+|------|---------|
+| `-32700` | Parse error |
+| `-32600` | Invalid request |
+| `-32601` | Method not found |
+| `-32602` | Invalid params |
+| `-32603` | Internal error |
+| `-32000` | Tool/server error (default for `error/1`) |
+| `-32002` | Resource not found |
 
 ## Parameter Validation
 

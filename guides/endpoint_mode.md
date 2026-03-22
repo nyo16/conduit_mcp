@@ -206,6 +206,95 @@ use ConduitMcp.Component,
   annotations: [readOnlyHint: true, idempotent: true]
 ```
 
+## Responses
+
+All `execute/2` callbacks must return `{:ok, map()}` or `{:error, map()}`. Helper macros are imported automatically.
+
+### Tool Response Helpers
+
+```elixir
+# Plain text
+text("Hello!")
+
+# JSON-encoded data
+json(%{users: [%{id: 1, name: "Alice"}]})
+
+# Image (base64)
+image(Base.encode64(png_data))
+
+# Audio
+audio(Base.encode64(wav_data), "audio/wav")
+
+# Error
+error("Something went wrong")
+error("Bad input", -32602)
+```
+
+### Prompt Message Helpers
+
+```elixir
+def execute(%{topic: topic}, _conn) do
+  {:ok, %{"messages" => [
+    system("You are an expert on #{topic}"),
+    user("Explain #{topic} in simple terms"),
+    assistant("Sure! Let me break it down...")
+  ]}}
+end
+```
+
+### Multi-Content Responses
+
+Return multiple content items (e.g., text + image) by building the map directly:
+
+```elixir
+def execute(%{query: query}, _conn) do
+  chart_data = MyApp.Charts.generate(query)
+  {:ok, %{
+    "content" => [
+      %{"type" => "text", "text" => "Here are the results for: #{query}"},
+      %{"type" => "image", "data" => chart_data, "mimeType" => "image/png"},
+      %{"type" => "text", "text" => "Generated at #{DateTime.utc_now()}"}
+    ]
+  }}
+end
+```
+
+### Raw Mode
+
+`raw/1` bypasses MCP content wrapping — returns any map directly as `{:ok, map}`:
+
+```elixir
+raw(%{"custom_key" => "value", "data" => [1, 2, 3]})
+# => {:ok, %{"custom_key" => "value", "data" => [1, 2, 3]}}
+```
+
+> **Warning:** Clients expecting the standard MCP `"content"` array won't parse raw responses. Use for debugging or custom integrations only.
+
+### Fully Custom (No Helpers)
+
+You can always skip helpers and return the tuple directly:
+
+```elixir
+def execute(%{id: id}, _conn) do
+  case MyApp.Repo.get(User, id) do
+    nil ->
+      {:error, %{"code" => -32002, "message" => "User #{id} not found"}}
+
+    user ->
+      {:ok, %{
+        "content" => [
+          %{"type" => "text", "text" => Jason.encode!(%{
+            id: user.id,
+            name: user.name,
+            roles: user.roles
+          })}
+        ],
+        "isError" => false
+      }}
+  end
+end
+```
+
 ## Accessing Request Context
 
 The `Plug.Conn` is passed as the second argument to `execute/2`:
