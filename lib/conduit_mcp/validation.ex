@@ -171,8 +171,20 @@ defmodule ConduitMcp.Validation do
 
   # Private functions
 
+  @doc """
+  Updates the validation configuration at runtime.
+
+  Writes to both Application env and persistent_term so that
+  the change is visible immediately to all concurrent readers.
+  """
+  def update_validation_config(config) when is_list(config) do
+    Application.put_env(:conduit_mcp, :validation, config)
+    :persistent_term.put({ConduitMcp, :validation_config}, config)
+    :ok
+  end
+
   defp validation_config do
-    Application.get_env(:conduit_mcp, :validation, [])
+    :persistent_term.get({ConduitMcp, :validation_config}, [])
   end
 
   defp validation_enabled? do
@@ -180,10 +192,11 @@ defmodule ConduitMcp.Validation do
   end
 
   defp get_tool_validation_schema(server_module, tool_name) do
-    if function_exported?(server_module, :__validation_schema_for_tool__, 1) do
+    if ConduitMcp.ServerMeta.has?(server_module, :validation_schema_tool) do
       case server_module.__validation_schema_for_tool__(tool_name) do
         nil -> {:error, :tool_not_found}
-        schema -> {:ok, schema}
+        {_full, _clean} = dual -> {:ok, dual}
+        schema -> {:ok, {schema, nil}}
       end
     else
       # Server doesn't use DSL or doesn't have validation schemas - skip validation
@@ -192,10 +205,11 @@ defmodule ConduitMcp.Validation do
   end
 
   defp get_prompt_validation_schema(server_module, prompt_name) do
-    if function_exported?(server_module, :__validation_schema_for_prompt__, 1) do
+    if ConduitMcp.ServerMeta.has?(server_module, :validation_schema_prompt) do
       case server_module.__validation_schema_for_prompt__(prompt_name) do
         nil -> {:error, :prompt_not_found}
-        schema -> {:ok, schema}
+        {_full, _clean} = dual -> {:ok, dual}
+        schema -> {:ok, {schema, nil}}
       end
     else
       # Server doesn't use DSL or doesn't have validation schemas - skip validation
@@ -203,13 +217,13 @@ defmodule ConduitMcp.Validation do
     end
   end
 
-  defp validate_with_schema(schema, params, context) do
+  defp validate_with_schema({full_schema, precomputed_clean}, params, context) do
     config = validation_config()
     # Convert string keys to atoms for validation
     atom_params = convert_keys_to_atoms(params)
 
     # First, handle custom validations that NimbleOptions doesn't support directly
-    case validate_custom_constraints(atom_params, schema) do
+    case validate_custom_constraints(atom_params, full_schema) do
       {:error, errors} ->
         formatted_errors = format_validation_errors(errors)
         {:error, formatted_errors}
@@ -218,13 +232,13 @@ defmodule ConduitMcp.Validation do
         # Apply type coercion if enabled
         coerced_params =
           if Keyword.get(config, :type_coercion, true) do
-            apply_type_coercion(preprocessed_params, schema)
+            apply_type_coercion(preprocessed_params, full_schema)
           else
             preprocessed_params
           end
 
-        # Remove custom constraint markers and convert map to keyword list for NimbleOptions
-        clean_schema = remove_custom_constraint_markers(schema)
+        # Use pre-computed clean schema if available, otherwise strip at runtime
+        clean_schema = precomputed_clean || remove_custom_constraint_markers(full_schema)
         keyword_params = Map.to_list(coerced_params)
 
         case NimbleOptions.validate(keyword_params, clean_schema) do
@@ -248,7 +262,17 @@ defmodule ConduitMcp.Validation do
 
   defp convert_keys_to_atoms(map) when is_map(map) do
     for {key, value} <- map, into: %{} do
-      atom_key = if is_binary(key), do: String.to_atom(key), else: key
+      atom_key =
+        if is_binary(key) do
+          try do
+            String.to_existing_atom(key)
+          rescue
+            ArgumentError -> key
+          end
+        else
+          key
+        end
+
       {atom_key, convert_keys_to_atoms(value)}
     end
   end

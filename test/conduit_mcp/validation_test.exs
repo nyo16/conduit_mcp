@@ -199,7 +199,7 @@ defmodule ConduitMcp.ValidationTest do
 
     test "validation can be disabled via configuration" do
       # Mock disabled validation
-      Application.put_env(:conduit_mcp, :validation, runtime_validation: false)
+      Validation.update_validation_config(runtime_validation: false)
 
       params = %{"invalid" => "params"}
 
@@ -207,9 +207,8 @@ defmodule ConduitMcp.ValidationTest do
                Validation.validate_tool_params(TestValidationServer, "simple_tool", params)
 
       assert validated_params == params
-
-      # Reset to default
-      Application.put_env(:conduit_mcp, :validation, runtime_validation: true)
+    after
+      Validation.update_validation_config([])
     end
   end
 

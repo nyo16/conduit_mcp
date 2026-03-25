@@ -213,7 +213,7 @@ defmodule ConduitMcp.EndpointIntegrationTest do
     end
 
     test "validates required params" do
-      Application.put_env(:conduit_mcp, :validation,
+      ConduitMcp.Validation.update_validation_config(
         runtime_validation: true,
         strict_mode: true,
         type_coercion: true
@@ -228,7 +228,7 @@ defmodule ConduitMcp.EndpointIntegrationTest do
       response = parse_response(conn)
       assert response["error"]["code"] == -32602
     after
-      Application.delete_env(:conduit_mcp, :validation)
+      ConduitMcp.Validation.update_validation_config([])
     end
   end
 

@@ -7,8 +7,8 @@ Code.compile_file("bench/support/bench_servers.ex")
 # Ensure the app is started (needed for Application.get_env, telemetry, etc.)
 Application.ensure_all_started(:conduit_mcp)
 
-# Configure validation
-Application.put_env(:conduit_mcp, :validation,
+# Configure validation (use update_validation_config to sync persistent_term)
+ConduitMcp.Validation.update_validation_config(
   runtime_validation: true,
   type_coercion: true,
   log_validation_errors: false

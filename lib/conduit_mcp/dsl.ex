@@ -1056,7 +1056,6 @@ defmodule ConduitMcp.DSL do
 
   # Generate resource handler clauses outside quote block
   defp generate_resource_clauses(resources) do
-    # Generate a single comprehensive handler that tries all resources
     resources_with_handlers =
       resources
       |> Enum.reverse()
@@ -1065,97 +1064,139 @@ defmodule ConduitMcp.DSL do
     if Enum.empty?(resources_with_handlers) do
       []
     else
-      # Generate a single function that tries each resource
-      # Pre-compile URI template regexes at compile time
-      template_clauses =
-        Enum.map(resources_with_handlers, fn %{uri: res_uri, handler: handler} ->
-          {param_names, regex} = ConduitMcp.DSL.compile_uri_template(res_uri)
-
-          case handler do
-            {:fn_ast, handler_ast} ->
-              quote do
-                case ConduitMcp.DSL.extract_uri_params_compiled(
-                       uri,
-                       unquote(param_names),
-                       unquote(Macro.escape(regex))
-                     ) do
-                  {:ok, params} ->
-                    unquote(handler_ast).(conn, params, %{})
-
-                  :no_match ->
-                    nil
-                end
-              end
-
-            {:mfa, {mod, fun}} ->
-              quote do
-                case ConduitMcp.DSL.extract_uri_params_compiled(
-                       uri,
-                       unquote(param_names),
-                       unquote(Macro.escape(regex))
-                     ) do
-                  {:ok, params} ->
-                    apply(unquote(mod), unquote(fun), [conn, params, %{}])
-
-                  :no_match ->
-                    nil
-                end
-              end
-
-            {:app_view, view_path} ->
-              quote do
-                case ConduitMcp.DSL.extract_uri_params_compiled(
-                       uri,
-                       unquote(param_names),
-                       unquote(Macro.escape(regex))
-                     ) do
-                  {:ok, _params} ->
-                    {:ok,
-                     %{
-                       "contents" => [
-                         %{
-                           "mimeType" => "text/html;profile=mcp-app",
-                           "text" => File.read!(unquote(view_path))
-                         }
-                       ]
-                     }}
-
-                  :no_match ->
-                    nil
-                end
-              end
-          end
+      # Separate static URIs (no {param}) from templated URIs
+      {static, templated} =
+        Enum.split_with(resources_with_handlers, fn %{uri: uri} ->
+          not String.contains?(uri, "{")
         end)
 
-      # Create a function that tries each template in sequence
-      [
-        quote do
-          def handle_read_resource(conn, uri) do
-            # Try each resource template in order
-            result =
-              unquote(template_clauses)
-              |> Enum.find_value(fn clause_result ->
-                case clause_result do
-                  nil -> false
-                  other -> other
-                end
-              end)
+      static_clauses = Enum.map(static, &generate_static_resource_clause/1)
+      templated_clause = generate_templated_resource_clauses(templated)
 
-            case result do
-              nil ->
-                # No match found, fall through to catch-all
-                {:error,
-                 %{
-                   "code" => ConduitMcp.Errors.method_not_found(),
-                   "message" => "Resource not found: #{uri}"
-                 }}
+      static_clauses ++ templated_clause
+    end
+  end
 
-              result ->
-                result
-            end
+  # Static URIs get direct pattern-match clauses — O(1) dispatch
+  defp generate_static_resource_clause(%{uri: res_uri, handler: {:fn_ast, handler_ast}}) do
+    quote do
+      def handle_read_resource(conn, unquote(res_uri)) do
+        unquote(handler_ast).(conn, %{}, %{})
+      end
+    end
+  end
+
+  defp generate_static_resource_clause(%{uri: res_uri, handler: {:mfa, {mod, fun}}}) do
+    quote do
+      def handle_read_resource(conn, unquote(res_uri)) do
+        apply(unquote(mod), unquote(fun), [conn, %{}, %{}])
+      end
+    end
+  end
+
+  defp generate_static_resource_clause(%{uri: res_uri, handler: {:app_view, view_path}}) do
+    quote do
+      def handle_read_resource(_conn, unquote(res_uri)) do
+        {:ok,
+         %{
+           "contents" => [
+             %{
+               "mimeType" => "text/html;profile=mcp-app",
+               "text" => File.read!(unquote(view_path))
+             }
+           ]
+         }}
+      end
+    end
+  end
+
+  # Templated URIs use pre-compiled regex scan
+  defp generate_templated_resource_clauses([]), do: []
+
+  defp generate_templated_resource_clauses(templated) do
+    template_clauses = Enum.map(templated, &generate_templated_resource_match/1)
+
+    [
+      quote do
+        def handle_read_resource(conn, uri) do
+          result =
+            unquote(template_clauses)
+            |> Enum.find_value(fn clause_result ->
+              case clause_result do
+                nil -> false
+                other -> other
+              end
+            end)
+
+          case result do
+            nil ->
+              {:error,
+               %{
+                 "code" => ConduitMcp.Errors.method_not_found(),
+                 "message" => "Resource not found: #{uri}"
+               }}
+
+            result ->
+              result
           end
         end
-      ]
+      end
+    ]
+  end
+
+  defp generate_templated_resource_match(%{uri: res_uri, handler: {:fn_ast, handler_ast}}) do
+    {param_names, regex} = ConduitMcp.DSL.compile_uri_template(res_uri)
+
+    quote do
+      case ConduitMcp.DSL.extract_uri_params_compiled(
+             uri,
+             unquote(param_names),
+             unquote(Macro.escape(regex))
+           ) do
+        {:ok, params} -> unquote(handler_ast).(conn, params, %{})
+        :no_match -> nil
+      end
+    end
+  end
+
+  defp generate_templated_resource_match(%{uri: res_uri, handler: {:mfa, {mod, fun}}}) do
+    {param_names, regex} = ConduitMcp.DSL.compile_uri_template(res_uri)
+
+    quote do
+      case ConduitMcp.DSL.extract_uri_params_compiled(
+             uri,
+             unquote(param_names),
+             unquote(Macro.escape(regex))
+           ) do
+        {:ok, params} -> apply(unquote(mod), unquote(fun), [conn, params, %{}])
+        :no_match -> nil
+      end
+    end
+  end
+
+  defp generate_templated_resource_match(%{uri: res_uri, handler: {:app_view, view_path}}) do
+    {param_names, regex} = ConduitMcp.DSL.compile_uri_template(res_uri)
+
+    quote do
+      case ConduitMcp.DSL.extract_uri_params_compiled(
+             uri,
+             unquote(param_names),
+             unquote(Macro.escape(regex))
+           ) do
+        {:ok, _params} ->
+          {:ok,
+           %{
+             "contents" => [
+               %{
+                 "mimeType" => "text/html;profile=mcp-app",
+                 "text" => File.read!(unquote(view_path))
+               }
+             ]
+           }}
+
+        :no_match ->
+          nil
+      end
     end
   end
 

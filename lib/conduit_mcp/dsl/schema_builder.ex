@@ -371,23 +371,48 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
   - `__validation_schema_for_tool__/1`
   - `__validation_schema_for_prompt__/1`
   """
+  @custom_constraint_markers [
+    :__enum_values__,
+    :__min_value__,
+    :__max_value__,
+    :__min_length__,
+    :__max_length__,
+    :validator,
+    :min,
+    :max,
+    :min_length,
+    :max_length,
+    :enum
+  ]
+
   def generate_validation_lookup_functions(tools, prompts) do
     tool_schemas = compile_tool_validation_schemas(tools)
     prompt_schemas = compile_prompt_validation_schemas(prompts)
 
+    # Pre-compute clean schemas (markers stripped) at compile time
+    tool_dual =
+      Map.new(tool_schemas, fn {name, schema} ->
+        {name, {schema, strip_markers(schema)}}
+      end)
+
+    prompt_dual =
+      Map.new(prompt_schemas, fn {name, schema} ->
+        {name, {schema, strip_markers(schema)}}
+      end)
+
     quote do
       @doc false
       def __validation_schema_for_tool__(tool_name) do
-        case unquote(Macro.escape(tool_schemas)) do
-          %{^tool_name => schema} -> schema
+        case unquote(Macro.escape(tool_dual)) do
+          %{^tool_name => dual} -> dual
           _ -> nil
         end
       end
 
       @doc false
       def __validation_schema_for_prompt__(prompt_name) do
-        case unquote(Macro.escape(prompt_schemas)) do
-          %{^prompt_name => schema} -> schema
+        case unquote(Macro.escape(prompt_dual)) do
+          %{^prompt_name => dual} -> dual
           _ -> nil
         end
       end
@@ -400,6 +425,12 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
         }
       end
     end
+  end
+
+  defp strip_markers(schema) do
+    Enum.map(schema, fn {param_name, param_opts} ->
+      {param_name, Keyword.drop(param_opts, @custom_constraint_markers)}
+    end)
   end
 
   @doc """

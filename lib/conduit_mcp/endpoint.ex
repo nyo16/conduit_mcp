@@ -297,45 +297,98 @@ defmodule ConduitMcp.Endpoint do
   defp generate_resource_clause([]), do: nil
 
   defp generate_resource_clause(resources) do
-    # Pre-compile URI template regexes at compile time
-    resource_compiled =
-      Enum.map(resources, fn mod ->
+    # Separate static URIs (no {param} placeholders) from templated URIs
+    {static_resources, templated_resources} =
+      Enum.split_with(resources, fn mod ->
+        template = Keyword.fetch!(mod.__component_opts__(), :uri)
+        not String.contains?(template, "{")
+      end)
+
+    # Static URIs get direct pattern-match clauses — O(1) dispatch
+    static_clauses =
+      Enum.map(static_resources, fn mod ->
+        uri = Keyword.fetch!(mod.__component_opts__(), :uri)
+
+        quote do
+          def handle_read_resource(conn, unquote(uri)) do
+            unquote(mod).execute(%{}, conn)
+          end
+        end
+      end)
+
+    # Templated URIs use pre-compiled regex scan
+    templated_compiled =
+      Enum.map(templated_resources, fn mod ->
         template = Keyword.fetch!(mod.__component_opts__(), :uri)
         {param_names, regex} = ConduitMcp.DSL.compile_uri_template(template)
         {param_names, regex, mod}
       end)
 
-    quote do
-      @__resource_compiled unquote(Macro.escape(resource_compiled))
+    templated_clause =
+      if templated_resources != [] do
+        quote do
+          @__resource_compiled unquote(Macro.escape(templated_compiled))
 
-      def handle_read_resource(conn, uri) do
-        Enum.find_value(@__resource_compiled, fn {param_names, regex, mod} ->
-          case ConduitMcp.DSL.extract_uri_params_compiled(uri, param_names, regex) do
-            {:ok, params} ->
-              atom_params = Map.new(params, fn {k, v} -> {String.to_atom(k), v} end)
-              mod.execute(atom_params, conn)
+          def handle_read_resource(conn, uri) do
+            Enum.find_value(@__resource_compiled, fn {param_names, regex, mod} ->
+              case ConduitMcp.DSL.extract_uri_params_compiled(uri, param_names, regex) do
+                {:ok, params} ->
+                  atom_params = Map.new(params, fn {k, v} -> {String.to_atom(k), v} end)
+                  mod.execute(atom_params, conn)
 
-            :no_match ->
-              nil
+                :no_match ->
+                  nil
+              end
+            end) ||
+              {:error,
+               %{
+                 "code" => ConduitMcp.Errors.resource_not_found(),
+                 "message" => "Resource not found: #{uri}"
+               }}
           end
-        end) ||
-          {:error,
-           %{
-             "code" => ConduitMcp.Errors.resource_not_found(),
-             "message" => "Resource not found: #{uri}"
-           }}
+        end
+      else
+        # All resources are static; add a catch-all for unknown URIs
+        quote do
+          def handle_read_resource(_conn, uri) do
+            {:error,
+             %{
+               "code" => ConduitMcp.Errors.resource_not_found(),
+               "message" => "Resource not found: #{uri}"
+             }}
+          end
+        end
       end
+
+    quote do
+      unquote(static_clauses)
+      unquote(templated_clause)
     end
   end
+
+  @custom_constraint_markers [
+    :__enum_values__,
+    :__min_value__,
+    :__max_value__,
+    :__min_length__,
+    :__max_length__,
+    :validator,
+    :min,
+    :max,
+    :min_length,
+    :max_length,
+    :enum
+  ]
 
   defp generate_tool_validation_clauses(tools) do
     Enum.map(tools, fn mod ->
       name = mod.__component_name__()
       schema = mod.__validation_schema__()
+      clean_schema = strip_markers(schema)
 
       quote do
         def __validation_schema_for_tool__(unquote(name)) do
-          unquote(Macro.escape(schema))
+          {unquote(Macro.escape(schema)), unquote(Macro.escape(clean_schema))}
         end
       end
     end)
@@ -345,14 +398,23 @@ defmodule ConduitMcp.Endpoint do
     Enum.map(prompts, fn mod ->
       name = mod.__component_name__()
       schema = mod.__validation_schema__()
+      clean_schema = strip_markers(schema)
 
       quote do
         def __validation_schema_for_prompt__(unquote(name)) do
-          unquote(Macro.escape(schema))
+          {unquote(Macro.escape(schema)), unquote(Macro.escape(clean_schema))}
         end
       end
     end)
   end
+
+  defp strip_markers(schema) when is_list(schema) do
+    Enum.map(schema, fn {param_name, param_opts} ->
+      {param_name, Keyword.drop(param_opts, @custom_constraint_markers)}
+    end)
+  end
+
+  defp strip_markers(_), do: []
 
   defp build_scope_map(tools) do
     Enum.reduce(tools, %{}, fn mod, acc ->
