@@ -29,17 +29,17 @@ large_key_map = Enum.into(1..20, %{}, fn i -> {"field_#{i}", :"field_#{i}"} end)
 
 # Get validation schemas for constraint benchmarks
 medium_schema =
-  if function_exported?(Bench.DSLServer, :__validation_schema_for_tool__, 1) do
-    Bench.DSLServer.__validation_schema_for_tool__("create_user") || []
-  else
-    []
+  case Bench.DSLServer.__validation_schema_for_tool__("create_user") do
+    {full, _clean} -> full
+    schema when is_list(schema) -> schema
+    _ -> []
   end
 
 large_schema =
-  if function_exported?(Bench.DSLServer, :__validation_schema_for_tool__, 1) do
-    Bench.DSLServer.__validation_schema_for_tool__("bulk_import") || []
-  else
-    []
+  case Bench.DSLServer.__validation_schema_for_tool__("bulk_import") do
+    {full, _clean} -> full
+    schema when is_list(schema) -> schema
+    _ -> []
   end
 
 # --- Section 1: Full validation pipeline ---
@@ -58,10 +58,10 @@ Benchee.run(
       ConduitMcp.Validation.validate_tool_params(Bench.DSLServer, "bulk_import", large)
     end,
     "full: validation disabled (passthrough)" => fn ->
-      Application.put_env(:conduit_mcp, :validation, runtime_validation: false)
+      ConduitMcp.Validation.update_validation_config(runtime_validation: false)
       result = ConduitMcp.Validation.validate_tool_params(Bench.DSLServer, "echo", small)
 
-      Application.put_env(:conduit_mcp, :validation,
+      ConduitMcp.Validation.update_validation_config(
         runtime_validation: true,
         type_coercion: true,
         log_validation_errors: false

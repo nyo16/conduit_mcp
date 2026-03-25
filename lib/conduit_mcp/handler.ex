@@ -5,6 +5,7 @@ defmodule ConduitMcp.Handler do
 
   require Logger
   alias ConduitMcp.Protocol
+  alias ConduitMcp.ServerMeta
 
   @doc """
   Handles an MCP request and returns a JSON-RPC response.
@@ -288,7 +289,7 @@ defmodule ConduitMcp.Handler do
   end
 
   defp get_required_scope(server_module, tool_name) do
-    if function_exported?(server_module, :__scope_for_tool__, 1) do
+    if ServerMeta.has?(server_module, :scope_for_tool) do
       server_module.__scope_for_tool__(tool_name)
     else
       nil
@@ -317,7 +318,7 @@ defmodule ConduitMcp.Handler do
     ref = Map.get(params, "ref", %{})
     argument = Map.get(params, "argument", %{})
 
-    if function_exported?(server_module, :handle_complete, 3) do
+    if ServerMeta.has?(server_module, :complete) do
       dispatch_callback(
         id,
         fn -> server_module.handle_complete(conn, ref, argument) end,
@@ -333,7 +334,7 @@ defmodule ConduitMcp.Handler do
   defp handle_logging(id, params, server_module, conn) do
     level = Map.get(params, "level")
 
-    if function_exported?(server_module, :handle_set_log_level, 2) do
+    if ServerMeta.has?(server_module, :set_log_level) do
       dispatch_callback(
         id,
         fn -> server_module.handle_set_log_level(conn, level) end,
@@ -347,7 +348,7 @@ defmodule ConduitMcp.Handler do
   defp handle_subscribe(id, params, server_module, conn) do
     uri = Map.get(params, "uri")
 
-    if function_exported?(server_module, :handle_subscribe_resource, 2) do
+    if ServerMeta.has?(server_module, :subscribe) do
       dispatch_callback(
         id,
         fn -> server_module.handle_subscribe_resource(conn, uri) end,
@@ -365,7 +366,7 @@ defmodule ConduitMcp.Handler do
   defp handle_unsubscribe(id, params, server_module, conn) do
     uri = Map.get(params, "uri")
 
-    if function_exported?(server_module, :handle_unsubscribe_resource, 2) do
+    if ServerMeta.has?(server_module, :unsubscribe) do
       dispatch_callback(
         id,
         fn -> server_module.handle_unsubscribe_resource(conn, uri) end,
@@ -409,7 +410,14 @@ defmodule ConduitMcp.Handler do
   # Calls a list callback, preferring the arity-2 variant (with params for pagination).
   # Falls back to arity-1 if arity-2 is not implemented.
   defp call_list_callback(server_module, callback_name, conn, params) do
-    if function_exported?(server_module, callback_name, 2) do
+    meta_key =
+      case callback_name do
+        :handle_list_tools -> :list_tools_2
+        :handle_list_resources -> :list_resources_2
+        :handle_list_prompts -> :list_prompts_2
+      end
+
+    if ServerMeta.has?(server_module, meta_key) do
       apply(server_module, callback_name, [conn, params])
     else
       apply(server_module, callback_name, [conn])
@@ -432,7 +440,7 @@ defmodule ConduitMcp.Handler do
   defp ensure_resource_uri(response, _uri), do: response
 
   defp build_capabilities(server_module) do
-    if function_exported?(server_module, :__capabilities__, 0) do
+    if ServerMeta.has?(server_module, :capabilities) do
       server_module.__capabilities__()
     else
       # DSL and manual mode servers always define all 6 callbacks,

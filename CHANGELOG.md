@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-03-24
+
+### Performance
+
+- **persistent_term validation config** — replaced `Application.get_env` with `:persistent_term.get` for O(1) lock-free config reads on every validated request (4–10% faster validation, 5–11% less memory)
+- **Cached server capabilities** — new `ConduitMcp.ServerMeta` module lazily caches all `function_exported?` results in persistent_term, eliminating 9 repeated BIF calls per request (2–7% faster handler dispatch)
+- **Pre-computed clean schemas** — `__validation_schema_for_tool__/1` now returns `{full_schema, clean_schema}` tuples pre-stripped of constraint markers at compile time, eliminating per-request `Keyword.drop`
+- **Static resource URI dispatch** — resources with no `{param}` placeholders now generate direct pattern-match clauses (O(1)) instead of linear regex scan (O(n))
+
+### Fixed
+
+- **Atom table exhaustion** — `String.to_atom/1` in validation replaced with `String.to_existing_atom/1` to prevent atom table exhaustion from malicious parameter names
+
+### Added
+
+- `ConduitMcp.Validation.update_validation_config/1` — public API for updating validation config at runtime (writes both Application env and persistent_term)
+
 ## [0.9.0] - 2026-03-22
 
 ### Added

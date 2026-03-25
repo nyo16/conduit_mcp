@@ -276,20 +276,26 @@ defmodule ConduitMcp.EndpointTest do
   end
 
   describe "validation schema lookups" do
-    test "returns validation schema for tool" do
-      schema = FullEndpoint.__validation_schema_for_tool__("echo_tool")
-      assert is_list(schema)
-      assert Keyword.has_key?(schema, :text)
+    test "returns validation schema tuple for tool" do
+      {full_schema, clean_schema} = FullEndpoint.__validation_schema_for_tool__("echo_tool")
+      assert is_list(full_schema)
+      assert Keyword.has_key?(full_schema, :text)
+      assert is_list(clean_schema)
+      assert Keyword.has_key?(clean_schema, :text)
     end
 
     test "returns nil for unknown tool" do
       assert is_nil(FullEndpoint.__validation_schema_for_tool__("nonexistent"))
     end
 
-    test "returns validation schema for prompt" do
-      schema = FullEndpoint.__validation_schema_for_prompt__("code_review_prompt")
-      assert is_list(schema)
-      assert Keyword.has_key?(schema, :code)
+    test "returns validation schema tuple for prompt" do
+      {full_schema, clean_schema} =
+        FullEndpoint.__validation_schema_for_prompt__("code_review_prompt")
+
+      assert is_list(full_schema)
+      assert Keyword.has_key?(full_schema, :code)
+      assert is_list(clean_schema)
+      assert Keyword.has_key?(clean_schema, :code)
     end
 
     test "returns nil for unknown prompt" do
@@ -508,7 +514,7 @@ defmodule ConduitMcp.EndpointTest do
       }
 
       # With validation enabled, missing required 'text' should produce an error
-      Application.put_env(:conduit_mcp, :validation,
+      ConduitMcp.Validation.update_validation_config(
         runtime_validation: true,
         strict_mode: true,
         type_coercion: true
@@ -519,7 +525,7 @@ defmodule ConduitMcp.EndpointTest do
       # Should be a validation error (-32602)
       assert result["error"]["code"] == -32602
     after
-      Application.delete_env(:conduit_mcp, :validation)
+      ConduitMcp.Validation.update_validation_config([])
     end
   end
 

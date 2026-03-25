@@ -7,6 +7,10 @@ defmodule ConduitMcp.Application do
 
   @impl true
   def start(_type, _args) do
+    # Seed validation config into persistent_term for O(1) reads on every request
+    config = Application.get_env(:conduit_mcp, :validation, [])
+    :persistent_term.put({ConduitMcp, :validation_config}, config)
+
     children = []
 
     # See https://hexdocs.pm/elixir/Supervisor.html
