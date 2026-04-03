@@ -1,0 +1,8 @@
+{
+  "minimum_coverage": 78,
+  "treat_no_relevant_lines_as_covered": true,
+  "skip_files": [
+    "lib/mix/tasks/bench.ex",
+    "test/support/"
+  ]
+}

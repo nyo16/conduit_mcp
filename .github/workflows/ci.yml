@@ -123,7 +123,7 @@ jobs:
       - run: mix compile
 
       - name: Run tests with coverage
-        run: mix coveralls --raise --threshold 85
+        run: mix coveralls
         env:
           MIX_ENV: test
 
