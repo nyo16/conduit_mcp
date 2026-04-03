@@ -40,9 +40,11 @@ defmodule ConduitMcp.Transport.SSE do
   alias ConduitMcp.Handler
 
   plug(Plug.Logger)
+  plug(ConduitMcp.Plugs.SecurityHeaders)
+  plug(ConduitMcp.Plugs.OriginValidation)
   plug(:add_cors_headers)
   plug(:match)
-  plug(Plug.Parsers, parsers: [:json], json_decoder: JSON)
+  plug(Plug.Parsers, parsers: [:json], json_decoder: JSON, length: 1_000_000)
   plug(:maybe_authenticate)
   plug(:maybe_rate_limit)
   plug(:maybe_message_rate_limit)
@@ -128,9 +130,11 @@ defmodule ConduitMcp.Transport.SSE do
 
     server_name = Keyword.get(opts, :server_name) || Keyword.get(endpoint_config, :name)
     server_version = Keyword.get(opts, :server_version) || Keyword.get(endpoint_config, :version)
+    allowed_origins = Keyword.get(opts, :allowed_origins)
 
     conn
     |> Plug.Conn.put_private(:server_module, server_module)
+    |> Plug.Conn.put_private(:allowed_origins, allowed_origins)
     |> Plug.Conn.put_private(:cors_origin, cors_origin)
     |> Plug.Conn.put_private(:cors_methods, cors_methods)
     |> Plug.Conn.put_private(:cors_headers, cors_headers)
@@ -183,7 +187,7 @@ defmodule ConduitMcp.Transport.SSE do
 
     case conn.body_params do
       params when is_map(params) ->
-        Logger.debug("Received request: #{inspect(params)}")
+        Logger.debug("Received request", method: params["method"], id: params["id"])
 
         response = Handler.handle_request(params, server_module, conn)
 

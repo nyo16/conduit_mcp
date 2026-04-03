@@ -480,4 +480,45 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
       assert protocol_versions == ["2025-11-25"]
     end
   end
+
+  describe "security headers" do
+    test "POST responses include security headers" do
+      ping_body =
+        JSON.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "ping"
+        })
+
+      conn =
+        conn(:post, "/", ping_body)
+        |> put_req_header("content-type", "application/json")
+        |> StreamableHTTP.call(@opts)
+
+      assert conn.status == 200
+      assert get_resp_header(conn, "x-content-type-options") == ["nosniff"]
+      assert get_resp_header(conn, "x-frame-options") == ["DENY"]
+      assert get_resp_header(conn, "cache-control") == ["no-store"]
+    end
+
+    test "GET / includes security headers" do
+      conn =
+        conn(:get, "/")
+        |> StreamableHTTP.call(@opts)
+
+      assert conn.status == 200
+      assert get_resp_header(conn, "x-content-type-options") == ["nosniff"]
+      assert get_resp_header(conn, "x-frame-options") == ["DENY"]
+    end
+
+    test "health check includes security headers" do
+      conn =
+        conn(:get, "/health")
+        |> StreamableHTTP.call(@opts)
+
+      assert conn.status == 200
+      assert get_resp_header(conn, "x-content-type-options") == ["nosniff"]
+      assert get_resp_header(conn, "x-frame-options") == ["DENY"]
+    end
+  end
 end

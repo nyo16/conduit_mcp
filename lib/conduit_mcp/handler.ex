@@ -51,7 +51,7 @@ defmodule ConduitMcp.Handler do
     id = Map.get(request, "id")
     params = Map.get(request, "params", %{})
 
-    Logger.debug("Handling method: #{method}")
+    Logger.debug("Handling method", method: method)
 
     case method do
       "initialize" ->
@@ -91,22 +91,30 @@ defmodule ConduitMcp.Handler do
         handle_unsubscribe(id, params, server_module, conn)
 
       _ ->
-        Protocol.error_response(id, Protocol.method_not_found(), "Method not found: #{method}")
+        Protocol.error_response(
+          id,
+          Protocol.method_not_found(),
+          "Method not found: #{String.slice(to_string(method), 0, 200)}"
+        )
     end
   rescue
     error ->
-      Logger.error("Error handling method: #{inspect(error)}")
+      Logger.error("Error handling method",
+        error: Exception.message(error),
+        method: Map.get(request, "method"),
+        request_id: Map.get(request, "id")
+      )
 
       Protocol.error_response(
         Map.get(request, "id"),
         Protocol.internal_error(),
-        "Internal server error: #{inspect(error)}"
+        "Internal server error"
       )
   end
 
   defp handle_notification(notification, _server_module) do
     method = Map.get(notification, "method")
-    Logger.debug("Handling notification: #{method}")
+    Logger.debug("Handling notification", method: method)
 
     case method do
       "notifications/initialized" ->
@@ -114,7 +122,7 @@ defmodule ConduitMcp.Handler do
         :ok
 
       _ ->
-        Logger.warning("Unknown notification: #{method}")
+        Logger.warning("Unknown notification", method: method)
         :ok
     end
   end
@@ -124,8 +132,8 @@ defmodule ConduitMcp.Handler do
     client_info = Map.get(params, "clientInfo", %{})
     _capabilities = Map.get(params, "capabilities", %{})
 
-    Logger.info("Initializing connection with client: #{inspect(client_info)}")
-    Logger.debug("Protocol version: #{client_version}")
+    Logger.info("Initializing connection with client", client_info: client_info)
+    Logger.debug("Protocol version", version: client_version)
 
     negotiated_version = Protocol.negotiate_version(client_version)
 

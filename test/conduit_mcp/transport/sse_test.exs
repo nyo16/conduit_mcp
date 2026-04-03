@@ -283,4 +283,129 @@ defmodule ConduitMcp.Transport.SSETest do
       assert conn.status == 404
     end
   end
+
+  describe "origin validation" do
+    test "request with allowed origin passes" do
+      opts =
+        SSE.init(
+          server_module: TestServer,
+          allowed_origins: ["https://allowed.example.com"]
+        )
+
+      ping_body =
+        JSON.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "ping"
+        })
+
+      conn =
+        conn(:post, "/message", ping_body)
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("origin", "https://allowed.example.com")
+        |> SSE.call(opts)
+
+      assert conn.status == 200
+
+      response = JSON.decode!(conn.resp_body)
+      assert response["result"] == %{}
+    end
+
+    test "request with disallowed origin gets 403" do
+      opts =
+        SSE.init(
+          server_module: TestServer,
+          allowed_origins: ["https://allowed.example.com"]
+        )
+
+      ping_body =
+        JSON.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "ping"
+        })
+
+      conn =
+        conn(:post, "/message", ping_body)
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("origin", "https://evil.example.com")
+        |> SSE.call(opts)
+
+      assert conn.status == 403
+
+      response = JSON.decode!(conn.resp_body)
+      assert response["error"] == "Origin not allowed"
+    end
+
+    test "request with no Origin header passes (browser-less clients)" do
+      opts =
+        SSE.init(
+          server_module: TestServer,
+          allowed_origins: ["https://allowed.example.com"]
+        )
+
+      ping_body =
+        JSON.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "ping"
+        })
+
+      conn =
+        conn(:post, "/message", ping_body)
+        |> put_req_header("content-type", "application/json")
+        |> SSE.call(opts)
+
+      assert conn.status == 200
+
+      response = JSON.decode!(conn.resp_body)
+      assert response["result"] == %{}
+    end
+
+    test "OPTIONS requests bypass origin validation" do
+      opts =
+        SSE.init(
+          server_module: TestServer,
+          allowed_origins: ["https://allowed.example.com"]
+        )
+
+      conn =
+        conn(:options, "/message")
+        |> put_req_header("origin", "https://evil.example.com")
+        |> SSE.call(opts)
+
+      assert conn.status == 200
+    end
+  end
+
+  describe "security headers" do
+    test "responses include security headers" do
+      ping_body =
+        JSON.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "ping"
+        })
+
+      conn =
+        conn(:post, "/message", ping_body)
+        |> put_req_header("content-type", "application/json")
+        |> SSE.call(@opts)
+
+      assert conn.status == 200
+      assert get_resp_header(conn, "x-content-type-options") == ["nosniff"]
+      assert get_resp_header(conn, "x-frame-options") == ["DENY"]
+      assert get_resp_header(conn, "cache-control") == ["no-store"]
+    end
+
+    test "health check includes security headers" do
+      conn =
+        conn(:get, "/health")
+        |> SSE.call(@opts)
+
+      assert conn.status == 200
+      assert get_resp_header(conn, "x-content-type-options") == ["nosniff"]
+      assert get_resp_header(conn, "x-frame-options") == ["DENY"]
+    end
+  end
 end

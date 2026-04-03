@@ -54,51 +54,16 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   alias ConduitMcp.Session
 
   plug(Plug.Logger)
-  plug(:validate_origin)
+  plug(ConduitMcp.Plugs.SecurityHeaders)
+  plug(ConduitMcp.Plugs.OriginValidation)
   plug(:add_cors_headers)
   plug(:match)
-  plug(Plug.Parsers, parsers: [:json], json_decoder: JSON)
+  plug(Plug.Parsers, parsers: [:json], json_decoder: JSON, length: 1_000_000)
   plug(:maybe_authenticate)
   plug(:maybe_rate_limit)
   plug(:maybe_message_rate_limit)
   plug(:validate_session)
   plug(:dispatch)
-
-  defp validate_origin(conn, _opts) do
-    allowed_origins = conn.private[:allowed_origins]
-
-    cond do
-      # No origin restriction configured, or explicitly set to "*"
-      is_nil(allowed_origins) or allowed_origins == "*" ->
-        conn
-
-      # OPTIONS requests skip origin validation (CORS preflight)
-      conn.method == "OPTIONS" ->
-        conn
-
-      true ->
-        origin = get_req_header(conn, "origin") |> List.first()
-
-        cond do
-          # No Origin header — allow (browser-less clients don't send it)
-          is_nil(origin) ->
-            conn
-
-          # Origin matches allowed list
-          is_list(allowed_origins) and origin in allowed_origins ->
-            conn
-
-          # Origin doesn't match
-          true ->
-            Logger.warning("Blocked request from disallowed origin: #{origin}")
-
-            conn
-            |> put_resp_content_type("application/json")
-            |> send_resp(403, JSON.encode!(%{"error" => "Origin not allowed"}))
-            |> halt()
-        end
-    end
-  end
 
   defp add_cors_headers(conn, _opts) do
     # Get CORS settings from private (set in call/2)
@@ -285,7 +250,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
 
     case conn.body_params do
       params when is_map(params) ->
-        Logger.debug("Received request: #{inspect(params)}")
+        Logger.debug("Received request", method: params["method"], id: params["id"])
 
         response = Handler.handle_request(params, server_module, conn)
 

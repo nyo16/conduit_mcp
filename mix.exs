@@ -71,6 +71,13 @@ defmodule ConduitMcp.MixProject do
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:excoveralls, "~> 0.18", only: :test, runtime: false},
 
+      # Security & audit
+      {:sobelow, "~> 0.13", only: [:dev, :test], runtime: false},
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
+
+      # Property-based testing
+      {:stream_data, "~> 1.1", only: :test, runtime: false},
+
       # Benchmarking
       {:benchee, "~> 1.3", only: :dev, runtime: false},
       {:benchee_html, "~> 1.0", only: :dev, runtime: false}

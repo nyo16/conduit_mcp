@@ -1,0 +1,15 @@
+[
+  verbose: false,
+  private: true,
+  skip: false,
+  router: "",
+  exit: "low",
+  format: "txt",
+  out: "",
+  threshold: "low",
+  # False positives for this library:
+  # - Traversal.FileModule: compile-time DSL macros read developer-defined view paths, not user input
+  # - DOS.StringToAtom: compile-time DSL converts developer-defined schema/URI template keys, not user input
+  ignore: ["DOS.StringToAtom", "Traversal.FileModule"],
+  ignore_files: ["test/"]
+]
