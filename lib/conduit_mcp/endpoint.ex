@@ -122,6 +122,12 @@ defmodule ConduitMcp.Endpoint do
     tool_key_maps = build_key_maps(tools)
     prompt_key_maps = build_key_maps(prompts)
 
+    # Per-component dispatch clauses. Avoids Elixir 1.20 type-checker
+    # warnings about `Map.get(%{}, k)` on compile-time empty maps when the
+    # endpoint has no scoped tools and/or no prompts.
+    scope_clauses = generate_scope_clauses(scope_map)
+    key_map_clauses = generate_key_map_clauses(tool_key_maps, prompt_key_maps)
+
     # Build capabilities
     capabilities = build_capabilities(tools, resources, prompts)
 
@@ -194,19 +200,18 @@ defmodule ConduitMcp.Endpoint do
 
       # --- Scope lookup ---
 
-      def __scope_for_tool__(tool_name) do
-        Map.get(unquote(Macro.escape(scope_map)), tool_name)
-      end
+      unquote(scope_clauses)
+
+      def __scope_for_tool__(_tool_name), do: nil
 
       # --- Key maps for atom conversion ---
 
-      @__tool_key_maps unquote(Macro.escape(tool_key_maps))
-      @__prompt_key_maps unquote(Macro.escape(prompt_key_maps))
+      unquote(key_map_clauses)
+
+      defp __key_map__(_component_name), do: %{}
 
       defp __convert_to_atom_keys__(component_name, params) do
-        key_map =
-          Map.get(@__tool_key_maps, component_name) ||
-            Map.get(@__prompt_key_maps, component_name, %{})
+        key_map = __key_map__(component_name)
 
         Map.new(params, fn {k, v} ->
           case Map.get(key_map, k) do
@@ -421,6 +426,30 @@ defmodule ConduitMcp.Endpoint do
       case Keyword.get(mod.__component_opts__(), :scope) do
         nil -> acc
         scope -> Map.put(acc, mod.__component_name__(), scope)
+      end
+    end)
+  end
+
+  # Emit one `__scope_for_tool__(name)` clause per scoped tool.
+  # The catch-all `_ -> nil` is appended in the generated quote block.
+  defp generate_scope_clauses(scope_map) do
+    Enum.map(scope_map, fn {name, scope} ->
+      quote do
+        def __scope_for_tool__(unquote(name)), do: unquote(Macro.escape(scope))
+      end
+    end)
+  end
+
+  # Emit one `__key_map__(name)` clause per component with a non-empty
+  # key map. Components without aliases fall through to the catch-all
+  # `_ -> %{}` appended in the generated quote block.
+  defp generate_key_map_clauses(tool_key_maps, prompt_key_maps) do
+    tool_key_maps
+    |> Map.merge(prompt_key_maps)
+    |> Enum.reject(fn {_name, km} -> km == %{} end)
+    |> Enum.map(fn {name, km} ->
+      quote do
+        defp __key_map__(unquote(name)), do: unquote(Macro.escape(km))
       end
     end)
   end
