@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] - 2026-04-18
+
+### Fixed
+
+- **Empty-map type warnings under Elixir 1.20** — endpoints with no scoped tools and/or no prompts no longer trigger `Map.get/2,3` "will always return default" warnings from `@before_compile`-generated `__scope_for_tool__/1` and `__convert_to_atom_keys__/2`. Replaced single-map lookups with per-component function clauses (`__scope_for_tool__(<<name>>) -> scope` and `__key_map__(<<name>>) -> escaped_map`) plus catch-all fallbacks. `mix compile --warnings-as-errors` is now clean for read-only / tool-only endpoints.
+
 ## [0.9.1] - 2026-03-24
 
 ### Performance
