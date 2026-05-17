@@ -93,4 +93,67 @@ defmodule ConduitMcp.TasksTest do
       refute Tasks.valid_transition?("cancelled", "working")
     end
   end
+
+  describe "delete/1" do
+    test "removes an existing task" do
+      Tasks.create("doomed")
+      assert :ok = Tasks.delete("doomed")
+      assert {:error, :not_found} = Tasks.get("doomed")
+    end
+
+    test "is a no-op for unknown ids" do
+      assert :ok = Tasks.delete("never-existed")
+    end
+  end
+
+  describe "cleanup/1" do
+    test "prunes only terminal-state tasks older than ttl" do
+      # Ensure the table exists before raw :ets.insert
+      Tasks.create("__bootstrap__")
+      Tasks.delete("__bootstrap__")
+
+      old = System.system_time(:millisecond) - 60_000
+
+      :ets.insert(
+        :conduit_mcp_tasks,
+        {"old-completed",
+         %{"task_id" => "old-completed", "status" => "completed", "created_at" => old}}
+      )
+
+      :ets.insert(
+        :conduit_mcp_tasks,
+        {"old-failed", %{"task_id" => "old-failed", "status" => "failed", "created_at" => old}}
+      )
+
+      :ets.insert(
+        :conduit_mcp_tasks,
+        {"old-cancelled",
+         %{"task_id" => "old-cancelled", "status" => "cancelled", "created_at" => old}}
+      )
+
+      :ets.insert(
+        :conduit_mcp_tasks,
+        {"old-working", %{"task_id" => "old-working", "status" => "working", "created_at" => old}}
+      )
+
+      Tasks.create("fresh-completed")
+      Tasks.update("fresh-completed", %{"status" => "completed"})
+
+      removed = Tasks.cleanup(30_000)
+
+      assert removed == 3
+      assert {:error, :not_found} = Tasks.get("old-completed")
+      assert {:error, :not_found} = Tasks.get("old-failed")
+      assert {:error, :not_found} = Tasks.get("old-cancelled")
+      # working state is preserved regardless of age
+      assert {:ok, _} = Tasks.get("old-working")
+      # young terminal state is preserved
+      assert {:ok, _} = Tasks.get("fresh-completed")
+    end
+
+    test "returns 0 when nothing to clean" do
+      Tasks.create("just-made")
+      assert Tasks.cleanup(60_000) == 0
+    end
+  end
 end

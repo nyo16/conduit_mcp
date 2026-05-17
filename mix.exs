@@ -185,7 +185,8 @@ defmodule ConduitMcp.MixProject do
           ConduitMcp.Session.Janitor
         ],
         Tasks: [
-          ConduitMcp.Tasks
+          ConduitMcp.Tasks,
+          ConduitMcp.Tasks.Janitor
         ],
         Client: [
           ConduitMcp.Client
