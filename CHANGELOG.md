@@ -35,8 +35,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`ConduitMcp.Tasks.delete/1`, `cleanup/1`, and `Tasks.Janitor`** —
   parallel cleanup for the tasks table, which previously had no
   eviction at all.
+- **`ConduitMcp.Tasks.Store` behaviour** — task storage is now
+  pluggable, mirroring `ConduitMcp.Session.Store`. Configure via
+  `config :conduit_mcp, :tasks_store, MyApp.MyTasksStore`. The default
+  remains the in-memory `ConduitMcp.Tasks.EtsStore`, so existing
+  servers keep their current behaviour without any changes. Standard
+  `tasks/*` JSON-RPC routes dispatch through the configured store, so
+  swapping in a durable backend (e.g., Oban + SQLite or Postgres)
+  requires no handler changes.
 - **`examples/async_tasks_server/`** — runnable example demonstrating
-  the MCP 2025-11-25 tasks lifecycle.
+  the MCP 2025-11-25 tasks lifecycle (in-memory, ETS-backed).
+- **`examples/oban_tasks_server/`** — runnable example demonstrating
+  the same lifecycle backed by Oban + SQLite for durability, with the
+  `input_required` state exercised via `{:snooze, _}`.
 
 ### Changed
 

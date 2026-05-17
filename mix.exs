@@ -187,6 +187,8 @@ defmodule ConduitMcp.MixProject do
         ],
         Tasks: [
           ConduitMcp.Tasks,
+          ConduitMcp.Tasks.Store,
+          ConduitMcp.Tasks.EtsStore,
           ConduitMcp.Tasks.Janitor
         ],
         Client: [
