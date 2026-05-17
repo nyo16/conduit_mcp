@@ -8,6 +8,7 @@ Runnable examples and reference implementations grouped by what they demonstrate
 |-----------|---------------|-------|
 | [`simple_tools_server/`](simple_tools_server) | DSL mode minimum viable server with two synchronous tools | [DSL mode](../guides/dsl_mode.md) |
 | [`async_tasks_server/`](async_tasks_server) | MCP 2025-11-25 tasks lifecycle — long-running tool spawns a Task.Supervisor child, client polls `tasks/get` / `tasks/result` | [Tasks (in CHANGELOG)](../CHANGELOG.md) |
+| [`oban_tasks_server/`](oban_tasks_server) | Same tasks lifecycle but **durable**: backed by Oban + SQLite via `ConduitMcp.Tasks.Store`. Survives BEAM restarts; exercises `input_required` via `{:snooze, _}` | [Oban tasks](../guides/oban_tasks.md) |
 | [`mcp_apps_demo/`](mcp_apps_demo) | MCP Apps — tools that return a sandboxed HTML resource | [MCP Apps](../guides/mcp_apps.md) |
 | [`phoenix_mcp/`](phoenix_mcp) | Mounting an MCP server inside a Phoenix router with auth | [Choosing a mode](../guides/choosing_a_mode.md) |
 
@@ -24,7 +25,7 @@ and adapt.
 | [`postgres_session_store.ex`](postgres_session_store.ex) | `ConduitMcp.Session.Store` | Uses Ecto.Repo; the included migration scaffolds the table. |
 | [`mnesia_session_store.ex`](mnesia_session_store.ex) | `ConduitMcp.Session.Store` | For multi-node BEAM deployments without an external store. |
 | [`redis_key_provider.ex`](redis_key_provider.ex) | `ConduitMcp.OAuth.KeyProvider` | Shared JWKS cache for multi-node OAuth resource servers. |
-| [`oban_task_store.ex`](oban_task_store.ex) | (custom) | Pattern for offloading tools to Oban jobs. Pairs with [`guides/oban_tasks.md`](../guides/oban_tasks.md). |
+| [`oban_task_store.ex`](oban_task_store.ex) | `ConduitMcp.Tasks.Store` | Postgres-flavored reference implementation. For a runnable variant on SQLite, see [`oban_tasks_server/`](oban_tasks_server). |
 
 ## Tooling
 
@@ -45,8 +46,11 @@ parent project's `mix.exs`. From the repo root:
 # Simple tools server
 iex -S mix run examples/simple_tools_server/run.exs
 
-# Async tasks server
+# Async tasks server (ETS, zero extra deps)
 iex -S mix run -e "Examples.AsyncTasks.Application.start(:normal, [])"
+
+# Oban tasks server (durable, SQLite-backed) — has its own mix.exs
+cd examples/oban_tasks_server && mix deps.get && iex -S mix
 
 # Phoenix MCP — see examples/phoenix_mcp/README.md
 ```

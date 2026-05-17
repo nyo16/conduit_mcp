@@ -11,7 +11,23 @@ defmodule ConduitMcp.Application do
     config = Application.get_env(:conduit_mcp, :validation, [])
     :persistent_term.put({ConduitMcp, :validation_config}, config)
 
-    children = []
+    # Own the cancellation ETS table from a long-lived process so
+    # concurrent Bandit request handlers don't race on `:ets.new/2` (every
+    # handler touches this table via Cancellation.clear/1 in a try/after).
+    base_children = [ConduitMcp.Cancellation.Owner]
+
+    # When the default in-memory store is configured (or no store is
+    # configured), also start the Tasks ETS owner. If the user has wired
+    # a custom :tasks_store, skip — they don't need our table.
+    tasks_children =
+      if Application.get_env(:conduit_mcp, :tasks_store, ConduitMcp.Tasks.EtsStore) ==
+           ConduitMcp.Tasks.EtsStore do
+        [ConduitMcp.Tasks.EtsStore.Owner]
+      else
+        []
+      end
+
+    children = base_children ++ tasks_children
 
     # See https://hexdocs.pm/elixir/Supervisor.html
     # for other strategies and supported options

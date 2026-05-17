@@ -1038,10 +1038,13 @@ defmodule ConduitMcp.DSL do
       # Inject validation schema lookup functions
       unquote(validation_lookup_functions)
 
-      # Scope lookup for OAuth enforcement
-      def __scope_for_tool__(tool_name) do
-        Map.get(unquote(Macro.escape(scope_map)), tool_name)
-      end
+      # Scope lookup for OAuth enforcement. Emit one clause per scoped
+      # tool plus a catch-all so Elixir 1.20's type checker does not flag
+      # `Map.get(%{}, _)` on a compile-time empty map when no scopes are
+      # declared.
+      unquote(ConduitMcp.DSL.__generate_scope_clauses__(scope_map))
+
+      def __scope_for_tool__(_tool_name), do: nil
 
       # Always generate handle_list_tools (empty list if no tools)
       def handle_list_tools(_conn) do
@@ -1125,6 +1128,18 @@ defmodule ConduitMcp.DSL do
       case Map.get(tool, :scope) do
         nil -> acc
         scope -> Map.put(acc, to_string(tool.name), scope)
+      end
+    end)
+  end
+
+  @doc false
+  # Emit one `__scope_for_tool__(name)` clause per scoped tool. Called
+  # from the `@before_compile` generated quote block; public so it can
+  # be invoked across compilation boundaries.
+  def __generate_scope_clauses__(scope_map) do
+    Enum.map(scope_map, fn {name, scope} ->
+      quote do
+        def __scope_for_tool__(unquote(name)), do: unquote(Macro.escape(scope))
       end
     end)
   end

@@ -1,5 +1,13 @@
 # Oban-backed MCP task store for multi-node deployments.
 #
+# Postgres-flavored reference implementation of `ConduitMcp.Tasks.Store`.
+# Wire it in via `config :conduit_mcp, :tasks_store, MyApp.ObanTaskStore`
+# and the standard tasks/* JSON-RPC routes start writing here.
+#
+# For a runnable, single-node SQLite variant of the same shape see
+# `examples/oban_tasks_server/` — same `@behaviour` but its own mix
+# project so you can boot it directly.
+#
 # Uses Oban jobs as the backing store for MCP Tasks. This gives you:
 # - PostgreSQL persistence across all nodes
 # - Built-in retries and error handling
@@ -143,6 +151,8 @@ end
 
 # MCP Task store backed by the mcp_tasks table + Oban
 defmodule MyApp.ObanTaskStore do
+  @behaviour ConduitMcp.Tasks.Store
+
   import Ecto.Query
 
   @repo MyApp.Repo

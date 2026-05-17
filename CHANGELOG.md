@@ -35,8 +35,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`ConduitMcp.Tasks.delete/1`, `cleanup/1`, and `Tasks.Janitor`** —
   parallel cleanup for the tasks table, which previously had no
   eviction at all.
+- **`ConduitMcp.Tasks.Store` behaviour** — task storage is now
+  pluggable, mirroring `ConduitMcp.Session.Store`. Configure via
+  `config :conduit_mcp, :tasks_store, MyApp.MyTasksStore`. The default
+  remains the in-memory `ConduitMcp.Tasks.EtsStore`, so existing
+  servers keep their current behaviour without any changes. Standard
+  `tasks/*` JSON-RPC routes dispatch through the configured store, so
+  swapping in a durable backend (e.g., Oban + SQLite or Postgres)
+  requires no handler changes.
 - **`examples/async_tasks_server/`** — runnable example demonstrating
-  the MCP 2025-11-25 tasks lifecycle.
+  the MCP 2025-11-25 tasks lifecycle (in-memory, ETS-backed).
+- **`examples/oban_tasks_server/`** — runnable example demonstrating
+  the same lifecycle backed by Oban + SQLite for durability, with the
+  `input_required` state exercised via `{:snooze, _}`.
+
+### Fixed
+
+- **DSL empty-map type warning under Elixir 1.20** — `__scope_for_tool__/1`
+  in DSL-mode servers without any scoped tools used to expand to
+  `Map.get(%{}, _)`, which Elixir 1.20's type checker flags as always
+  returning the default. Same fix as commit `0f05a9f` for Endpoint
+  mode: replace the single-map lookup with per-tool function clauses
+  plus a catch-all. Servers that never declared OAuth scopes now
+  compile cleanly under `--warnings-as-errors`.
 
 ### Changed
 
