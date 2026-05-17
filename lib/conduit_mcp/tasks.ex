@@ -2,9 +2,9 @@ defmodule ConduitMcp.Tasks do
   @moduledoc """
   Task management for long-running MCP operations (experimental).
 
-  Tasks provide a durable state machine for operations that may take time to complete.
-  Clients can poll for status, cancel in-flight operations, and receive results
-  asynchronously.
+  Tasks provide a durable state machine for operations that may take time to
+  complete. Clients can poll for status, cancel in-flight operations, and
+  receive results asynchronously.
 
   ## Task Lifecycle
 
@@ -13,10 +13,17 @@ defmodule ConduitMcp.Tasks do
       working → cancelled
       working → input_required → working (after elicitation)
 
-  ## Usage
+  ## Storage
 
-  Tasks are stored in a pluggable store (defaults to ETS via `ConduitMcp.Session.EtsStore`
-  pattern). The task registry is managed per-server.
+  Storage is delegated to a pluggable store module. The default is
+  `ConduitMcp.Tasks.EtsStore` (in-memory, single-node). For durable, multi-node
+  deployments — or to back tasks with a job queue like Oban — implement
+  `ConduitMcp.Tasks.Store` and override the store via application config:
+
+      config :conduit_mcp, :tasks_store, MyApp.MyTasksStore
+
+  See `examples/oban_tasks_server/` for an Oban + SQLite implementation and
+  `examples/oban_task_store.ex` for a Postgres-flavored reference.
 
   ## Configuration
 
@@ -26,6 +33,8 @@ defmodule ConduitMcp.Tasks do
         server_module: MyServer,
         tasks: [enabled: true]}
   """
+
+  alias ConduitMcp.Tasks.EtsStore
 
   @type task_id :: String.t()
   @type status :: :working | :input_required | :completed | :failed | :cancelled
@@ -39,119 +48,26 @@ defmodule ConduitMcp.Tasks do
     Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
   end
 
-  @doc """
-  Creates a new task in the ETS store.
-  """
-  def create(task_id, metadata \\ %{}) do
-    ensure_table()
+  @doc "Creates a new task. See `ConduitMcp.Tasks.Store`."
+  defdelegate create(task_id, metadata \\ %{}), to: EtsStore
 
-    task =
-      Map.merge(metadata, %{
-        "task_id" => task_id,
-        "status" => "working",
-        "created_at" => System.system_time(:millisecond)
-      })
+  @doc "Gets a task by ID. See `ConduitMcp.Tasks.Store`."
+  defdelegate get(task_id), to: EtsStore
 
-    :ets.insert(:conduit_mcp_tasks, {task_id, task})
-    {:ok, task}
-  end
+  @doc "Updates a task's status and/or metadata. See `ConduitMcp.Tasks.Store`."
+  defdelegate update(task_id, updates), to: EtsStore
 
-  @doc """
-  Gets a task by ID.
-  """
-  def get(task_id) do
-    ensure_table()
+  @doc "Cancels a task. See `ConduitMcp.Tasks.Store`."
+  defdelegate cancel(task_id), to: EtsStore
 
-    case :ets.lookup(:conduit_mcp_tasks, task_id) do
-      [{^task_id, task}] -> {:ok, task}
-      [] -> {:error, :not_found}
-    end
-  end
+  @doc "Deletes a task by ID. See `ConduitMcp.Tasks.Store`."
+  defdelegate delete(task_id), to: EtsStore
 
-  @doc """
-  Updates a task's status and/or metadata.
-  """
-  def update(task_id, updates) do
-    ensure_table()
+  @doc "Prunes terminal-state tasks older than `ttl_ms`. See `ConduitMcp.Tasks.Store`."
+  defdelegate cleanup(ttl_ms), to: EtsStore
 
-    case :ets.lookup(:conduit_mcp_tasks, task_id) do
-      [{^task_id, existing}] ->
-        updated = Map.merge(existing, updates)
-        :ets.insert(:conduit_mcp_tasks, {task_id, updated})
-        {:ok, updated}
-
-      [] ->
-        {:error, :not_found}
-    end
-  end
-
-  @doc """
-  Cancels a task.
-  """
-  def cancel(task_id) do
-    update(task_id, %{"status" => "cancelled"})
-  end
-
-  @doc """
-  Deletes a task by ID.
-
-  Returns `:ok` whether or not the task existed.
-  """
-  def delete(task_id) do
-    ensure_table()
-    :ets.delete(:conduit_mcp_tasks, task_id)
-    :ok
-  end
-
-  @doc """
-  Removes terminal-state tasks (`completed`, `failed`, `cancelled`) older than
-  `ttl_ms` milliseconds. Tasks still in `working` or `input_required` are never
-  evicted regardless of age.
-
-  Returns the count of tasks removed.
-  """
-  def cleanup(ttl_ms) do
-    ensure_table()
-    now = System.system_time(:millisecond)
-    terminal_statuses = ~w(completed failed cancelled)
-
-    :ets.foldl(
-      fn {task_id, task}, acc ->
-        created_at = Map.get(task, "created_at", 0)
-        status = Map.get(task, "status", "working")
-
-        if status in terminal_statuses and now - created_at > ttl_ms do
-          :ets.delete(:conduit_mcp_tasks, task_id)
-          acc + 1
-        else
-          acc
-        end
-      end,
-      0,
-      :conduit_mcp_tasks
-    )
-  end
-
-  @doc """
-  Lists all tasks, optionally filtered by status.
-  """
-  def list(opts \\ []) do
-    ensure_table()
-    status_filter = Keyword.get(opts, :status)
-
-    tasks =
-      :ets.foldl(
-        fn {_id, task}, acc -> [task | acc] end,
-        [],
-        :conduit_mcp_tasks
-      )
-
-    if status_filter do
-      Enum.filter(tasks, fn task -> task["status"] == to_string(status_filter) end)
-    else
-      tasks
-    end
-  end
+  @doc "Lists tasks, optionally filtered by `:status`. See `ConduitMcp.Tasks.Store`."
+  defdelegate list(opts \\ []), to: EtsStore
 
   @doc """
   Validates that a status transition is allowed.
@@ -172,12 +88,4 @@ defmodule ConduitMcp.Tasks do
 
   @doc "Returns the list of valid task statuses."
   def valid_statuses, do: @valid_statuses
-
-  defp ensure_table do
-    if :ets.whereis(:conduit_mcp_tasks) == :undefined do
-      :ets.new(:conduit_mcp_tasks, [:named_table, :public, :set, read_concurrency: true])
-    end
-
-    :ok
-  end
 end
