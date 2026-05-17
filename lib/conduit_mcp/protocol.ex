@@ -1,7 +1,42 @@
 defmodule ConduitMcp.Protocol do
   @moduledoc """
-  Core MCP (Model Context Protocol) definitions and message handling.
-  Based on specification version 2025-11-25.
+  JSON-RPC 2.0 message construction and MCP protocol version negotiation.
+
+  ConduitMCP targets MCP spec **2025-11-25** as the primary version and
+  also accepts clients on **2025-06-18** for backward compatibility.
+  `protocol_version/0` returns the preferred version; `negotiate_version/1`
+  resolves a client's requested version to one the server supports.
+
+  ## Building responses
+
+  Helpers `success_response/2`, `error_response/3,4`, and `notification/2`
+  produce the right wire shape — string-keyed maps with `"jsonrpc"`,
+  `"id"`, and either `"result"` or `"error"`. `validate_request/1`
+  performs lightweight shape checking on incoming messages.
+
+  ## Error codes
+
+  Standard JSON-RPC 2.0 codes and MCP-specific codes are exposed as
+  delegating functions to `ConduitMcp.Errors`:
+
+  - `parse_error/0`         → -32700
+  - `invalid_request/0`     → -32600
+  - `method_not_found/0`    → -32601
+  - `invalid_params/0`      → -32602
+  - `internal_error/0`      → -32603
+  - `server_error/0`        → -32000 (generic server-defined)
+  - `resource_not_found/0`  → -32002
+
+  Use these instead of hardcoded integers so error code constants stay
+  in one place.
+
+  ## Examples
+
+      iex> ConduitMcp.Protocol.success_response(1, %{"value" => 42})
+      %{"jsonrpc" => "2.0", "id" => 1, "result" => %{"value" => 42}}
+
+      iex> ConduitMcp.Protocol.error_response(1, -32601, "no such method")
+      %{"jsonrpc" => "2.0", "id" => 1, "error" => %{"code" => -32601, "message" => "no such method"}}
   """
 
   @protocol_version "2025-11-25"

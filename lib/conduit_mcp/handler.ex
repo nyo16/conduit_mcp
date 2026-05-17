@@ -1,6 +1,56 @@
 defmodule ConduitMcp.Handler do
   @moduledoc """
-  Handles MCP protocol requests and routes them to the appropriate server callbacks.
+  Routes JSON-RPC 2.0 MCP requests to a server module's behaviour callbacks.
+
+  `handle_request/3` is the single entry point: transports decode the
+  request body, hand the resulting map to this module, and serialize the
+  returned map back out. The handler itself is stateless — it does not own
+  the server module, the connection, or any process state. Each request
+  is independent and can run concurrently in its own Bandit process.
+
+  ## Routed methods
+
+  - `initialize` — version negotiation and capability advertisement
+  - `ping` — round-trip liveness check
+  - `tools/list`, `tools/call`
+  - `resources/list`, `resources/templates/list`, `resources/read`
+  - `resources/subscribe`, `resources/unsubscribe`
+  - `prompts/list`, `prompts/get`
+  - `completion/complete`
+  - `logging/setLevel`
+  - `tasks/get`, `tasks/cancel`, `tasks/result`, `tasks/list`
+  - `notifications/initialized`, `notifications/cancelled`
+
+  Unknown methods return `-32601 Method not found`. Unknown notifications
+  are logged and dropped (per JSON-RPC notification semantics).
+
+  ## Capability detection
+
+  When the server module defines `__capabilities__/0` (typically generated
+  by `ConduitMcp.Endpoint`), it is consulted for the `initialize` reply.
+  Otherwise the base `tools`/`resources`/`prompts` set is used.
+  Capability flags for optional features (`completions`, `logging`,
+  `resources.subscribe`) are overlaid at runtime based on which callbacks
+  the server exports, via `ConduitMcp.ServerMeta`.
+
+  ## Telemetry
+
+  Emits these events:
+
+  - `[:conduit_mcp, :request, :stop]` — every request, with
+    `%{duration: <native>}` and metadata `%{method, server_module, status}`.
+  - `[:conduit_mcp, :tool, :execute]` — per `tools/call`.
+  - `[:conduit_mcp, :resource, :read]` — per `resources/read`.
+  - `[:conduit_mcp, :prompt, :get]` — per `prompts/get`.
+  - `[:conduit_mcp, :request, :cancelled]` — when
+    `notifications/cancelled` is received.
+
+  ## Cancellation
+
+  The handler stashes the request id into `conn.assigns[:mcp_request_id]`
+  before dispatch and uses `try/after` to clear any cancellation flag
+  after the response is produced. Tools poll
+  `ConduitMcp.Cancellation.cancelled?(conn)` for cooperative aborts.
   """
 
   require Logger
