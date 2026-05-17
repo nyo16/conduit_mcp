@@ -732,6 +732,54 @@ defmodule ConduitMcp.HandlerTest do
       assert response["result"]["completion"]["total"] == 0
     end
 
+    test "completion/complete rejects unknown ref.type with -32602" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 9,
+        "method" => "completion/complete",
+        "params" => %{
+          "ref" => %{"type" => "ref/garbage", "name" => "x"},
+          "argument" => %{"name" => "a", "value" => "b"}
+        }
+      }
+
+      response = Handler.handle_request(request, ImplementedCallbacksServer)
+
+      assert response["error"]["code"] == ConduitMcp.Errors.invalid_params()
+      assert response["error"]["message"] =~ ~s(Invalid completion ref type "ref/garbage")
+    end
+
+    test "completion/complete rejects ref missing required field" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 9,
+        "method" => "completion/complete",
+        "params" => %{
+          "ref" => %{"type" => "ref/prompt"},
+          "argument" => %{"name" => "a", "value" => "b"}
+        }
+      }
+
+      response = Handler.handle_request(request, ImplementedCallbacksServer)
+      assert response["error"]["code"] == ConduitMcp.Errors.invalid_params()
+      assert response["error"]["message"] =~ "missing name"
+    end
+
+    test "completion/complete rejects ref without type" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 9,
+        "method" => "completion/complete",
+        "params" => %{
+          "ref" => %{},
+          "argument" => %{"name" => "a", "value" => "b"}
+        }
+      }
+
+      response = Handler.handle_request(request, ImplementedCallbacksServer)
+      assert response["error"]["code"] == ConduitMcp.Errors.invalid_params()
+    end
+
     test "logging/setLevel returns the server's response with level" do
       request = %{
         "jsonrpc" => "2.0",

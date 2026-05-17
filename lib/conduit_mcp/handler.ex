@@ -223,8 +223,12 @@ defmodule ConduitMcp.Handler do
         )
         |> maybe_add_meta(params)
       else
-        {:error, %{"error" => _} = scope_error} ->
-          scope_error
+        {:error, :insufficient_scope, required_scope} ->
+          Protocol.error_response(
+            id,
+            ConduitMcp.Errors.server_error(),
+            "Insufficient scope. Required: #{required_scope}"
+          )
 
         {:error, validation_errors} ->
           Protocol.error_response(
@@ -340,12 +344,7 @@ defmodule ConduitMcp.Handler do
     if Enum.all?(required, &(&1 in token_scopes)) do
       :ok
     else
-      {:error,
-       Protocol.error_response(
-         nil,
-         ConduitMcp.Errors.server_error(),
-         "Insufficient scope. Required: #{required_scope}"
-       )}
+      {:error, :insufficient_scope, required_scope}
     end
   end
 
@@ -365,18 +364,44 @@ defmodule ConduitMcp.Handler do
     ref = Map.get(params, "ref", %{})
     argument = Map.get(params, "argument", %{})
 
-    if ServerMeta.has?(server_module, :complete) do
-      dispatch_callback(
-        id,
-        fn -> server_module.handle_complete(conn, ref, argument) end,
-        "handle_complete"
-      )
-    else
-      Protocol.success_response(id, %{
-        "completion" => %{"values" => [], "total" => 0, "hasMore" => false}
-      })
+    case validate_completion_ref(ref) do
+      :ok ->
+        if ServerMeta.has?(server_module, :complete) do
+          dispatch_callback(
+            id,
+            fn -> server_module.handle_complete(conn, ref, argument) end,
+            "handle_complete"
+          )
+        else
+          Protocol.success_response(id, %{
+            "completion" => %{"values" => [], "total" => 0, "hasMore" => false}
+          })
+        end
+
+      {:error, message} ->
+        Protocol.error_response(id, ConduitMcp.Errors.invalid_params(), message)
     end
   end
+
+  defp validate_completion_ref(%{"type" => "ref/prompt", "name" => name}) when is_binary(name),
+    do: :ok
+
+  defp validate_completion_ref(%{"type" => "ref/resource", "uri" => uri}) when is_binary(uri),
+    do: :ok
+
+  defp validate_completion_ref(%{"type" => type}) when type in ["ref/prompt", "ref/resource"] do
+    {:error, "Invalid completion ref: missing #{ref_required_field(type)}"}
+  end
+
+  defp validate_completion_ref(%{"type" => type}) do
+    {:error, ~s(Invalid completion ref type "#{type}"; expected "ref/prompt" or "ref/resource")}
+  end
+
+  defp validate_completion_ref(_),
+    do: {:error, "Invalid completion ref: missing type"}
+
+  defp ref_required_field("ref/prompt"), do: "name"
+  defp ref_required_field("ref/resource"), do: "uri"
 
   defp handle_logging(id, params, server_module, conn) do
     level = Map.get(params, "level")

@@ -99,6 +99,8 @@ defmodule ConduitMcp.OAuthScopeTest do
       response = Handler.handle_request(request, ScopedServer, conn)
       assert response["error"]
       assert response["error"]["message"] =~ "Insufficient scope"
+      # Response MUST preserve the original request id, not return null
+      assert response["id"] == 1
     end
 
     test "multi-scope tool requires all scopes" do
