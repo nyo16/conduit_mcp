@@ -145,4 +145,32 @@ defmodule ConduitMcp.Cancellation do
 
     :ok
   end
+
+  defmodule Owner do
+    @moduledoc """
+    Long-lived process that owns the `:conduit_mcp_cancellations` ETS
+    table so concurrent Bandit request handlers don't race on
+    `:ets.new/2` when the table doesn't exist yet (each handler calls
+    `Cancellation.clear/1` from a `try/after`). Started under
+    `ConduitMcp.Supervisor` by `ConduitMcp.Application`.
+    """
+
+    use Agent
+
+    def start_link(_opts) do
+      Agent.start_link(
+        fn ->
+          :ets.new(:conduit_mcp_cancellations, [
+            :named_table,
+            :public,
+            :set,
+            read_concurrency: true
+          ])
+
+          :ok
+        end,
+        name: __MODULE__
+      )
+    end
+  end
 end

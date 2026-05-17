@@ -2,10 +2,14 @@ defmodule ConduitMcp.Tasks.EtsStore do
   @moduledoc """
   ETS-backed task store. Default implementation of `ConduitMcp.Tasks.Store`.
 
-  All state lives in the named ETS table `:conduit_mcp_tasks`, which is
-  created lazily on first call. The table is `:public` so any process can
-  read and write — concurrency is safe because each task id is the row key
-  and rows are written atomically.
+  All state lives in the named ETS table `:conduit_mcp_tasks`. The table
+  is owned by a long-lived `Agent` (`#{inspect(__MODULE__)}.Owner`) started
+  from `ConduitMcp.Application` so the table outlives short-lived request
+  processes — without this, a Bandit request handler that creates the
+  table dies with it, and the next request sees an empty table. The
+  table is `:public` so any process can read and write; concurrency is
+  safe because each task id is the row key and rows are written
+  atomically.
 
   This store is in-memory only. Terminal-state rows accumulate until the
   BEAM restarts; pair it with `ConduitMcp.Tasks.Janitor` to evict them on
@@ -135,5 +139,35 @@ defmodule ConduitMcp.Tasks.EtsStore do
     end
 
     :ok
+  end
+
+  defmodule Owner do
+    @moduledoc """
+    Long-lived process that owns the `:conduit_mcp_tasks` ETS table so
+    the table outlives short-lived request handlers. Started under
+    `ConduitMcp.Supervisor` by `ConduitMcp.Application` when the
+    configured tasks store is the default `ConduitMcp.Tasks.EtsStore`.
+
+    Users with a custom `:tasks_store` don't need this — it isn't
+    started in that case.
+    """
+
+    use Agent
+
+    def start_link(_opts) do
+      Agent.start_link(
+        fn ->
+          :ets.new(:conduit_mcp_tasks, [
+            :named_table,
+            :public,
+            :set,
+            read_concurrency: true
+          ])
+
+          :ok
+        end,
+        name: __MODULE__
+      )
+    end
   end
 end
