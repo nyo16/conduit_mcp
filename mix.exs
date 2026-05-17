@@ -181,7 +181,8 @@ defmodule ConduitMcp.MixProject do
         Sessions: [
           ConduitMcp.Session,
           ConduitMcp.Session.Store,
-          ConduitMcp.Session.EtsStore
+          ConduitMcp.Session.EtsStore,
+          ConduitMcp.Session.Janitor
         ],
         Tasks: [
           ConduitMcp.Tasks

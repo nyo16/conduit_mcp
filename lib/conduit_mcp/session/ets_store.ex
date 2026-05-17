@@ -80,6 +80,7 @@ defmodule ConduitMcp.Session.EtsStore do
   @doc """
   Removes sessions older than `ttl_ms` milliseconds.
   """
+  @impl true
   def cleanup(ttl_ms) do
     ensure_table()
     now = System.system_time(:millisecond)

@@ -4,6 +4,22 @@ By default, ConduitMCP uses ETS for session storage — fast but local to each n
 For multi-node deployments, implement the `ConduitMcp.Session.Store` behaviour
 with a shared backend.
 
+> **Pruning expired sessions.** ETS-backed stores accumulate entries forever
+> without a janitor — every successful `initialize` adds a row that survives
+> until the BEAM restarts. Wire `ConduitMcp.Session.Janitor` into your
+> supervision tree to prune expired sessions:
+>
+> ```elixir
+> children = [
+>   {ConduitMcp.Session.Janitor,
+>    store: ConduitMcp.Session.EtsStore,
+>    ttl: :timer.minutes(30),
+>    interval: :timer.minutes(1)}
+> ]
+> ```
+>
+> Backends with native TTL (Redis `EX`, etc.) do not need the janitor.
+
 ## Redis
 
 ```elixir
