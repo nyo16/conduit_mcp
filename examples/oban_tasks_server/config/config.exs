@@ -22,4 +22,9 @@ config :oban_tasks_server, Oban,
   queues: [mcp_tasks: 4],
   plugins: [{Oban.Plugins.Pruner, max_age: 3600}]
 
-# Tasks.Store wiring lands in the next commit (6).
+# Wire ConduitMCP to use the Oban-backed task store. This is the key
+# line that flips the library from the default in-memory ETS backend to
+# the durable SQLite-backed one. The standard tasks/get, tasks/cancel,
+# tasks/result, and tasks/list JSON-RPC routes pick this up
+# transparently — no handler changes needed.
+config :conduit_mcp, :tasks_store, Examples.ObanTasks.Store
