@@ -18,14 +18,14 @@ defmodule Examples.ObanTasks.Migrator do
 
   @impl true
   def init(_opts) do
-    {:ok, %{}, {:continue, :migrate}}
-  end
-
-  @impl true
-  def handle_continue(:migrate, state) do
+    # Run migrations synchronously inside init/1 so the supervisor
+    # blocks on completion before starting the next child (Rescuer,
+    # which needs the oban_jobs table to exist). Using handle_continue
+    # would race with sibling children since the supervisor only waits
+    # on init/1 returning, not on handle_continue.
     {:ok, _, _} = Ecto.Migrator.with_repo(Repo, &run_migrations/1)
     Logger.info("ObanTasks: migrations up to date at #{Repo.config()[:database]}")
-    {:noreply, state}
+    {:ok, %{}}
   end
 
   defp run_migrations(repo) do
