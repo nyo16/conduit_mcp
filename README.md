@@ -27,12 +27,57 @@ An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcont
 ```elixir
 def deps do
   [
-    {:conduit_mcp, "~> 0.9.0"}
+    {:conduit_mcp, "~> 0.9"}
   ]
 end
 ```
 
 Requires Elixir ~> 1.18.
+
+## Quick Start
+
+Define a server in one module:
+
+```elixir
+defmodule MyServer do
+  use ConduitMcp.Server
+
+  tool "echo", "Echo a message" do
+    param :message, :string, "Message to echo", required: true
+    handle fn _conn, %{"message" => msg} -> text(msg) end
+  end
+end
+```
+
+Run it with Bandit:
+
+```elixir
+# lib/my_app/application.ex
+children = [
+  {Bandit, plug: {ConduitMcp.Transport.StreamableHTTP, server_module: MyServer}, port: 4000}
+]
+```
+
+Try it:
+
+```bash
+curl -s -X POST http://localhost:4000/ -H 'Content-Type: application/json' -d '{
+  "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+  "params": {"name": "echo", "arguments": {"message": "hello"}}
+}'
+```
+
+For multi-tool servers, authentication, sessions, OAuth, MCP Apps, and more, see the [guides](guides/) and [examples/](examples/).
+
+## Stability
+
+ConduitMCP is pre-1.0. Most APIs are stable; the following are explicitly experimental and may change before 1.0:
+
+- `ConduitMcp.Tasks` and `ConduitMcp.Tasks.Janitor` — task lifecycle is new in MCP spec 2025-11-25 and the surface area may evolve.
+- `ConduitMcp.Client` — message builders for server-to-client requests (sampling, elicitation, roots). The bidirectional transport these depend on is not yet wired through Streamable HTTP.
+- `ConduitMcp.Cancellation` — the cooperative cancellation model may grow a more direct preemption path.
+
+Breaking changes between minor versions will be called out in [CHANGELOG.md](CHANGELOG.md).
 
 ## Three Ways to Define Servers
 
