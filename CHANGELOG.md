@@ -46,6 +46,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Session.Store` behaviour** gained an optional `cleanup/1` callback
   used by `Session.Janitor`. Existing stores that don't implement it
   continue to work; the janitor logs a warning and idles.
+- **OAuth scope rejection** on `tools/call` now returns a JSON-RPC
+  error with the request's id (previously `nil`, breaking client
+  correlation).
+
+### Removed
+
+- **Validation telemetry events** `[:conduit_mcp, :validation, :started]`,
+  `[:conduit_mcp, :validation, :success]`, and
+  `[:conduit_mcp, :validation, :failed]` are no longer emitted. They
+  fired on every validated request (three per call, even with no
+  handler attached) and were redundant with the existing
+  `[:conduit_mcp, :tool, :execute]` event. Migrate attached handlers
+  to `[:conduit_mcp, :tool, :execute]` whose metadata's `:status`
+  field indicates `:ok` / `:error` and whose payload includes
+  validation failures.
 
 ## [0.9.3] - 2026-04-18
 
