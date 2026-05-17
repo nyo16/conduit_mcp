@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`resources/templates/list` method** — MCP-spec-required endpoint for
+  discovering URI-templated resources. Templated resources (URIs with
+  `{param}` placeholders) now appear here instead of in `resources/list`.
+  New optional `handle_list_resource_templates/1` Server callback.
+- **`notifications/cancelled` handling** via the new
+  `ConduitMcp.Cancellation` module. Tool authors poll
+  `Cancellation.cancelled?(conn)` to cooperatively abort long-running
+  work. Handler stashes the request id in `conn.assigns[:mcp_request_id]`
+  and emits `[:conduit_mcp, :request, :cancelled]` telemetry.
+- **Capability advertisement** for `completions`, `logging`, and
+  `resources.subscribe` — previously these features were routed but
+  never declared on `initialize`, so spec-compliant clients never used
+  them.
+- **Tool schema fields** `title`, `icons`, `outputSchema`, and
+  `execution.taskSupport` (MCP 2025-11-25). New DSL macros: `title/1`,
+  `icons/1`, `output_schema/1`, `task_support/1`.
+- **Tasks JSON-RPC methods** — `tasks/get`, `tasks/cancel`,
+  `tasks/result`, `tasks/list` routed to `ConduitMcp.Tasks`.
+- **`task/2` DSL helper** for returning a task id from a long-running
+  tool invocation.
+- **`ConduitMcp.Session.Janitor`** — opt-in GenServer that periodically
+  prunes expired sessions from the ETS-backed store. Add to your
+  supervision tree to bound memory growth on public-facing servers.
+- **`ConduitMcp.Tasks.delete/1`, `cleanup/1`, and `Tasks.Janitor`** —
+  parallel cleanup for the tasks table, which previously had no
+  eviction at all.
+- **`examples/async_tasks_server/`** — runnable example demonstrating
+  the MCP 2025-11-25 tasks lifecycle.
+
+### Changed
+
+- **`resources/list` now returns only static URIs.** Templated URIs
+  move to `resources/templates/list` per spec. Clients that relied on
+  templated URIs in `resources/list` were already non-spec-compliant.
+- **`Session.Store` behaviour** gained an optional `cleanup/1` callback
+  used by `Session.Janitor`. Existing stores that don't implement it
+  continue to work; the janitor logs a warning and idles.
+
 ## [0.9.3] - 2026-04-18
 
 ### Fixed

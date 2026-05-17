@@ -102,6 +102,18 @@ defmodule ConduitMcp.Handler do
       "resources/unsubscribe" ->
         handle_unsubscribe(id, params, server_module, conn)
 
+      "tasks/get" ->
+        handle_tasks_get(id, params)
+
+      "tasks/cancel" ->
+        handle_tasks_cancel(id, params)
+
+      "tasks/result" ->
+        handle_tasks_result(id, params)
+
+      "tasks/list" ->
+        handle_tasks_list(id, params)
+
       _ ->
         Protocol.error_response(
           id,
@@ -414,6 +426,66 @@ defmodule ConduitMcp.Handler do
         "Resource subscriptions not supported"
       )
     end
+  end
+
+  defp handle_tasks_get(id, params) do
+    case Map.get(params, "taskId") do
+      nil ->
+        Protocol.error_response(id, Protocol.invalid_params(), "Missing taskId")
+
+      task_id ->
+        case ConduitMcp.Tasks.get(task_id) do
+          {:ok, task} -> Protocol.success_response(id, %{"task" => task})
+          {:error, :not_found} -> task_not_found(id, task_id)
+        end
+    end
+  end
+
+  defp handle_tasks_cancel(id, params) do
+    case Map.get(params, "taskId") do
+      nil ->
+        Protocol.error_response(id, Protocol.invalid_params(), "Missing taskId")
+
+      task_id ->
+        case ConduitMcp.Tasks.cancel(task_id) do
+          {:ok, task} -> Protocol.success_response(id, %{"task" => task})
+          {:error, :not_found} -> task_not_found(id, task_id)
+        end
+    end
+  end
+
+  defp handle_tasks_result(id, params) do
+    case Map.get(params, "taskId") do
+      nil ->
+        Protocol.error_response(id, Protocol.invalid_params(), "Missing taskId")
+
+      task_id ->
+        case ConduitMcp.Tasks.get(task_id) do
+          {:ok, task} ->
+            case Map.get(task, "status") do
+              "completed" -> Protocol.success_response(id, Map.get(task, "result", %{}))
+              "failed" -> Protocol.success_response(id, %{"error" => Map.get(task, "error")})
+              other -> Protocol.error_response(id, -32004, "Task not finished (status: #{other})")
+            end
+
+          {:error, :not_found} ->
+            task_not_found(id, task_id)
+        end
+    end
+  end
+
+  defp handle_tasks_list(id, params) do
+    opts = if status = Map.get(params, "status"), do: [status: status], else: []
+    tasks = ConduitMcp.Tasks.list(opts)
+    Protocol.success_response(id, %{"tasks" => tasks})
+  end
+
+  defp task_not_found(id, task_id) do
+    Protocol.error_response(
+      id,
+      ConduitMcp.Errors.resource_not_found(),
+      "Task not found: #{task_id}"
+    )
   end
 
   defp dispatch_callback(id, callback_fn, callback_name) do

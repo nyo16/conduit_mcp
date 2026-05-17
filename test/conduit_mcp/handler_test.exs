@@ -791,6 +791,140 @@ defmodule ConduitMcp.HandlerTest do
     end
   end
 
+  describe "tasks/* methods" do
+    setup do
+      if :ets.whereis(:conduit_mcp_tasks) != :undefined do
+        :ets.delete_all_objects(:conduit_mcp_tasks)
+      end
+
+      :ok
+    end
+
+    test "tasks/get returns task metadata for an existing task" do
+      {:ok, _} = ConduitMcp.Tasks.create("t1", %{"tool" => "echo"})
+
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tasks/get",
+        "params" => %{"taskId" => "t1"}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+
+      assert response["result"]["task"]["task_id"] == "t1"
+      assert response["result"]["task"]["status"] == "working"
+    end
+
+    test "tasks/get returns -32002 for missing task" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tasks/get",
+        "params" => %{"taskId" => "missing"}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+
+      assert response["error"]["code"] == ConduitMcp.Errors.resource_not_found()
+    end
+
+    test "tasks/get returns invalid_params when taskId missing" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tasks/get",
+        "params" => %{}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+      assert response["error"]["code"] == ConduitMcp.Errors.invalid_params()
+    end
+
+    test "tasks/cancel transitions a working task to cancelled" do
+      {:ok, _} = ConduitMcp.Tasks.create("t2", %{"tool" => "echo"})
+
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tasks/cancel",
+        "params" => %{"taskId" => "t2"}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+      assert response["result"]["task"]["status"] == "cancelled"
+    end
+
+    test "tasks/result returns the result for a completed task" do
+      {:ok, _} = ConduitMcp.Tasks.create("t3", %{"tool" => "echo"})
+
+      ConduitMcp.Tasks.update("t3", %{
+        "status" => "completed",
+        "result" => %{"content" => [%{"type" => "text", "text" => "done"}]}
+      })
+
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tasks/result",
+        "params" => %{"taskId" => "t3"}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+
+      assert response["result"]["content"] == [%{"type" => "text", "text" => "done"}]
+    end
+
+    test "tasks/result errors when task is still working" do
+      {:ok, _} = ConduitMcp.Tasks.create("t4", %{"tool" => "echo"})
+
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tasks/result",
+        "params" => %{"taskId" => "t4"}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+      assert response["error"]["code"] == -32004
+      assert response["error"]["message"] =~ "Task not finished"
+    end
+
+    test "tasks/list returns all tasks" do
+      {:ok, _} = ConduitMcp.Tasks.create("t5")
+      {:ok, _} = ConduitMcp.Tasks.create("t6")
+
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tasks/list",
+        "params" => %{}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+      task_ids = Enum.map(response["result"]["tasks"], & &1["task_id"])
+      assert "t5" in task_ids
+      assert "t6" in task_ids
+    end
+
+    test "tasks/list filters by status" do
+      {:ok, _} = ConduitMcp.Tasks.create("working_one")
+      {:ok, _} = ConduitMcp.Tasks.create("done_one")
+      ConduitMcp.Tasks.update("done_one", %{"status" => "completed"})
+
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tasks/list",
+        "params" => %{"status" => "completed"}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+      task_ids = Enum.map(response["result"]["tasks"], & &1["task_id"])
+      assert task_ids == ["done_one"]
+    end
+  end
+
   describe "resources/templates/list" do
     test "returns empty list when server does not implement the callback" do
       request = %{

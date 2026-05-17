@@ -145,6 +145,48 @@ defmodule ConduitMcp.DSL.Helpers do
   end
 
   @doc """
+  Creates an MCP `tools/call` response that hands a long-running operation
+  off to a task.
+
+  The tool returns immediately with a `task_id`; the client polls
+  `tasks/get` / `tasks/result` to retrieve progress and the final result.
+  The task itself is tracked by `ConduitMcp.Tasks` — the tool author is
+  responsible for spawning the actual work (e.g., via `Task.Supervisor`)
+  and updating the task's status with `ConduitMcp.Tasks.update/2`.
+
+  Requires the tool's `task_support` to be `:supported` or `:required`.
+
+  ## Example
+
+      tool "render_video", "Render a video" do
+        task_support :supported
+        param :script, :string, "Script", required: true
+
+        handle fn _conn, params ->
+          task_id = ConduitMcp.Tasks.generate_id()
+          {:ok, _} = ConduitMcp.Tasks.create(task_id, %{"tool" => "render_video"})
+
+          Task.Supervisor.start_child(MyApp.Workers, fn ->
+            result = MyRenderer.render(params)
+            ConduitMcp.Tasks.update(task_id,
+              %{"status" => "completed", "result" => result})
+          end)
+
+          task(task_id, "Rendering started")
+        end
+      end
+  """
+  defmacro task(task_id, message \\ "Task started") do
+    quote do
+      {:ok,
+       %{
+         "content" => [%{"type" => "text", "text" => unquote(message)}],
+         "_meta" => %{"task" => %{"id" => unquote(task_id)}}
+       }}
+    end
+  end
+
+  @doc """
   Creates an image content response.
 
   ## Example
