@@ -193,27 +193,45 @@ defmodule ConduitMcp.EndpointTest do
   end
 
   describe "handle_list_resources/1" do
-    test "returns all registered resources" do
+    test "returns only static (non-templated) resources" do
       assert {:ok, %{"resources" => resources}} =
                FullEndpoint.handle_list_resources(%Plug.Conn{})
 
-      assert length(resources) == 2
-
       uris = Enum.map(resources, & &1["uri"])
-      assert "user://{id}" in uris
       assert "static://readme" in uris
+      refute "user://{id}" in uris
     end
 
-    test "resource schemas have correct structure" do
+    test "static resource schemas have correct structure" do
       {:ok, %{"resources" => resources}} = FullEndpoint.handle_list_resources(%Plug.Conn{})
-      user = Enum.find(resources, &(&1["uri"] == "user://{id}"))
+      static = Enum.find(resources, &(&1["uri"] == "static://readme"))
 
-      assert user["description"] == "User resource"
-      assert user["mimeType"] == "application/json"
+      assert is_map(static)
     end
 
     test "endpoint without resources returns empty list" do
       assert {:ok, %{"resources" => []}} = ToolsOnlyEndpoint.handle_list_resources(%Plug.Conn{})
+    end
+  end
+
+  describe "handle_list_resource_templates/1" do
+    test "returns only templated resources, with uriTemplate key" do
+      assert {:ok, %{"resourceTemplates" => templates}} =
+               FullEndpoint.handle_list_resource_templates(%Plug.Conn{})
+
+      uri_templates = Enum.map(templates, & &1["uriTemplate"])
+      assert "user://{id}" in uri_templates
+      refute "static://readme" in uri_templates
+
+      user_template = Enum.find(templates, &(&1["uriTemplate"] == "user://{id}"))
+      assert user_template["description"] == "User resource"
+      assert user_template["mimeType"] == "application/json"
+      refute Map.has_key?(user_template, "uri")
+    end
+
+    test "endpoint without templated resources returns empty list" do
+      assert {:ok, %{"resourceTemplates" => []}} =
+               ToolsOnlyEndpoint.handle_list_resource_templates(%Plug.Conn{})
     end
   end
 
@@ -413,7 +431,7 @@ defmodule ConduitMcp.EndpointTest do
       assert hd(result["result"]["content"])["text"] == "handler test"
     end
 
-    test "Handler dispatches resources/list to endpoint" do
+    test "Handler dispatches resources/list to endpoint (static only)" do
       request = %{
         "jsonrpc" => "2.0",
         "id" => 3,
@@ -421,7 +439,24 @@ defmodule ConduitMcp.EndpointTest do
       }
 
       result = ConduitMcp.Handler.handle_request(request, FullEndpoint, %Plug.Conn{})
-      assert length(result["result"]["resources"]) == 2
+      uris = Enum.map(result["result"]["resources"], & &1["uri"])
+      assert "static://readme" in uris
+      refute "user://{id}" in uris
+    end
+
+    test "Handler dispatches resources/templates/list to endpoint" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 3,
+        "method" => "resources/templates/list"
+      }
+
+      result = ConduitMcp.Handler.handle_request(request, FullEndpoint, %Plug.Conn{})
+
+      uri_templates =
+        Enum.map(result["result"]["resourceTemplates"], & &1["uriTemplate"])
+
+      assert "user://{id}" in uri_templates
     end
 
     test "Handler dispatches resources/read to endpoint" do

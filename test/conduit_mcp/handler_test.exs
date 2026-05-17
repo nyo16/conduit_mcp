@@ -775,6 +775,20 @@ defmodule ConduitMcp.HandlerTest do
     end
   end
 
+  describe "resources/templates/list" do
+    test "returns empty list when server does not implement the callback" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "resources/templates/list"
+      }
+
+      response = Handler.handle_request(request, TestServer)
+
+      assert response["result"] == %{"resourceTemplates" => []}
+    end
+  end
+
   describe "capability advertisement on initialize" do
     setup do
       ConduitMcp.ServerMeta.clear(TestServer)

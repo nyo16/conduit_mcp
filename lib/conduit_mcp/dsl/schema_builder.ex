@@ -115,6 +115,8 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
 
   @doc """
   Builds a resource schema from DSL definition.
+
+  Used for `resources/list` (static URIs only).
   """
   def build_resource_schema(%{uri: uri, description: description, mime_type: mime_type}) do
     schema = %{
@@ -125,6 +127,40 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
     schema = if mime_type, do: Map.put(schema, "mimeType", mime_type), else: schema
 
     schema
+  end
+
+  @doc """
+  Builds a resource-template schema from a templated DSL definition.
+
+  Used for `resources/templates/list` (URIs with `{param}` placeholders).
+  Emits `uriTemplate` instead of `uri` per MCP spec.
+  """
+  def build_resource_template_schema(%{
+        uri: uri,
+        description: description,
+        mime_type: mime_type
+      }) do
+    schema = %{"uriTemplate" => uri}
+    schema = if description, do: Map.put(schema, "description", description), else: schema
+    if mime_type, do: Map.put(schema, "mimeType", mime_type), else: schema
+  end
+
+  @doc """
+  Returns true when the given resource definition's URI contains a `{param}`
+  template placeholder.
+  """
+  def templated?(%{uri: uri}) when is_binary(uri), do: String.contains?(uri, "{")
+  def templated?(%{"uri" => uri}) when is_binary(uri), do: String.contains?(uri, "{")
+  def templated?(_), do: false
+
+  @doc """
+  Converts a static resource JSON schema (with `"uri"`) into a resource-template
+  schema (with `"uriTemplate"`). Other keys are preserved.
+  """
+  def to_resource_template_schema(%{"uri" => uri} = schema) do
+    schema
+    |> Map.delete("uri")
+    |> Map.put("uriTemplate", uri)
   end
 
   # Private helpers

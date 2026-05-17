@@ -390,20 +390,31 @@ defmodule ConduitMcp.DSLTest do
   end
 
   describe "DSL resource definitions" do
-    test "generates resource schemas correctly" do
+    test "generates resource schemas correctly (static only in resources/list)" do
       conn = %Plug.Conn{}
       {:ok, result} = DSLTestServer.handle_list_resources(conn)
 
       resources = result["resources"]
       assert is_list(resources)
-      assert length(resources) == 2
 
-      user_resource = Enum.find(resources, fn r -> r["uri"] == "user://{id}" end)
-      assert user_resource["description"] == "User profile data"
-      assert user_resource["mimeType"] == "application/json"
+      # Templated URIs belong in resources/templates/list per MCP spec
+      refute Enum.any?(resources, fn r -> r["uri"] == "user://{id}" end)
 
       static_resource = Enum.find(resources, fn r -> r["uri"] == "static://readme" end)
       assert static_resource["mimeType"] == "text/markdown"
+    end
+
+    test "templated resources appear in resources/templates/list" do
+      conn = %Plug.Conn{}
+      {:ok, result} = DSLTestServer.handle_list_resource_templates(conn)
+
+      templates = result["resourceTemplates"]
+      assert is_list(templates)
+
+      user_template = Enum.find(templates, fn r -> r["uriTemplate"] == "user://{id}" end)
+      assert user_template["description"] == "User profile data"
+      assert user_template["mimeType"] == "application/json"
+      refute Map.has_key?(user_template, "uri")
     end
 
     test "executes resource read with URI template" do

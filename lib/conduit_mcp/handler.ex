@@ -69,6 +69,9 @@ defmodule ConduitMcp.Handler do
       "resources/list" ->
         dispatch_list(id, server_module, :handle_list_resources, conn, params)
 
+      "resources/templates/list" ->
+        handle_list_resource_templates(id, server_module, conn)
+
       "resources/read" ->
         handle_resource_read(id, params, server_module, conn)
 
@@ -319,6 +322,18 @@ defmodule ConduitMcp.Handler do
          ConduitMcp.Errors.server_error(),
          "Insufficient scope. Required: #{required_scope}"
        )}
+    end
+  end
+
+  defp handle_list_resource_templates(id, server_module, conn) do
+    if ServerMeta.has?(server_module, :list_resource_templates) do
+      dispatch_callback(
+        id,
+        fn -> server_module.handle_list_resource_templates(conn) end,
+        "handle_list_resource_templates"
+      )
+    else
+      Protocol.success_response(id, %{"resourceTemplates" => []})
     end
   end
 

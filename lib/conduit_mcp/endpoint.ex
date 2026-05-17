@@ -103,8 +103,18 @@ defmodule ConduitMcp.Endpoint do
 
     # Collect schemas at compile time
     tool_schemas = Enum.map(tools, & &1.__component_schema__())
-    resource_schemas = Enum.map(resources, & &1.__component_schema__())
     prompt_schemas = Enum.map(prompts, & &1.__component_schema__())
+
+    {resource_schemas, resource_template_schemas} =
+      resources
+      |> Enum.map(& &1.__component_schema__())
+      |> Enum.split_with(fn schema -> not String.contains?(schema["uri"] || "", "{") end)
+
+    resource_template_schemas =
+      Enum.map(
+        resource_template_schemas,
+        &ConduitMcp.DSL.SchemaBuilder.to_resource_template_schema/1
+      )
 
     # Build tool dispatch clauses
     tool_clauses = generate_tool_clauses(tools)
@@ -157,6 +167,10 @@ defmodule ConduitMcp.Endpoint do
 
       def handle_list_resources(_conn) do
         {:ok, %{"resources" => unquote(Macro.escape(resource_schemas))}}
+      end
+
+      def handle_list_resource_templates(_conn) do
+        {:ok, %{"resourceTemplates" => unquote(Macro.escape(resource_template_schemas))}}
       end
 
       unquote(resource_clause)

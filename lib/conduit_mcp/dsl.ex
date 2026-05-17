@@ -885,10 +885,19 @@ defmodule ConduitMcp.DSL do
     prompt_schemas =
       prompts |> Enum.reverse() |> Enum.map(&ConduitMcp.DSL.SchemaBuilder.build_prompt_schema/1)
 
-    resource_schemas =
+    {templated_resources, static_resources} =
       resources
       |> Enum.reverse()
-      |> Enum.map(&ConduitMcp.DSL.SchemaBuilder.build_resource_schema/1)
+      |> Enum.split_with(&ConduitMcp.DSL.SchemaBuilder.templated?/1)
+
+    resource_schemas =
+      Enum.map(static_resources, &ConduitMcp.DSL.SchemaBuilder.build_resource_schema/1)
+
+    resource_template_schemas =
+      Enum.map(
+        templated_resources,
+        &ConduitMcp.DSL.SchemaBuilder.build_resource_template_schema/1
+      )
 
     # Generate validation schema lookup functions
     validation_lookup_functions =
@@ -930,6 +939,7 @@ defmodule ConduitMcp.DSL do
       @tools unquote(Macro.escape(tool_schemas))
       @prompts unquote(Macro.escape(prompt_schemas))
       @resources unquote(Macro.escape(resource_schemas))
+      @resource_templates unquote(Macro.escape(resource_template_schemas))
 
       # Inject validation schema lookup functions
       unquote(validation_lookup_functions)
@@ -980,6 +990,10 @@ defmodule ConduitMcp.DSL do
       # Always generate handle_list_resources (empty list if no resources)
       def handle_list_resources(_conn) do
         {:ok, %{"resources" => @resources}}
+      end
+
+      def handle_list_resource_templates(_conn) do
+        {:ok, %{"resourceTemplates" => @resource_templates}}
       end
 
       # Inject generated resource handler clauses
