@@ -4,6 +4,23 @@
 map directly to MCP task statuses, PostgreSQL persistence works across nodes, and
 Oban Pro workflows enable chained task execution.
 
+ConduitMCP makes the storage layer pluggable via the
+`ConduitMcp.Tasks.Store` behaviour — flip the framework from its
+default in-memory ETS store to an Oban-backed store with one config line:
+
+```elixir
+config :conduit_mcp, :tasks_store, MyApp.ObanTaskStore
+```
+
+The standard `tasks/get`, `tasks/cancel`, `tasks/result`, and
+`tasks/list` JSON-RPC routes dispatch through the configured store
+without any handler changes.
+
+> **Runnable examples**
+>
+> - SQLite (single-node, dependency-light): [`examples/oban_tasks_server/`](https://github.com/nyo16/conduit_mcp/tree/master/examples/oban_tasks_server) — full mix project; `cd` in and `iex -S mix`.
+> - Postgres (multi-node, production shape): [`examples/oban_task_store.ex`](https://github.com/nyo16/conduit_mcp/blob/master/examples/oban_task_store.ex) — drop-in reference.
+
 ## Status Mapping
 
 | MCP Task Status | Oban Job State |
@@ -120,8 +137,13 @@ end
 
 ### Task Store
 
+A `ConduitMcp.Tasks.Store` implementation. The framework dispatches every
+`tasks/*` route through this module once configured.
+
 ```elixir
 defmodule MyApp.ObanTaskStore do
+  @behaviour ConduitMcp.Tasks.Store
+
   import Ecto.Query
   @repo MyApp.Repo
 
@@ -183,11 +205,22 @@ end
 
 ## Usage in MCP Server
 
+Register the store once in config:
+
+```elixir
+# config/config.exs
+config :conduit_mcp, :tasks_store, MyApp.ObanTaskStore
+```
+
+Then write tools that use the standard `ConduitMcp.Tasks` API and the
+`task/2` helper — the storage layer is transparent:
+
 ```elixir
 defmodule MyApp.MCPServer do
   use ConduitMcp.Server
 
   tool "analyze_dataset", "Run long-running analysis" do
+    task_support :supported
     scope "analysis:run"
     param :dataset_id, :string, "Dataset ID", required: true
 
@@ -199,11 +232,9 @@ defmodule MyApp.MCPServer do
         "dataset_id" => dataset_id
       })
 
-      # Return immediately — client polls via tasks/get
-      {:ok, %{
-        "content" => [%{"type" => "text", "text" => "Analysis started: #{task_id}"}],
-        "_meta" => %{"taskId" => task_id, "status" => "working"}
-      }}
+      # Returns {:ok, %{"content" => [...], "_meta" => %{"task" => %{"id" => task_id}}}}.
+      # Clients see the task id in the spec-compliant _meta.task.id shape.
+      task(task_id, "Analysis started")
     end
   end
 end
