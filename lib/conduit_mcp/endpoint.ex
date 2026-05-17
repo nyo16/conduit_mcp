@@ -146,7 +146,22 @@ defmodule ConduitMcp.Endpoint do
       opts
       |> Keyword.take([:name, :version, :rate_limit, :message_rate_limit, :auth])
 
+    templated_uris =
+      Enum.map(resources, fn mod -> Keyword.fetch!(mod.__component_opts__(), :uri) end)
+      |> Enum.filter(&String.contains?(&1, "{"))
+
     quote do
+      @on_load :__precompile_template_regexes__
+
+      def __precompile_template_regexes__ do
+        Enum.each(
+          unquote(templated_uris),
+          &ConduitMcp.DSL.precompile_template_regex(__MODULE__, &1)
+        )
+
+        :ok
+      end
+
       # --- Tool callbacks ---
 
       def handle_list_tools(_conn) do
@@ -335,24 +350,27 @@ defmodule ConduitMcp.Endpoint do
         end
       end)
 
-    # Templated URIs use pre-compiled regex scan
-    templated_compiled =
+    # Templated URIs use pre-compiled regex scan; store {template, mod} pairs
+    # and look up the regex from persistent_term at request time to avoid
+    # per-process Regex.recompile/1 (Macro.escape strips re_pattern).
+    templated_template_mod_pairs =
       Enum.map(templated_resources, fn mod ->
-        template = Keyword.fetch!(mod.__component_opts__(), :uri)
-        {param_names, regex} = ConduitMcp.DSL.compile_uri_template(template)
-        {param_names, regex, mod}
+        {Keyword.fetch!(mod.__component_opts__(), :uri), mod}
       end)
 
     templated_clause =
       if templated_resources != [] do
         quote do
-          @__resource_compiled unquote(Macro.escape(templated_compiled))
+          @__resource_template_pairs unquote(Macro.escape(templated_template_mod_pairs))
 
           def handle_read_resource(conn, uri) do
-            Enum.find_value(@__resource_compiled, fn {param_names, regex, mod} ->
+            Enum.find_value(@__resource_template_pairs, fn {template, mod} ->
+              {param_names, regex} = ConduitMcp.DSL.template_regex(__MODULE__, template)
+
               case ConduitMcp.DSL.extract_uri_params_compiled(uri, param_names, regex) do
                 {:ok, params} ->
-                  atom_params = Map.new(params, fn {k, v} -> {String.to_atom(k), v} end)
+                  atom_params = Map.new(params, fn {k, v} -> {String.to_existing_atom(k), v} end)
+
                   mod.execute(atom_params, conn)
 
                 :no_match ->

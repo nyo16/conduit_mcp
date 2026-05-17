@@ -1043,12 +1043,29 @@ defmodule ConduitMcp.DSL do
         end
       end)
 
+    templated_uris = Enum.map(templated_resources, & &1.uri)
+
     quote do
       # Use pre-built schemas
       @tools unquote(Macro.escape(tool_schemas))
       @prompts unquote(Macro.escape(prompt_schemas))
       @resources unquote(Macro.escape(resource_schemas))
       @resource_templates unquote(Macro.escape(resource_template_schemas))
+
+      # Eagerly compile templated-resource regexes into persistent_term at
+      # module load. Avoids per-request Regex.recompile/1 (Macro.escape
+      # strips the native re_pattern, so embedding the regex literal would
+      # force a recompile in every Bandit request process).
+      @on_load :__precompile_template_regexes__
+
+      def __precompile_template_regexes__ do
+        Enum.each(
+          unquote(templated_uris),
+          &ConduitMcp.DSL.precompile_template_regex(__MODULE__, &1)
+        )
+
+        :ok
+      end
 
       # Inject validation schema lookup functions
       unquote(validation_lookup_functions)
@@ -1268,14 +1285,10 @@ defmodule ConduitMcp.DSL do
   end
 
   defp generate_templated_resource_match(%{uri: res_uri, handler: {:fn_ast, handler_ast}}) do
-    {param_names, regex} = ConduitMcp.DSL.compile_uri_template(res_uri)
-
     quote do
-      case ConduitMcp.DSL.extract_uri_params_compiled(
-             uri,
-             unquote(param_names),
-             unquote(Macro.escape(regex))
-           ) do
+      {param_names, regex} = ConduitMcp.DSL.template_regex(__MODULE__, unquote(res_uri))
+
+      case ConduitMcp.DSL.extract_uri_params_compiled(uri, param_names, regex) do
         {:ok, params} -> unquote(handler_ast).(conn, params, %{})
         :no_match -> nil
       end
@@ -1283,14 +1296,10 @@ defmodule ConduitMcp.DSL do
   end
 
   defp generate_templated_resource_match(%{uri: res_uri, handler: {:mfa, {mod, fun}}}) do
-    {param_names, regex} = ConduitMcp.DSL.compile_uri_template(res_uri)
-
     quote do
-      case ConduitMcp.DSL.extract_uri_params_compiled(
-             uri,
-             unquote(param_names),
-             unquote(Macro.escape(regex))
-           ) do
+      {param_names, regex} = ConduitMcp.DSL.template_regex(__MODULE__, unquote(res_uri))
+
+      case ConduitMcp.DSL.extract_uri_params_compiled(uri, param_names, regex) do
         {:ok, params} -> apply(unquote(mod), unquote(fun), [conn, params, %{}])
         :no_match -> nil
       end
@@ -1298,14 +1307,10 @@ defmodule ConduitMcp.DSL do
   end
 
   defp generate_templated_resource_match(%{uri: res_uri, handler: {:app_view, view_path}}) do
-    {param_names, regex} = ConduitMcp.DSL.compile_uri_template(res_uri)
-
     quote do
-      case ConduitMcp.DSL.extract_uri_params_compiled(
-             uri,
-             unquote(param_names),
-             unquote(Macro.escape(regex))
-           ) do
+      {param_names, regex} = ConduitMcp.DSL.template_regex(__MODULE__, unquote(res_uri))
+
+      case ConduitMcp.DSL.extract_uri_params_compiled(uri, param_names, regex) do
         {:ok, _params} ->
           {:ok,
            %{
@@ -1361,6 +1366,37 @@ defmodule ConduitMcp.DSL do
 
       [_full | captured_values] ->
         {:ok, Map.new(Enum.zip(param_names, captured_values))}
+    end
+  end
+
+  @doc """
+  Stores a compiled URI template regex in `:persistent_term` so that it can
+  be looked up at request time without paying the per-process
+  `Regex.recompile/1` cost incurred when a `Regex` struct is embedded via
+  `Macro.escape/1`.
+
+  Called at module load time from generated `@on_load` hooks.
+  """
+  def precompile_template_regex(module, template) do
+    {param_names, regex} = compile_uri_template(template)
+    :persistent_term.put({__MODULE__, module, template}, {param_names, regex})
+    :ok
+  end
+
+  @doc """
+  Fetches a `{param_names, regex}` tuple previously stored by
+  `precompile_template_regex/2`, falling back to recompiling on cache miss
+  (defensive — should not normally happen).
+  """
+  def template_regex(module, template) do
+    case :persistent_term.get({__MODULE__, module, template}, nil) do
+      nil ->
+        result = compile_uri_template(template)
+        :persistent_term.put({__MODULE__, module, template}, result)
+        result
+
+      cached ->
+        cached
     end
   end
 end
