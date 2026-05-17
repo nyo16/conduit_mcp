@@ -1,5 +1,12 @@
 import Config
 
+# Verbose logger so a failed JSON-RPC call shows the actual exception
+# instead of just "Error handling method". Useful when developing the
+# example; downstream apps should override.
+config :logger, :default_formatter,
+  format: "$time [$level] $message $metadata\n",
+  metadata: [:error, :method, :request_id, :crash_reason]
+
 # Ecto repos managed by this app
 config :oban_tasks_server, ecto_repos: [Examples.ObanTasks.Repo]
 

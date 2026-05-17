@@ -7,6 +7,8 @@ defmodule Examples.ObanTasks.Application do
 
   @impl true
   def start(_type, _args) do
+    Examples.ObanTasks.Telemetry.attach()
+
     children = [
       # 1. Repo first — Oban introspects it on start.
       Examples.ObanTasks.Repo,
