@@ -110,6 +110,10 @@ defmodule ConduitMcp.DSL do
       @mcp_current_tool_annotations nil
       @mcp_current_tool_scope nil
       @mcp_current_tool_meta nil
+      @mcp_current_tool_title nil
+      @mcp_current_tool_icons nil
+      @mcp_current_tool_output_schema nil
+      @mcp_current_tool_task_support nil
 
       unquote(block)
 
@@ -121,7 +125,11 @@ defmodule ConduitMcp.DSL do
         handler: @mcp_current_tool_handler,
         annotations: @mcp_current_tool_annotations,
         scope: @mcp_current_tool_scope,
-        meta: @mcp_current_tool_meta
+        meta: @mcp_current_tool_meta,
+        title: @mcp_current_tool_title,
+        icons: @mcp_current_tool_icons,
+        output_schema: @mcp_current_tool_output_schema,
+        task_support: @mcp_current_tool_task_support
       }
 
       # Clean up
@@ -132,6 +140,10 @@ defmodule ConduitMcp.DSL do
       Module.delete_attribute(__MODULE__, :mcp_current_tool_annotations)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_scope)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_meta)
+      Module.delete_attribute(__MODULE__, :mcp_current_tool_title)
+      Module.delete_attribute(__MODULE__, :mcp_current_tool_icons)
+      Module.delete_attribute(__MODULE__, :mcp_current_tool_output_schema)
+      Module.delete_attribute(__MODULE__, :mcp_current_tool_task_support)
     end
   end
 
@@ -239,6 +251,103 @@ defmodule ConduitMcp.DSL do
   defmacro meta(meta_map) do
     quote do
       @mcp_current_tool_meta unquote(meta_map)
+    end
+  end
+
+  @doc """
+  Sets a human-readable display title for a tool.
+
+  Distinct from `name` (the machine identifier used in `tools/call`),
+  `title` is shown to end users by MCP clients. Added in MCP spec
+  2025-11-25.
+
+  ## Example
+
+      tool "create_user", "Create a user account" do
+        title "Create User"
+        param :email, :string, "Email address", required: true
+        handle MyUsers, :create
+      end
+  """
+  defmacro title(value) do
+    quote do
+      @mcp_current_tool_title unquote(value)
+    end
+  end
+
+  @doc """
+  Sets icon descriptors for a tool. Added in MCP spec 2025-11-25.
+
+  Accepts a list of icon maps, each with `src` (URL or data URI),
+  optional `mimeType`, `width`, `height`. Clients use these to render
+  the tool in their UI.
+
+  ## Example
+
+      tool "search", "Search the catalog" do
+        icons [%{"src" => "https://example.com/search.svg", "mimeType" => "image/svg+xml"}]
+        handle MyCatalog, :search
+      end
+  """
+  defmacro icons(icon_list) do
+    quote do
+      @mcp_current_tool_icons unquote(icon_list)
+    end
+  end
+
+  @doc """
+  Sets the JSON Schema for the tool's structured output.
+
+  When a tool returns a structured payload (via `structured/2` helper
+  or by including `"structuredContent"` in the result map), this schema
+  describes its shape so clients can render/validate it. Added in MCP
+  spec 2025-11-25.
+
+  ## Example
+
+      tool "get_user", "Fetch a user" do
+        param :id, :string, "User id", required: true
+        output_schema %{
+          "type" => "object",
+          "properties" => %{
+            "id" => %{"type" => "string"},
+            "email" => %{"type" => "string"}
+          },
+          "required" => ["id", "email"]
+        }
+        handle MyUsers, :get
+      end
+  """
+  defmacro output_schema(schema) do
+    quote do
+      @mcp_current_tool_output_schema unquote(schema)
+    end
+  end
+
+  @doc """
+  Declares the tool's support for asynchronous task execution.
+
+  Values:
+
+  - `:none` (default, not emitted) — tool always returns synchronously
+  - `:supported` — tool MAY return a task id for long-running operations;
+    clients can poll `tasks/get` and receive results via `tasks/result`
+  - `:required` — tool ALWAYS returns a task id; the immediate response
+    contains no result, only a task id to poll
+
+  Added in MCP spec 2025-11-25.
+
+  ## Example
+
+      tool "render_video", "Render a video from a script" do
+        task_support :supported
+        param :script, :string, "Script source", required: true
+        handle MyRenderer, :start
+      end
+  """
+  defmacro task_support(level) when level in [:none, :supported, :required] do
+    quote do
+      @mcp_current_tool_task_support unquote(level)
     end
   end
 

@@ -223,7 +223,11 @@ defmodule ConduitMcp.Component do
       description: description,
       params: fields,
       annotations: annotations,
-      meta: meta
+      meta: meta,
+      title: Keyword.get(opts, :title),
+      icons: Keyword.get(opts, :icons),
+      output_schema: Keyword.get(opts, :output_schema),
+      task_support: Keyword.get(opts, :task_support)
     }
 
     ConduitMcp.DSL.SchemaBuilder.build_tool_schema(tool_def)

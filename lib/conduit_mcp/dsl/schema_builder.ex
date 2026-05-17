@@ -54,13 +54,58 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
       "inputSchema" => build_input_schema(params)
     }
 
-    schema =
-      case Map.get(tool, :annotations) do
-        nil -> schema
-        annotations when map_size(annotations) == 0 -> schema
-        annotations -> Map.put(schema, "annotations", annotations)
-      end
+    schema
+    |> maybe_put_string(tool, :title, "title")
+    |> maybe_put_value(tool, :icons, "icons")
+    |> maybe_put_value(tool, :output_schema, "outputSchema")
+    |> maybe_put_execution(tool)
+    |> maybe_put_annotations(tool)
+    |> maybe_put_meta(tool)
+  end
 
+  defp maybe_put_execution(schema, tool) do
+    case Map.get(tool, :task_support) do
+      nil ->
+        schema
+
+      level when level in [:supported, :required, "supported", "required"] ->
+        Map.put(schema, "execution", %{"taskSupport" => to_string(level)})
+
+      :none ->
+        # "none" is the default, no need to emit it
+        schema
+
+      "none" ->
+        schema
+    end
+  end
+
+  defp maybe_put_string(schema, tool, key, target_key) do
+    case Map.get(tool, key) do
+      nil -> schema
+      "" -> schema
+      value when is_binary(value) -> Map.put(schema, target_key, value)
+    end
+  end
+
+  defp maybe_put_value(schema, tool, key, target_key) do
+    case Map.get(tool, key) do
+      nil -> schema
+      value when is_list(value) and value == [] -> schema
+      value when is_map(value) and map_size(value) == 0 -> schema
+      value -> Map.put(schema, target_key, value)
+    end
+  end
+
+  defp maybe_put_annotations(schema, tool) do
+    case Map.get(tool, :annotations) do
+      nil -> schema
+      annotations when map_size(annotations) == 0 -> schema
+      annotations -> Map.put(schema, "annotations", annotations)
+    end
+  end
+
+  defp maybe_put_meta(schema, tool) do
     case Map.get(tool, :meta) do
       nil -> schema
       meta when is_map(meta) and map_size(meta) == 0 -> schema

@@ -555,6 +555,98 @@ defmodule ConduitMcp.DSLTest do
       assert schema["inputSchema"]["properties"]["opt"]["default"] == "default_val"
     end
 
+    test "emits title when set" do
+      schema =
+        SchemaBuilder.build_tool_schema(%{
+          name: "x",
+          description: "",
+          params: [],
+          title: "Friendly Name"
+        })
+
+      assert schema["title"] == "Friendly Name"
+    end
+
+    test "omits title when nil or empty" do
+      schema_nil =
+        SchemaBuilder.build_tool_schema(%{name: "x", description: "", params: [], title: nil})
+
+      schema_empty =
+        SchemaBuilder.build_tool_schema(%{name: "x", description: "", params: [], title: ""})
+
+      refute Map.has_key?(schema_nil, "title")
+      refute Map.has_key?(schema_empty, "title")
+    end
+
+    test "emits icons when non-empty" do
+      icons = [%{"src" => "https://example.com/x.svg", "mimeType" => "image/svg+xml"}]
+
+      schema =
+        SchemaBuilder.build_tool_schema(%{
+          name: "x",
+          description: "",
+          params: [],
+          icons: icons
+        })
+
+      assert schema["icons"] == icons
+    end
+
+    test "omits icons when nil or empty list" do
+      schema_nil =
+        SchemaBuilder.build_tool_schema(%{name: "x", description: "", params: [], icons: nil})
+
+      schema_empty =
+        SchemaBuilder.build_tool_schema(%{name: "x", description: "", params: [], icons: []})
+
+      refute Map.has_key?(schema_nil, "icons")
+      refute Map.has_key?(schema_empty, "icons")
+    end
+
+    test "emits outputSchema when set" do
+      output = %{"type" => "object", "properties" => %{"id" => %{"type" => "string"}}}
+
+      schema =
+        SchemaBuilder.build_tool_schema(%{
+          name: "x",
+          description: "",
+          params: [],
+          output_schema: output
+        })
+
+      assert schema["outputSchema"] == output
+    end
+
+    test "emits execution.taskSupport when set" do
+      schema_supported =
+        SchemaBuilder.build_tool_schema(%{
+          name: "x",
+          description: "",
+          params: [],
+          task_support: :supported
+        })
+
+      schema_required =
+        SchemaBuilder.build_tool_schema(%{
+          name: "x",
+          description: "",
+          params: [],
+          task_support: :required
+        })
+
+      schema_none =
+        SchemaBuilder.build_tool_schema(%{
+          name: "x",
+          description: "",
+          params: [],
+          task_support: :none
+        })
+
+      assert schema_supported["execution"] == %{"taskSupport" => "supported"}
+      assert schema_required["execution"] == %{"taskSupport" => "required"}
+      refute Map.has_key?(schema_none, "execution")
+    end
+
     test "builds prompt schema" do
       prompt_def = %{
         name: "test_prompt",
