@@ -145,6 +145,86 @@ defmodule ConduitMcp.DSL.Helpers do
   end
 
   @doc """
+  Reports a tool *execution* error to the client.
+
+  Per MCP spec, tool execution errors (the operation ran but failed in a way
+  the LLM can interpret and possibly recover from) are distinct from protocol
+  errors. They are returned as a successful result with `"isError" => true`,
+  not as a JSON-RPC error. Use `error/2` for protocol errors (bad params,
+  internal failures, etc.) and `execution_error/1` for "the call ran but
+  this is what went wrong" so the LLM can self-correct.
+
+  ## Example
+
+      tool "fetch_user", "Fetch a user by id" do
+        param :id, :string, "User id", required: true
+
+        handle fn _conn, %{"id" => id} ->
+          case MyUsers.fetch(id) do
+            {:ok, user} -> json(user)
+            {:error, :not_found} -> execution_error("User \#{id} not found")
+          end
+        end
+      end
+  """
+  defmacro execution_error(message) do
+    quote do
+      {:ok,
+       %{
+         "content" => [%{"type" => "text", "text" => unquote(message)}],
+         "isError" => true
+       }}
+    end
+  end
+
+  @doc """
+  Returns a tool response with structured output.
+
+  Per MCP spec 2025-11-25, tools can declare an `outputSchema` and return
+  structured data alongside the human-readable `content` array. Clients
+  that understand the schema can render/validate the payload; clients
+  that don't fall back to the text content.
+
+  Accepts the structured payload (any JSON-encodable map) and an optional
+  human-readable message that becomes the text content. If you omit the
+  message, the JSON encoding of the payload is used.
+
+  ## Example
+
+      tool "get_user", "Fetch a user" do
+        param :id, :string, "User id", required: true
+
+        output_schema %{
+          "type" => "object",
+          "properties" => %{
+            "id" => %{"type" => "string"},
+            "email" => %{"type" => "string"}
+          }
+        }
+
+        handle fn _conn, %{"id" => id} ->
+          user = MyUsers.get!(id)
+          structured(%{"id" => user.id, "email" => user.email}, "Fetched user \#{id}")
+        end
+      end
+  """
+  defmacro structured(payload, message \\ nil) do
+    quote do
+      text =
+        case unquote(message) do
+          nil -> JSON.encode!(unquote(payload))
+          msg -> msg
+        end
+
+      {:ok,
+       %{
+         "content" => [%{"type" => "text", "text" => text}],
+         "structuredContent" => unquote(payload)
+       }}
+    end
+  end
+
+  @doc """
   Creates an MCP `tools/call` response that hands a long-running operation
   off to a task.
 

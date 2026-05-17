@@ -735,6 +735,42 @@ defmodule ConduitMcp.DSLTest do
       assert result == {:error, %{"code" => -32602, "message" => "Invalid params"}}
     end
 
+    test "execution_error/1 returns a successful result with isError=true" do
+      import ConduitMcp.DSL.Helpers
+
+      assert {:ok,
+              %{
+                "content" => [%{"type" => "text", "text" => "User missing"}],
+                "isError" => true
+              }} = execution_error("User missing")
+    end
+
+    test "structured/2 emits content + structuredContent" do
+      import ConduitMcp.DSL.Helpers
+
+      payload = %{"id" => "42", "email" => "x@example.com"}
+
+      assert {:ok,
+              %{
+                "content" => [%{"type" => "text", "text" => "Got user"}],
+                "structuredContent" => ^payload
+              }} = structured(payload, "Got user")
+    end
+
+    test "structured/1 falls back to JSON-encoded text when message omitted" do
+      import ConduitMcp.DSL.Helpers
+
+      payload = %{"id" => "42"}
+
+      assert {:ok,
+              %{
+                "content" => [%{"type" => "text", "text" => text}],
+                "structuredContent" => ^payload
+              }} = structured(payload)
+
+      assert {:ok, ^payload} = JSON.decode(text)
+    end
+
     test "system/1 creates system message" do
       import ConduitMcp.DSL.Helpers
 
