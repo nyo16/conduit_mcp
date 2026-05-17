@@ -987,62 +987,30 @@ defmodule ConduitMcp.DSL do
     prompts = Module.get_attribute(env.module, :mcp_prompts) || []
     resources = Module.get_attribute(env.module, :mcp_resources) || []
 
-    # Build schemas at compile time (outside quote block)
-    tool_schemas =
-      tools |> Enum.reverse() |> Enum.map(&ConduitMcp.DSL.SchemaBuilder.build_tool_schema/1)
+    reversed_tools = Enum.reverse(tools)
+    reversed_prompts = Enum.reverse(prompts)
+
+    tool_schemas = Enum.map(reversed_tools, &ConduitMcp.DSL.SchemaBuilder.build_tool_schema/1)
 
     prompt_schemas =
-      prompts |> Enum.reverse() |> Enum.map(&ConduitMcp.DSL.SchemaBuilder.build_prompt_schema/1)
+      Enum.map(reversed_prompts, &ConduitMcp.DSL.SchemaBuilder.build_prompt_schema/1)
 
-    {templated_resources, static_resources} =
-      resources
-      |> Enum.reverse()
-      |> Enum.split_with(&ConduitMcp.DSL.SchemaBuilder.templated?/1)
+    {templated_resources, resource_schemas, resource_template_schemas} =
+      partition_resources(resources)
 
-    resource_schemas =
-      Enum.map(static_resources, &ConduitMcp.DSL.SchemaBuilder.build_resource_schema/1)
-
-    resource_template_schemas =
-      Enum.map(
-        templated_resources,
-        &ConduitMcp.DSL.SchemaBuilder.build_resource_template_schema/1
-      )
-
-    # Generate validation schema lookup functions
     validation_lookup_functions =
       ConduitMcp.DSL.SchemaBuilder.generate_validation_lookup_functions(
-        tools |> Enum.reverse(),
-        prompts |> Enum.reverse()
+        reversed_tools,
+        reversed_prompts
       )
 
-    # Validate all schemas at compile time
-    case ConduitMcp.DSL.SchemaBuilder.validate_all_schemas(
-           tools |> Enum.reverse(),
-           prompts |> Enum.reverse()
-         ) do
-      :ok ->
-        :ok
-
-      {:error, errors} ->
-        require Logger
-        Logger.warning("Validation schema compilation warnings: #{inspect(errors)}")
-    end
+    log_schema_validation_warnings(reversed_tools, reversed_prompts)
 
     tool_clauses = generate_tool_clauses(tools)
     prompt_clauses = generate_prompt_clauses(prompts)
     resource_clauses = generate_resource_clauses(resources)
 
-    # Build scope map at compile time: %{"tool_name" => "scope string"}
-    scope_map =
-      tools
-      |> Enum.reverse()
-      |> Enum.reduce(%{}, fn tool, acc ->
-        case Map.get(tool, :scope) do
-          nil -> acc
-          scope -> Map.put(acc, to_string(tool.name), scope)
-        end
-      end)
-
+    scope_map = build_scope_map(reversed_tools)
     templated_uris = Enum.map(templated_resources, & &1.uri)
 
     quote do
@@ -1135,6 +1103,40 @@ defmodule ConduitMcp.DSL do
            }}
         end
       end
+    end
+  end
+
+  defp partition_resources(resources) do
+    {templated, static} =
+      resources
+      |> Enum.reverse()
+      |> Enum.split_with(&ConduitMcp.DSL.SchemaBuilder.templated?/1)
+
+    resource_schemas = Enum.map(static, &ConduitMcp.DSL.SchemaBuilder.build_resource_schema/1)
+
+    template_schemas =
+      Enum.map(templated, &ConduitMcp.DSL.SchemaBuilder.build_resource_template_schema/1)
+
+    {templated, resource_schemas, template_schemas}
+  end
+
+  defp build_scope_map(reversed_tools) do
+    Enum.reduce(reversed_tools, %{}, fn tool, acc ->
+      case Map.get(tool, :scope) do
+        nil -> acc
+        scope -> Map.put(acc, to_string(tool.name), scope)
+      end
+    end)
+  end
+
+  defp log_schema_validation_warnings(reversed_tools, reversed_prompts) do
+    case ConduitMcp.DSL.SchemaBuilder.validate_all_schemas(reversed_tools, reversed_prompts) do
+      :ok ->
+        :ok
+
+      {:error, errors} ->
+        require Logger
+        Logger.warning("Validation schema compilation warnings: #{inspect(errors)}")
     end
   end
 

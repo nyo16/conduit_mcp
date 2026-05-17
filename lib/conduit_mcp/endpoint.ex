@@ -88,74 +88,56 @@ defmodule ConduitMcp.Endpoint do
     components = Module.get_attribute(module, :endpoint_components) || []
     opts = Module.get_attribute(module, :endpoint_opts) || []
 
-    # Ensure all component modules are compiled and valid
-    components = Enum.reverse(components)
-    validate_components!(components, module)
+    {tools, resources, prompts} = group_and_validate_components(components, module)
 
-    # Group by type
-    tools = Enum.filter(components, &(&1.__component_type__() == :tool))
-    resources = Enum.filter(components, &(&1.__component_type__() == :resource))
-    prompts = Enum.filter(components, &(&1.__component_type__() == :prompt))
-
-    # Check for name conflicts
-    validate_no_name_conflicts!(tools, :tool, module)
-    validate_no_name_conflicts!(prompts, :prompt, module)
-
-    # Collect schemas at compile time
     tool_schemas = Enum.map(tools, & &1.__component_schema__())
     prompt_schemas = Enum.map(prompts, & &1.__component_schema__())
+    {resource_schemas, resource_template_schemas} = partition_resource_schemas(resources)
 
-    {resource_schemas, resource_template_schemas} =
-      resources
-      |> Enum.map(& &1.__component_schema__())
-      |> Enum.split_with(fn schema -> not String.contains?(schema["uri"] || "", "{") end)
-
-    resource_template_schemas =
-      Enum.map(
-        resource_template_schemas,
-        &ConduitMcp.DSL.SchemaBuilder.to_resource_template_schema/1
-      )
-
-    # Build tool dispatch clauses
     tool_clauses = generate_tool_clauses(tools)
     prompt_clauses = generate_prompt_clauses(prompts)
     resource_clause = generate_resource_clause(resources)
 
-    # Build validation schema lookups
     tool_validation_clauses = generate_tool_validation_clauses(tools)
     prompt_validation_clauses = generate_prompt_validation_clauses(prompts)
 
-    # Build scope map
-    scope_map = build_scope_map(tools)
+    scope_clauses = generate_scope_clauses(build_scope_map(tools))
 
-    # Build key maps for atom conversion (one per component)
-    tool_key_maps = build_key_maps(tools)
-    prompt_key_maps = build_key_maps(prompts)
+    key_map_clauses =
+      generate_key_map_clauses(build_key_maps(tools), build_key_maps(prompts))
 
-    # Per-component dispatch clauses. Avoids Elixir 1.20 type-checker
-    # warnings about `Map.get(%{}, k)` on compile-time empty maps when the
-    # endpoint has no scoped tools and/or no prompts.
-    scope_clauses = generate_scope_clauses(scope_map)
-    key_map_clauses = generate_key_map_clauses(tool_key_maps, prompt_key_maps)
-
-    # Build capabilities
     capabilities = build_capabilities(tools, resources, prompts)
 
-    # Endpoint config for transport auto-extraction
     endpoint_config =
-      opts
-      |> Keyword.take([:name, :version, :rate_limit, :message_rate_limit, :auth])
+      Keyword.take(opts, [:name, :version, :rate_limit, :message_rate_limit, :auth])
 
-    templated_uris =
-      Enum.map(resources, fn mod -> Keyword.fetch!(mod.__component_opts__(), :uri) end)
-      |> Enum.filter(&String.contains?(&1, "{"))
+    templated_uris = collect_templated_uris(resources)
 
+    generate_endpoint_ast(%{
+      templated_uris: templated_uris,
+      tool_schemas: tool_schemas,
+      tool_clauses: tool_clauses,
+      resource_schemas: resource_schemas,
+      resource_template_schemas: resource_template_schemas,
+      resource_clause: resource_clause,
+      prompt_schemas: prompt_schemas,
+      prompt_clauses: prompt_clauses,
+      tool_validation_clauses: tool_validation_clauses,
+      prompt_validation_clauses: prompt_validation_clauses,
+      scope_clauses: scope_clauses,
+      key_map_clauses: key_map_clauses,
+      endpoint_config: endpoint_config,
+      capabilities: capabilities
+    })
+  end
+
+  defp generate_endpoint_ast(parts) do
     quote do
       @on_load :__precompile_template_regexes__
 
       def __precompile_template_regexes__ do
         Enum.each(
-          unquote(templated_uris),
+          unquote(parts.templated_uris),
           &ConduitMcp.DSL.precompile_template_regex(__MODULE__, &1)
         )
 
@@ -165,10 +147,10 @@ defmodule ConduitMcp.Endpoint do
       # --- Tool callbacks ---
 
       def handle_list_tools(_conn) do
-        {:ok, %{"tools" => unquote(Macro.escape(tool_schemas))}}
+        {:ok, %{"tools" => unquote(Macro.escape(parts.tool_schemas))}}
       end
 
-      unquote(tool_clauses)
+      unquote(parts.tool_clauses)
 
       def handle_call_tool(_conn, tool_name, _params) do
         {:error,
@@ -181,17 +163,17 @@ defmodule ConduitMcp.Endpoint do
       # --- Resource callbacks ---
 
       def handle_list_resources(_conn) do
-        {:ok, %{"resources" => unquote(Macro.escape(resource_schemas))}}
+        {:ok, %{"resources" => unquote(Macro.escape(parts.resource_schemas))}}
       end
 
       def handle_list_resource_templates(_conn) do
-        {:ok, %{"resourceTemplates" => unquote(Macro.escape(resource_template_schemas))}}
+        {:ok, %{"resourceTemplates" => unquote(Macro.escape(parts.resource_template_schemas))}}
       end
 
-      unquote(resource_clause)
+      unquote(parts.resource_clause)
 
       # Only generate catch-all if no resources defined their own handler
-      if unquote(is_nil(resource_clause)) do
+      if unquote(is_nil(parts.resource_clause)) do
         def handle_read_resource(_conn, uri) do
           {:error,
            %{
@@ -204,10 +186,10 @@ defmodule ConduitMcp.Endpoint do
       # --- Prompt callbacks ---
 
       def handle_list_prompts(_conn) do
-        {:ok, %{"prompts" => unquote(Macro.escape(prompt_schemas))}}
+        {:ok, %{"prompts" => unquote(Macro.escape(parts.prompt_schemas))}}
       end
 
-      unquote(prompt_clauses)
+      unquote(parts.prompt_clauses)
 
       def handle_get_prompt(_conn, prompt_name, _args) do
         {:error,
@@ -219,23 +201,23 @@ defmodule ConduitMcp.Endpoint do
 
       # --- Validation schema lookups ---
 
-      unquote(tool_validation_clauses)
+      unquote(parts.tool_validation_clauses)
 
       def __validation_schema_for_tool__(_name), do: nil
 
-      unquote(prompt_validation_clauses)
+      unquote(parts.prompt_validation_clauses)
 
       def __validation_schema_for_prompt__(_name), do: nil
 
       # --- Scope lookup ---
 
-      unquote(scope_clauses)
+      unquote(parts.scope_clauses)
 
       def __scope_for_tool__(_tool_name), do: nil
 
       # --- Key maps for atom conversion ---
 
-      unquote(key_map_clauses)
+      unquote(parts.key_map_clauses)
 
       defp __key_map__(_component_name), do: %{}
 
@@ -253,18 +235,47 @@ defmodule ConduitMcp.Endpoint do
       # --- Endpoint config ---
 
       def __endpoint_config__ do
-        unquote(endpoint_config)
+        unquote(parts.endpoint_config)
       end
 
       # --- Capabilities ---
 
       def __capabilities__ do
-        unquote(Macro.escape(capabilities))
+        unquote(Macro.escape(parts.capabilities))
       end
     end
   end
 
   # --- Compile-time helpers ---
+
+  defp group_and_validate_components(components, module) do
+    components = Enum.reverse(components)
+    validate_components!(components, module)
+
+    tools = Enum.filter(components, &(&1.__component_type__() == :tool))
+    resources = Enum.filter(components, &(&1.__component_type__() == :resource))
+    prompts = Enum.filter(components, &(&1.__component_type__() == :prompt))
+
+    validate_no_name_conflicts!(tools, :tool, module)
+    validate_no_name_conflicts!(prompts, :prompt, module)
+
+    {tools, resources, prompts}
+  end
+
+  defp partition_resource_schemas(resources) do
+    {static, templated} =
+      resources
+      |> Enum.map(& &1.__component_schema__())
+      |> Enum.split_with(fn schema -> not String.contains?(schema["uri"] || "", "{") end)
+
+    {static, Enum.map(templated, &ConduitMcp.DSL.SchemaBuilder.to_resource_template_schema/1)}
+  end
+
+  defp collect_templated_uris(resources) do
+    resources
+    |> Enum.map(fn mod -> Keyword.fetch!(mod.__component_opts__(), :uri) end)
+    |> Enum.filter(&String.contains?(&1, "{"))
+  end
 
   defp validate_components!(components, endpoint_module) do
     Enum.each(components, fn mod ->
