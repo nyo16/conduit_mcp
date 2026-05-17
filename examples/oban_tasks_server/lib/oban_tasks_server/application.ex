@@ -17,7 +17,13 @@ defmodule Examples.ObanTasks.Application do
       #    GenServer that exits cleanly after migrations are applied.
       Examples.ObanTasks.Migrator,
 
-      # 3. Oban supervisor — pulls config from :oban_tasks_server app env.
+      # 3. Reset any oban_jobs left in `executing` state by a previous
+      #    crash. Oban.Engines.Lite doesn't ship Lifeline, so we do this
+      #    by hand. Must come AFTER Migrator and BEFORE Oban so the
+      #    rows are settled before the queue picks them up.
+      Examples.ObanTasks.Rescuer,
+
+      # 4. Oban supervisor — pulls config from :oban_tasks_server app env.
       {Oban, Application.fetch_env!(:oban_tasks_server, Oban)},
 
       # 4. Periodically prune terminal-state task rows. The Oban pruner
