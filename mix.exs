@@ -156,7 +156,8 @@ defmodule ConduitMcp.MixProject do
         "Protocol & Handler": [
           ConduitMcp.Protocol,
           ConduitMcp.Handler,
-          ConduitMcp.Errors
+          ConduitMcp.Errors,
+          ConduitMcp.Cancellation
         ],
         Transport: [
           ConduitMcp.Transport.StreamableHTTP,

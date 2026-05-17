@@ -50,9 +50,18 @@ defmodule ConduitMcp.Handler do
     method = Map.get(request, "method")
     id = Map.get(request, "id")
     params = Map.get(request, "params", %{})
+    conn = Plug.Conn.assign(conn, :mcp_request_id, id)
 
     Logger.debug("Handling method", method: method)
 
+    try do
+      do_handle_method(method, id, params, server_module, conn)
+    after
+      ConduitMcp.Cancellation.clear(id)
+    end
+  end
+
+  defp do_handle_method(method, id, params, server_module, conn) do
     case method do
       "initialize" ->
         handle_initialize(id, params, server_module, conn)
@@ -104,15 +113,11 @@ defmodule ConduitMcp.Handler do
     error ->
       Logger.error("Error handling method",
         error: Exception.message(error),
-        method: Map.get(request, "method"),
-        request_id: Map.get(request, "id")
+        method: method,
+        request_id: id
       )
 
-      Protocol.error_response(
-        Map.get(request, "id"),
-        Protocol.internal_error(),
-        "Internal server error"
-      )
+      Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
   end
 
   defp handle_notification(notification, _server_module) do
@@ -122,6 +127,13 @@ defmodule ConduitMcp.Handler do
     case method do
       "notifications/initialized" ->
         Logger.info("Client initialized")
+        :ok
+
+      "notifications/cancelled" ->
+        params = Map.get(notification, "params", %{})
+        request_id = Map.get(params, "requestId")
+        reason = Map.get(params, "reason")
+        ConduitMcp.Cancellation.cancel(request_id, reason)
         :ok
 
       _ ->

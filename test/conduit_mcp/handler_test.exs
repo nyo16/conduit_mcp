@@ -296,6 +296,22 @@ defmodule ConduitMcp.HandlerTest do
 
       assert response == :ok
     end
+
+    test "notifications/cancelled records cancellation state" do
+      if :ets.whereis(:conduit_mcp_cancellations) != :undefined do
+        :ets.delete_all_objects(:conduit_mcp_cancellations)
+      end
+
+      notification = %{
+        "jsonrpc" => "2.0",
+        "method" => "notifications/cancelled",
+        "params" => %{"requestId" => "abc-123", "reason" => "user abort"}
+      }
+
+      assert :ok = Handler.handle_request(notification, TestServer)
+      assert ConduitMcp.Cancellation.cancelled?("abc-123")
+      assert ConduitMcp.Cancellation.reason("abc-123") == "user abort"
+    end
   end
 
   describe "handle_request/2 with invalid requests" do
