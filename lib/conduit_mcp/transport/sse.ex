@@ -132,17 +132,20 @@ defmodule ConduitMcp.Transport.SSE do
     server_version = Keyword.get(opts, :server_version) || Keyword.get(endpoint_config, :version)
     allowed_origins = Keyword.get(opts, :allowed_origins)
 
-    conn
-    |> Plug.Conn.put_private(:server_module, server_module)
-    |> Plug.Conn.put_private(:allowed_origins, allowed_origins)
-    |> Plug.Conn.put_private(:cors_origin, cors_origin)
-    |> Plug.Conn.put_private(:cors_methods, cors_methods)
-    |> Plug.Conn.put_private(:cors_headers, cors_headers)
-    |> Plug.Conn.put_private(:auth_config, auth_config)
-    |> Plug.Conn.put_private(:rate_limit_config, rate_limit_config)
-    |> Plug.Conn.put_private(:message_rate_limit_config, message_rate_limit_config)
-    |> Plug.Conn.put_private(:server_name, server_name)
-    |> Plug.Conn.put_private(:server_version, server_version)
+    private = %{
+      server_module: server_module,
+      allowed_origins: allowed_origins,
+      cors_origin: cors_origin,
+      cors_methods: cors_methods,
+      cors_headers: cors_headers,
+      auth_config: auth_config,
+      rate_limit_config: rate_limit_config,
+      message_rate_limit_config: message_rate_limit_config,
+      server_name: server_name,
+      server_version: server_version
+    }
+
+    %{conn | private: Map.merge(conn.private, private)}
     |> super(opts)
   end
 
