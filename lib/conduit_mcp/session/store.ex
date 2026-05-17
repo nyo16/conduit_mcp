@@ -92,4 +92,18 @@ defmodule ConduitMcp.Session.Store do
   Updates an existing session's metadata (merges new metadata into existing).
   """
   @callback update(session_id :: String.t(), metadata :: map()) :: :ok | {:error, :not_found}
+
+  @doc """
+  Removes sessions older than `ttl_ms` milliseconds.
+
+  Optional. Stores that implement this callback can be used with
+  `ConduitMcp.Session.Janitor` for periodic background cleanup. Stores
+  backed by systems with native TTL (e.g., Redis with `EX`) typically
+  do not need this and may omit the callback.
+
+  Should return the number of sessions removed, or `:ok`.
+  """
+  @callback cleanup(ttl_ms :: non_neg_integer()) :: non_neg_integer() | :ok
+
+  @optional_callbacks cleanup: 1
 end

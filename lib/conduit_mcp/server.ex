@@ -5,12 +5,13 @@ defmodule ConduitMcp.Server do
   An MCP server provides tools, resources, and prompts to LLM clients.
   Servers implement callbacks to handle client requests concurrently.
 
-  ## Changes in v0.4.0
+  ## Architecture
 
-  The server is now fully stateless - just pure compiled functions:
+  Server modules are stateless — just pure compiled functions:
+
   - No GenServer, no Agent, no process overhead
   - No supervision tree required
-  - Callbacks receive the Plug.Conn for request context
+  - Callbacks receive the `Plug.Conn` for request context
   - Each HTTP request runs in parallel (limited only by Bandit's process pool)
 
   ## Example (Using DSL - Recommended)
@@ -194,12 +195,25 @@ defmodule ConduitMcp.Server do
   @callback handle_unsubscribe_resource(conn(), uri()) ::
               {:ok, map()} | {:error, map()}
 
+  @doc """
+  Handle listing resource templates (resources with `{param}` placeholders).
+
+  Returns a map with `"resourceTemplates"` key containing a list of template
+  descriptors, each with at least `"uriTemplate"`.
+
+  Implemented automatically by DSL and Endpoint modes; manual-mode servers
+  can implement this to advertise URI templates to clients.
+  """
+  @callback handle_list_resource_templates(conn()) ::
+              {:ok, %{required(String.t()) => list(map())}} | {:error, map()}
+
   @optional_callbacks [
     handle_list_tools: 1,
     handle_list_tools: 2,
     handle_call_tool: 3,
     handle_list_resources: 1,
     handle_list_resources: 2,
+    handle_list_resource_templates: 1,
     handle_read_resource: 2,
     handle_list_prompts: 1,
     handle_list_prompts: 2,

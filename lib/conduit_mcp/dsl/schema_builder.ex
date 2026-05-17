@@ -54,13 +54,58 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
       "inputSchema" => build_input_schema(params)
     }
 
-    schema =
-      case Map.get(tool, :annotations) do
-        nil -> schema
-        annotations when map_size(annotations) == 0 -> schema
-        annotations -> Map.put(schema, "annotations", annotations)
-      end
+    schema
+    |> maybe_put_string(tool, :title, "title")
+    |> maybe_put_value(tool, :icons, "icons")
+    |> maybe_put_value(tool, :output_schema, "outputSchema")
+    |> maybe_put_execution(tool)
+    |> maybe_put_annotations(tool)
+    |> maybe_put_meta(tool)
+  end
 
+  defp maybe_put_execution(schema, tool) do
+    case Map.get(tool, :task_support) do
+      nil ->
+        schema
+
+      level when level in [:supported, :required, "supported", "required"] ->
+        Map.put(schema, "execution", %{"taskSupport" => to_string(level)})
+
+      :none ->
+        # "none" is the default, no need to emit it
+        schema
+
+      "none" ->
+        schema
+    end
+  end
+
+  defp maybe_put_string(schema, tool, key, target_key) do
+    case Map.get(tool, key) do
+      nil -> schema
+      "" -> schema
+      value when is_binary(value) -> Map.put(schema, target_key, value)
+    end
+  end
+
+  defp maybe_put_value(schema, tool, key, target_key) do
+    case Map.get(tool, key) do
+      nil -> schema
+      value when is_list(value) and value == [] -> schema
+      value when is_map(value) and map_size(value) == 0 -> schema
+      value -> Map.put(schema, target_key, value)
+    end
+  end
+
+  defp maybe_put_annotations(schema, tool) do
+    case Map.get(tool, :annotations) do
+      nil -> schema
+      annotations when map_size(annotations) == 0 -> schema
+      annotations -> Map.put(schema, "annotations", annotations)
+    end
+  end
+
+  defp maybe_put_meta(schema, tool) do
     case Map.get(tool, :meta) do
       nil -> schema
       meta when is_map(meta) and map_size(meta) == 0 -> schema
@@ -115,6 +160,8 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
 
   @doc """
   Builds a resource schema from DSL definition.
+
+  Used for `resources/list` (static URIs only).
   """
   def build_resource_schema(%{uri: uri, description: description, mime_type: mime_type}) do
     schema = %{
@@ -125,6 +172,40 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
     schema = if mime_type, do: Map.put(schema, "mimeType", mime_type), else: schema
 
     schema
+  end
+
+  @doc """
+  Builds a resource-template schema from a templated DSL definition.
+
+  Used for `resources/templates/list` (URIs with `{param}` placeholders).
+  Emits `uriTemplate` instead of `uri` per MCP spec.
+  """
+  def build_resource_template_schema(%{
+        uri: uri,
+        description: description,
+        mime_type: mime_type
+      }) do
+    schema = %{"uriTemplate" => uri}
+    schema = if description, do: Map.put(schema, "description", description), else: schema
+    if mime_type, do: Map.put(schema, "mimeType", mime_type), else: schema
+  end
+
+  @doc """
+  Returns true when the given resource definition's URI contains a `{param}`
+  template placeholder.
+  """
+  def templated?(%{uri: uri}) when is_binary(uri), do: String.contains?(uri, "{")
+  def templated?(%{"uri" => uri}) when is_binary(uri), do: String.contains?(uri, "{")
+  def templated?(_), do: false
+
+  @doc """
+  Converts a static resource JSON schema (with `"uri"`) into a resource-template
+  schema (with `"uriTemplate"`). Other keys are preserved.
+  """
+  def to_resource_template_schema(%{"uri" => uri} = schema) do
+    schema
+    |> Map.delete("uri")
+    |> Map.put("uriTemplate", uri)
   end
 
   # Private helpers

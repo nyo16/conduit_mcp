@@ -4,6 +4,22 @@ By default, ConduitMCP uses ETS for session storage — fast but local to each n
 For multi-node deployments, implement the `ConduitMcp.Session.Store` behaviour
 with a shared backend.
 
+> **Pruning expired sessions.** ETS-backed stores accumulate entries forever
+> without a janitor — every successful `initialize` adds a row that survives
+> until the BEAM restarts. Wire `ConduitMcp.Session.Janitor` into your
+> supervision tree to prune expired sessions:
+>
+> ```elixir
+> children = [
+>   {ConduitMcp.Session.Janitor,
+>    store: ConduitMcp.Session.EtsStore,
+>    ttl: :timer.minutes(30),
+>    interval: :timer.minutes(1)}
+> ]
+> ```
+>
+> Backends with native TTL (Redis `EX`, etc.) do not need the janitor.
+
 ## Redis
 
 ```elixir
@@ -17,7 +33,7 @@ defmodule MyApp.RedisSessionStore do
 
   @impl true
   def create(session_id, metadata) do
-    data = Jason.encode!(metadata)
+    data = JSON.encode!(metadata)
     ttl = Map.get(metadata, "ttl", @default_ttl)
     {:ok, "OK"} = Redix.command(:redix, ["SET", key(session_id), data, "EX", to_string(ttl)])
     :ok
@@ -27,7 +43,7 @@ defmodule MyApp.RedisSessionStore do
   def get(session_id) do
     case Redix.command(:redix, ["GET", key(session_id)]) do
       {:ok, nil} -> {:error, :not_found}
-      {:ok, data} -> {:ok, Jason.decode!(data)}
+      {:ok, data} -> {:ok, JSON.decode!(data)}
     end
   end
 

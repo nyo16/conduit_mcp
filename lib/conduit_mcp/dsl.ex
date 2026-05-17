@@ -110,6 +110,10 @@ defmodule ConduitMcp.DSL do
       @mcp_current_tool_annotations nil
       @mcp_current_tool_scope nil
       @mcp_current_tool_meta nil
+      @mcp_current_tool_title nil
+      @mcp_current_tool_icons nil
+      @mcp_current_tool_output_schema nil
+      @mcp_current_tool_task_support nil
 
       unquote(block)
 
@@ -121,7 +125,11 @@ defmodule ConduitMcp.DSL do
         handler: @mcp_current_tool_handler,
         annotations: @mcp_current_tool_annotations,
         scope: @mcp_current_tool_scope,
-        meta: @mcp_current_tool_meta
+        meta: @mcp_current_tool_meta,
+        title: @mcp_current_tool_title,
+        icons: @mcp_current_tool_icons,
+        output_schema: @mcp_current_tool_output_schema,
+        task_support: @mcp_current_tool_task_support
       }
 
       # Clean up
@@ -132,6 +140,10 @@ defmodule ConduitMcp.DSL do
       Module.delete_attribute(__MODULE__, :mcp_current_tool_annotations)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_scope)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_meta)
+      Module.delete_attribute(__MODULE__, :mcp_current_tool_title)
+      Module.delete_attribute(__MODULE__, :mcp_current_tool_icons)
+      Module.delete_attribute(__MODULE__, :mcp_current_tool_output_schema)
+      Module.delete_attribute(__MODULE__, :mcp_current_tool_task_support)
     end
   end
 
@@ -239,6 +251,103 @@ defmodule ConduitMcp.DSL do
   defmacro meta(meta_map) do
     quote do
       @mcp_current_tool_meta unquote(meta_map)
+    end
+  end
+
+  @doc """
+  Sets a human-readable display title for a tool.
+
+  Distinct from `name` (the machine identifier used in `tools/call`),
+  `title` is shown to end users by MCP clients. Added in MCP spec
+  2025-11-25.
+
+  ## Example
+
+      tool "create_user", "Create a user account" do
+        title "Create User"
+        param :email, :string, "Email address", required: true
+        handle MyUsers, :create
+      end
+  """
+  defmacro title(value) do
+    quote do
+      @mcp_current_tool_title unquote(value)
+    end
+  end
+
+  @doc """
+  Sets icon descriptors for a tool. Added in MCP spec 2025-11-25.
+
+  Accepts a list of icon maps, each with `src` (URL or data URI),
+  optional `mimeType`, `width`, `height`. Clients use these to render
+  the tool in their UI.
+
+  ## Example
+
+      tool "search", "Search the catalog" do
+        icons [%{"src" => "https://example.com/search.svg", "mimeType" => "image/svg+xml"}]
+        handle MyCatalog, :search
+      end
+  """
+  defmacro icons(icon_list) do
+    quote do
+      @mcp_current_tool_icons unquote(icon_list)
+    end
+  end
+
+  @doc """
+  Sets the JSON Schema for the tool's structured output.
+
+  When a tool returns a structured payload (via `structured/2` helper
+  or by including `"structuredContent"` in the result map), this schema
+  describes its shape so clients can render/validate it. Added in MCP
+  spec 2025-11-25.
+
+  ## Example
+
+      tool "get_user", "Fetch a user" do
+        param :id, :string, "User id", required: true
+        output_schema %{
+          "type" => "object",
+          "properties" => %{
+            "id" => %{"type" => "string"},
+            "email" => %{"type" => "string"}
+          },
+          "required" => ["id", "email"]
+        }
+        handle MyUsers, :get
+      end
+  """
+  defmacro output_schema(schema) do
+    quote do
+      @mcp_current_tool_output_schema unquote(schema)
+    end
+  end
+
+  @doc """
+  Declares the tool's support for asynchronous task execution.
+
+  Values:
+
+  - `:none` (default, not emitted) — tool always returns synchronously
+  - `:supported` — tool MAY return a task id for long-running operations;
+    clients can poll `tasks/get` and receive results via `tasks/result`
+  - `:required` — tool ALWAYS returns a task id; the immediate response
+    contains no result, only a task id to poll
+
+  Added in MCP spec 2025-11-25.
+
+  ## Example
+
+      tool "render_video", "Render a video from a script" do
+        task_support :supported
+        param :script, :string, "Script source", required: true
+        handle MyRenderer, :start
+      end
+  """
+  defmacro task_support(level) when level in [:none, :supported, :required] do
+    quote do
+      @mcp_current_tool_task_support unquote(level)
     end
   end
 
@@ -878,58 +987,53 @@ defmodule ConduitMcp.DSL do
     prompts = Module.get_attribute(env.module, :mcp_prompts) || []
     resources = Module.get_attribute(env.module, :mcp_resources) || []
 
-    # Build schemas at compile time (outside quote block)
-    tool_schemas =
-      tools |> Enum.reverse() |> Enum.map(&ConduitMcp.DSL.SchemaBuilder.build_tool_schema/1)
+    reversed_tools = Enum.reverse(tools)
+    reversed_prompts = Enum.reverse(prompts)
+
+    tool_schemas = Enum.map(reversed_tools, &ConduitMcp.DSL.SchemaBuilder.build_tool_schema/1)
 
     prompt_schemas =
-      prompts |> Enum.reverse() |> Enum.map(&ConduitMcp.DSL.SchemaBuilder.build_prompt_schema/1)
+      Enum.map(reversed_prompts, &ConduitMcp.DSL.SchemaBuilder.build_prompt_schema/1)
 
-    resource_schemas =
-      resources
-      |> Enum.reverse()
-      |> Enum.map(&ConduitMcp.DSL.SchemaBuilder.build_resource_schema/1)
+    {templated_resources, resource_schemas, resource_template_schemas} =
+      partition_resources(resources)
 
-    # Generate validation schema lookup functions
     validation_lookup_functions =
       ConduitMcp.DSL.SchemaBuilder.generate_validation_lookup_functions(
-        tools |> Enum.reverse(),
-        prompts |> Enum.reverse()
+        reversed_tools,
+        reversed_prompts
       )
 
-    # Validate all schemas at compile time
-    case ConduitMcp.DSL.SchemaBuilder.validate_all_schemas(
-           tools |> Enum.reverse(),
-           prompts |> Enum.reverse()
-         ) do
-      :ok ->
-        :ok
-
-      {:error, errors} ->
-        require Logger
-        Logger.warning("Validation schema compilation warnings: #{inspect(errors)}")
-    end
+    log_schema_validation_warnings(reversed_tools, reversed_prompts)
 
     tool_clauses = generate_tool_clauses(tools)
     prompt_clauses = generate_prompt_clauses(prompts)
     resource_clauses = generate_resource_clauses(resources)
 
-    # Build scope map at compile time: %{"tool_name" => "scope string"}
-    scope_map =
-      tools
-      |> Enum.reverse()
-      |> Enum.reduce(%{}, fn tool, acc ->
-        case Map.get(tool, :scope) do
-          nil -> acc
-          scope -> Map.put(acc, to_string(tool.name), scope)
-        end
-      end)
+    scope_map = build_scope_map(reversed_tools)
+    templated_uris = Enum.map(templated_resources, & &1.uri)
 
     quote do
       # Use pre-built schemas
       @tools unquote(Macro.escape(tool_schemas))
       @prompts unquote(Macro.escape(prompt_schemas))
       @resources unquote(Macro.escape(resource_schemas))
+      @resource_templates unquote(Macro.escape(resource_template_schemas))
+
+      # Eagerly compile templated-resource regexes into persistent_term at
+      # module load. Avoids per-request Regex.recompile/1 (Macro.escape
+      # strips the native re_pattern, so embedding the regex literal would
+      # force a recompile in every Bandit request process).
+      @on_load :__precompile_template_regexes__
+
+      def __precompile_template_regexes__ do
+        Enum.each(
+          unquote(templated_uris),
+          &ConduitMcp.DSL.precompile_template_regex(__MODULE__, &1)
+        )
+
+        :ok
+      end
 
       # Inject validation schema lookup functions
       unquote(validation_lookup_functions)
@@ -982,6 +1086,10 @@ defmodule ConduitMcp.DSL do
         {:ok, %{"resources" => @resources}}
       end
 
+      def handle_list_resource_templates(_conn) do
+        {:ok, %{"resourceTemplates" => @resource_templates}}
+      end
+
       # Inject generated resource handler clauses
       unquote(resource_clauses)
 
@@ -995,6 +1103,40 @@ defmodule ConduitMcp.DSL do
            }}
         end
       end
+    end
+  end
+
+  defp partition_resources(resources) do
+    {templated, static} =
+      resources
+      |> Enum.reverse()
+      |> Enum.split_with(&ConduitMcp.DSL.SchemaBuilder.templated?/1)
+
+    resource_schemas = Enum.map(static, &ConduitMcp.DSL.SchemaBuilder.build_resource_schema/1)
+
+    template_schemas =
+      Enum.map(templated, &ConduitMcp.DSL.SchemaBuilder.build_resource_template_schema/1)
+
+    {templated, resource_schemas, template_schemas}
+  end
+
+  defp build_scope_map(reversed_tools) do
+    Enum.reduce(reversed_tools, %{}, fn tool, acc ->
+      case Map.get(tool, :scope) do
+        nil -> acc
+        scope -> Map.put(acc, to_string(tool.name), scope)
+      end
+    end)
+  end
+
+  defp log_schema_validation_warnings(reversed_tools, reversed_prompts) do
+    case ConduitMcp.DSL.SchemaBuilder.validate_all_schemas(reversed_tools, reversed_prompts) do
+      :ok ->
+        :ok
+
+      {:error, errors} ->
+        require Logger
+        Logger.warning("Validation schema compilation warnings: #{inspect(errors)}")
     end
   end
 
@@ -1145,14 +1287,10 @@ defmodule ConduitMcp.DSL do
   end
 
   defp generate_templated_resource_match(%{uri: res_uri, handler: {:fn_ast, handler_ast}}) do
-    {param_names, regex} = ConduitMcp.DSL.compile_uri_template(res_uri)
-
     quote do
-      case ConduitMcp.DSL.extract_uri_params_compiled(
-             uri,
-             unquote(param_names),
-             unquote(Macro.escape(regex))
-           ) do
+      {param_names, regex} = ConduitMcp.DSL.template_regex(__MODULE__, unquote(res_uri))
+
+      case ConduitMcp.DSL.extract_uri_params_compiled(uri, param_names, regex) do
         {:ok, params} -> unquote(handler_ast).(conn, params, %{})
         :no_match -> nil
       end
@@ -1160,14 +1298,10 @@ defmodule ConduitMcp.DSL do
   end
 
   defp generate_templated_resource_match(%{uri: res_uri, handler: {:mfa, {mod, fun}}}) do
-    {param_names, regex} = ConduitMcp.DSL.compile_uri_template(res_uri)
-
     quote do
-      case ConduitMcp.DSL.extract_uri_params_compiled(
-             uri,
-             unquote(param_names),
-             unquote(Macro.escape(regex))
-           ) do
+      {param_names, regex} = ConduitMcp.DSL.template_regex(__MODULE__, unquote(res_uri))
+
+      case ConduitMcp.DSL.extract_uri_params_compiled(uri, param_names, regex) do
         {:ok, params} -> apply(unquote(mod), unquote(fun), [conn, params, %{}])
         :no_match -> nil
       end
@@ -1175,14 +1309,10 @@ defmodule ConduitMcp.DSL do
   end
 
   defp generate_templated_resource_match(%{uri: res_uri, handler: {:app_view, view_path}}) do
-    {param_names, regex} = ConduitMcp.DSL.compile_uri_template(res_uri)
-
     quote do
-      case ConduitMcp.DSL.extract_uri_params_compiled(
-             uri,
-             unquote(param_names),
-             unquote(Macro.escape(regex))
-           ) do
+      {param_names, regex} = ConduitMcp.DSL.template_regex(__MODULE__, unquote(res_uri))
+
+      case ConduitMcp.DSL.extract_uri_params_compiled(uri, param_names, regex) do
         {:ok, _params} ->
           {:ok,
            %{
@@ -1238,6 +1368,37 @@ defmodule ConduitMcp.DSL do
 
       [_full | captured_values] ->
         {:ok, Map.new(Enum.zip(param_names, captured_values))}
+    end
+  end
+
+  @doc """
+  Stores a compiled URI template regex in `:persistent_term` so that it can
+  be looked up at request time without paying the per-process
+  `Regex.recompile/1` cost incurred when a `Regex` struct is embedded via
+  `Macro.escape/1`.
+
+  Called at module load time from generated `@on_load` hooks.
+  """
+  def precompile_template_regex(module, template) do
+    {param_names, regex} = compile_uri_template(template)
+    :persistent_term.put({__MODULE__, module, template}, {param_names, regex})
+    :ok
+  end
+
+  @doc """
+  Fetches a `{param_names, regex}` tuple previously stored by
+  `precompile_template_regex/2`, falling back to recompiling on cache miss
+  (defensive — should not normally happen).
+  """
+  def template_regex(module, template) do
+    case :persistent_term.get({__MODULE__, module, template}, nil) do
+      nil ->
+        result = compile_uri_template(template)
+        :persistent_term.put({__MODULE__, module, template}, result)
+        result
+
+      cached ->
+        cached
     end
   end
 end

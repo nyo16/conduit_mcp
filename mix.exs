@@ -156,7 +156,8 @@ defmodule ConduitMcp.MixProject do
         "Protocol & Handler": [
           ConduitMcp.Protocol,
           ConduitMcp.Handler,
-          ConduitMcp.Errors
+          ConduitMcp.Errors,
+          ConduitMcp.Cancellation
         ],
         Transport: [
           ConduitMcp.Transport.StreamableHTTP,
@@ -174,13 +175,19 @@ defmodule ConduitMcp.MixProject do
           ConduitMcp.Plugs.RateLimit,
           ConduitMcp.Plugs.MessageRateLimit
         ],
+        Security: [
+          ConduitMcp.Plugs.OriginValidation,
+          ConduitMcp.Plugs.SecurityHeaders
+        ],
         Sessions: [
           ConduitMcp.Session,
           ConduitMcp.Session.Store,
-          ConduitMcp.Session.EtsStore
+          ConduitMcp.Session.EtsStore,
+          ConduitMcp.Session.Janitor
         ],
         Tasks: [
-          ConduitMcp.Tasks
+          ConduitMcp.Tasks,
+          ConduitMcp.Tasks.Janitor
         ],
         Client: [
           ConduitMcp.Client

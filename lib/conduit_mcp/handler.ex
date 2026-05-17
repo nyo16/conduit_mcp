@@ -1,6 +1,56 @@
 defmodule ConduitMcp.Handler do
   @moduledoc """
-  Handles MCP protocol requests and routes them to the appropriate server callbacks.
+  Routes JSON-RPC 2.0 MCP requests to a server module's behaviour callbacks.
+
+  `handle_request/3` is the single entry point: transports decode the
+  request body, hand the resulting map to this module, and serialize the
+  returned map back out. The handler itself is stateless — it does not own
+  the server module, the connection, or any process state. Each request
+  is independent and can run concurrently in its own Bandit process.
+
+  ## Routed methods
+
+  - `initialize` — version negotiation and capability advertisement
+  - `ping` — round-trip liveness check
+  - `tools/list`, `tools/call`
+  - `resources/list`, `resources/templates/list`, `resources/read`
+  - `resources/subscribe`, `resources/unsubscribe`
+  - `prompts/list`, `prompts/get`
+  - `completion/complete`
+  - `logging/setLevel`
+  - `tasks/get`, `tasks/cancel`, `tasks/result`, `tasks/list`
+  - `notifications/initialized`, `notifications/cancelled`
+
+  Unknown methods return `-32601 Method not found`. Unknown notifications
+  are logged and dropped (per JSON-RPC notification semantics).
+
+  ## Capability detection
+
+  When the server module defines `__capabilities__/0` (typically generated
+  by `ConduitMcp.Endpoint`), it is consulted for the `initialize` reply.
+  Otherwise the base `tools`/`resources`/`prompts` set is used.
+  Capability flags for optional features (`completions`, `logging`,
+  `resources.subscribe`) are overlaid at runtime based on which callbacks
+  the server exports, via `ConduitMcp.ServerMeta`.
+
+  ## Telemetry
+
+  Emits these events:
+
+  - `[:conduit_mcp, :request, :stop]` — every request, with
+    `%{duration: <native>}` and metadata `%{method, server_module, status}`.
+  - `[:conduit_mcp, :tool, :execute]` — per `tools/call`.
+  - `[:conduit_mcp, :resource, :read]` — per `resources/read`.
+  - `[:conduit_mcp, :prompt, :get]` — per `prompts/get`.
+  - `[:conduit_mcp, :request, :cancelled]` — when
+    `notifications/cancelled` is received.
+
+  ## Cancellation
+
+  The handler stashes the request id into `conn.assigns[:mcp_request_id]`
+  before dispatch and uses `try/after` to clear any cancellation flag
+  after the response is produced. Tools poll
+  `ConduitMcp.Cancellation.cancelled?(conn)` for cooperative aborts.
   """
 
   require Logger
@@ -50,9 +100,18 @@ defmodule ConduitMcp.Handler do
     method = Map.get(request, "method")
     id = Map.get(request, "id")
     params = Map.get(request, "params", %{})
+    conn = Plug.Conn.assign(conn, :mcp_request_id, id)
 
     Logger.debug("Handling method", method: method)
 
+    try do
+      do_handle_method(method, id, params, server_module, conn)
+    after
+      ConduitMcp.Cancellation.clear(id)
+    end
+  end
+
+  defp do_handle_method(method, id, params, server_module, conn) do
     case method do
       "initialize" ->
         handle_initialize(id, params, server_module, conn)
@@ -68,6 +127,9 @@ defmodule ConduitMcp.Handler do
 
       "resources/list" ->
         dispatch_list(id, server_module, :handle_list_resources, conn, params)
+
+      "resources/templates/list" ->
+        handle_list_resource_templates(id, server_module, conn)
 
       "resources/read" ->
         handle_resource_read(id, params, server_module, conn)
@@ -90,6 +152,18 @@ defmodule ConduitMcp.Handler do
       "resources/unsubscribe" ->
         handle_unsubscribe(id, params, server_module, conn)
 
+      "tasks/get" ->
+        handle_tasks_get(id, params)
+
+      "tasks/cancel" ->
+        handle_tasks_cancel(id, params)
+
+      "tasks/result" ->
+        handle_tasks_result(id, params)
+
+      "tasks/list" ->
+        handle_tasks_list(id, params)
+
       _ ->
         Protocol.error_response(
           id,
@@ -101,15 +175,11 @@ defmodule ConduitMcp.Handler do
     error ->
       Logger.error("Error handling method",
         error: Exception.message(error),
-        method: Map.get(request, "method"),
-        request_id: Map.get(request, "id")
+        method: method,
+        request_id: id
       )
 
-      Protocol.error_response(
-        Map.get(request, "id"),
-        Protocol.internal_error(),
-        "Internal server error"
-      )
+      Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
   end
 
   defp handle_notification(notification, _server_module) do
@@ -119,6 +189,13 @@ defmodule ConduitMcp.Handler do
     case method do
       "notifications/initialized" ->
         Logger.info("Client initialized")
+        :ok
+
+      "notifications/cancelled" ->
+        params = Map.get(notification, "params", %{})
+        request_id = Map.get(params, "requestId")
+        reason = Map.get(params, "reason")
+        ConduitMcp.Cancellation.cancel(request_id, reason)
         :ok
 
       _ ->
@@ -196,8 +273,12 @@ defmodule ConduitMcp.Handler do
         )
         |> maybe_add_meta(params)
       else
-        {:error, %{"error" => _} = scope_error} ->
-          scope_error
+        {:error, :insufficient_scope, required_scope} ->
+          Protocol.error_response(
+            id,
+            ConduitMcp.Errors.server_error(),
+            "Insufficient scope. Required: #{required_scope}"
+          )
 
         {:error, validation_errors} ->
           Protocol.error_response(
@@ -313,12 +394,19 @@ defmodule ConduitMcp.Handler do
     if Enum.all?(required, &(&1 in token_scopes)) do
       :ok
     else
-      {:error,
-       Protocol.error_response(
-         nil,
-         ConduitMcp.Errors.server_error(),
-         "Insufficient scope. Required: #{required_scope}"
-       )}
+      {:error, :insufficient_scope, required_scope}
+    end
+  end
+
+  defp handle_list_resource_templates(id, server_module, conn) do
+    if ServerMeta.has?(server_module, :list_resource_templates) do
+      dispatch_callback(
+        id,
+        fn -> server_module.handle_list_resource_templates(conn) end,
+        "handle_list_resource_templates"
+      )
+    else
+      Protocol.success_response(id, %{"resourceTemplates" => []})
     end
   end
 
@@ -326,18 +414,44 @@ defmodule ConduitMcp.Handler do
     ref = Map.get(params, "ref", %{})
     argument = Map.get(params, "argument", %{})
 
-    if ServerMeta.has?(server_module, :complete) do
-      dispatch_callback(
-        id,
-        fn -> server_module.handle_complete(conn, ref, argument) end,
-        "handle_complete"
-      )
-    else
-      Protocol.success_response(id, %{
-        "completion" => %{"values" => [], "total" => 0, "hasMore" => false}
-      })
+    case validate_completion_ref(ref) do
+      :ok ->
+        if ServerMeta.has?(server_module, :complete) do
+          dispatch_callback(
+            id,
+            fn -> server_module.handle_complete(conn, ref, argument) end,
+            "handle_complete"
+          )
+        else
+          Protocol.success_response(id, %{
+            "completion" => %{"values" => [], "total" => 0, "hasMore" => false}
+          })
+        end
+
+      {:error, message} ->
+        Protocol.error_response(id, ConduitMcp.Errors.invalid_params(), message)
     end
   end
+
+  defp validate_completion_ref(%{"type" => "ref/prompt", "name" => name}) when is_binary(name),
+    do: :ok
+
+  defp validate_completion_ref(%{"type" => "ref/resource", "uri" => uri}) when is_binary(uri),
+    do: :ok
+
+  defp validate_completion_ref(%{"type" => type}) when type in ["ref/prompt", "ref/resource"] do
+    {:error, "Invalid completion ref: missing #{ref_required_field(type)}"}
+  end
+
+  defp validate_completion_ref(%{"type" => type}) do
+    {:error, ~s(Invalid completion ref type "#{type}"; expected "ref/prompt" or "ref/resource")}
+  end
+
+  defp validate_completion_ref(_),
+    do: {:error, "Invalid completion ref: missing type"}
+
+  defp ref_required_field("ref/prompt"), do: "name"
+  defp ref_required_field("ref/resource"), do: "uri"
 
   defp handle_logging(id, params, server_module, conn) do
     level = Map.get(params, "level")
@@ -387,6 +501,66 @@ defmodule ConduitMcp.Handler do
         "Resource subscriptions not supported"
       )
     end
+  end
+
+  defp handle_tasks_get(id, params) do
+    case Map.get(params, "taskId") do
+      nil ->
+        Protocol.error_response(id, Protocol.invalid_params(), "Missing taskId")
+
+      task_id ->
+        case ConduitMcp.Tasks.get(task_id) do
+          {:ok, task} -> Protocol.success_response(id, %{"task" => task})
+          {:error, :not_found} -> task_not_found(id, task_id)
+        end
+    end
+  end
+
+  defp handle_tasks_cancel(id, params) do
+    case Map.get(params, "taskId") do
+      nil ->
+        Protocol.error_response(id, Protocol.invalid_params(), "Missing taskId")
+
+      task_id ->
+        case ConduitMcp.Tasks.cancel(task_id) do
+          {:ok, task} -> Protocol.success_response(id, %{"task" => task})
+          {:error, :not_found} -> task_not_found(id, task_id)
+        end
+    end
+  end
+
+  defp handle_tasks_result(id, params) do
+    case Map.get(params, "taskId") do
+      nil ->
+        Protocol.error_response(id, Protocol.invalid_params(), "Missing taskId")
+
+      task_id ->
+        case ConduitMcp.Tasks.get(task_id) do
+          {:ok, task} ->
+            case Map.get(task, "status") do
+              "completed" -> Protocol.success_response(id, Map.get(task, "result", %{}))
+              "failed" -> Protocol.success_response(id, %{"error" => Map.get(task, "error")})
+              other -> Protocol.error_response(id, -32004, "Task not finished (status: #{other})")
+            end
+
+          {:error, :not_found} ->
+            task_not_found(id, task_id)
+        end
+    end
+  end
+
+  defp handle_tasks_list(id, params) do
+    opts = if status = Map.get(params, "status"), do: [status: status], else: []
+    tasks = ConduitMcp.Tasks.list(opts)
+    Protocol.success_response(id, %{"tasks" => tasks})
+  end
+
+  defp task_not_found(id, task_id) do
+    Protocol.error_response(
+      id,
+      ConduitMcp.Errors.resource_not_found(),
+      "Task not found: #{task_id}"
+    )
   end
 
   defp dispatch_callback(id, callback_fn, callback_name) do
@@ -448,16 +622,44 @@ defmodule ConduitMcp.Handler do
   defp ensure_resource_uri(response, _uri), do: response
 
   defp build_capabilities(server_module) do
-    if ServerMeta.has?(server_module, :capabilities) do
-      server_module.__capabilities__()
+    base =
+      if ServerMeta.has?(server_module, :capabilities) do
+        server_module.__capabilities__()
+      else
+        %{
+          "tools" => %{"listChanged" => false},
+          "resources" => %{"listChanged" => false},
+          "prompts" => %{"listChanged" => false}
+        }
+      end
+
+    base
+    |> maybe_put_subscribe(server_module)
+    |> maybe_put_completions(server_module)
+    |> maybe_put_logging(server_module)
+  end
+
+  defp maybe_put_subscribe(caps, server_module) do
+    if ServerMeta.has?(server_module, :subscribe) and Map.has_key?(caps, "resources") do
+      Map.update!(caps, "resources", &Map.put(&1, "subscribe", true))
     else
-      # DSL and manual mode servers always define all 6 callbacks,
-      # so we advertise all capabilities by default.
-      %{
-        "tools" => %{"listChanged" => false},
-        "resources" => %{"listChanged" => false},
-        "prompts" => %{"listChanged" => false}
-      }
+      caps
+    end
+  end
+
+  defp maybe_put_completions(caps, server_module) do
+    if ServerMeta.has?(server_module, :complete) do
+      Map.put(caps, "completions", %{})
+    else
+      caps
+    end
+  end
+
+  defp maybe_put_logging(caps, server_module) do
+    if ServerMeta.has?(server_module, :set_log_level) do
+      Map.put(caps, "logging", %{})
+    else
+      caps
     end
   end
 end

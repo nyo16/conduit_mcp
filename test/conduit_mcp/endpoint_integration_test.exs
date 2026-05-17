@@ -233,16 +233,25 @@ defmodule ConduitMcp.EndpointIntegrationTest do
   end
 
   describe "resources/list" do
-    test "returns registered resource components" do
+    test "returns static resource components only (templates go to resources/templates/list)" do
       conn = json_rpc_request("resources/list")
 
       assert conn.status == 200
       resources = parse_response(conn)["result"]["resources"]
-      assert length(resources) == 1
+      refute Enum.any?(resources, &(&1["uri"] == "user://{id}"))
+    end
+  end
 
-      user_resource = hd(resources)
-      assert user_resource["uri"] == "user://{id}"
-      assert user_resource["mimeType"] == "application/json"
+  describe "resources/templates/list" do
+    test "returns templated resource components with uriTemplate key" do
+      conn = json_rpc_request("resources/templates/list")
+
+      assert conn.status == 200
+      templates = parse_response(conn)["result"]["resourceTemplates"]
+
+      user_template = Enum.find(templates, &(&1["uriTemplate"] == "user://{id}"))
+      assert user_template["mimeType"] == "application/json"
+      refute Map.has_key?(user_template, "uri")
     end
   end
 

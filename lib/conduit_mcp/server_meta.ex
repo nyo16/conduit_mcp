@@ -51,6 +51,8 @@ defmodule ConduitMcp.ServerMeta do
       set_log_level: function_exported?(server_module, :handle_set_log_level, 2),
       subscribe: function_exported?(server_module, :handle_subscribe_resource, 2),
       unsubscribe: function_exported?(server_module, :handle_unsubscribe_resource, 2),
+      list_resource_templates:
+        function_exported?(server_module, :handle_list_resource_templates, 1),
       list_tools_2: function_exported?(server_module, :handle_list_tools, 2),
       list_resources_2: function_exported?(server_module, :handle_list_resources, 2),
       list_prompts_2: function_exported?(server_module, :handle_list_prompts, 2)

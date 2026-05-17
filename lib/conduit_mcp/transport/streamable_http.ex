@@ -7,11 +7,25 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
 
   ## Options
 
-  - `:server_module` (required) - The MCP server module to route requests to
-  - `:cors_origin` - CORS allow-origin header (default: "*")
-  - `:cors_methods` - CORS allow-methods header (default: "GET, POST, OPTIONS")
-  - `:cors_headers` - CORS allow-headers header (default: "content-type, authorization")
-  - `:auth` - Authentication plug configuration (optional)
+  - `:server_module` (required) — the MCP server module to route requests to
+  - `:server_name` — advertised server name in the `initialize` response (falls
+    back to the module's `__endpoint_config__/0` if defined)
+  - `:server_version` — advertised server version (same fallback behavior)
+  - `:auth` — authentication plug configuration. See `ConduitMcp.Plugs.Auth`.
+  - `:rate_limit` — HTTP-level rate limit configuration. See `ConduitMcp.Plugs.RateLimit`.
+  - `:message_rate_limit` — per-message rate limit configuration. See
+    `ConduitMcp.Plugs.MessageRateLimit`.
+  - `:session` — session-store configuration. Enables `Mcp-Session-Id`
+    handling. See `ConduitMcp.Session`.
+  - `:allowed_origins` — list of allowed `Origin` header values (also accepts
+    `"*"` and regex). See `ConduitMcp.Plugs.OriginValidation`.
+  - `:cors_origin` — CORS allow-origin header (default: `"*"`)
+  - `:cors_methods` — CORS allow-methods header (default: `"GET, POST, OPTIONS"`)
+  - `:cors_headers` — CORS allow-headers header (default: `"content-type, authorization"`)
+
+  When used via `ConduitMcp.Endpoint`, the `:auth`, `:rate_limit`, and
+  `:message_rate_limit` options are auto-extracted from the endpoint config
+  unless overridden here.
 
   ## Example
 
@@ -209,18 +223,21 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     session_config = Keyword.get(opts, :session)
     allowed_origins = Keyword.get(opts, :allowed_origins)
 
-    conn
-    |> Plug.Conn.put_private(:server_module, server_module)
-    |> Plug.Conn.put_private(:allowed_origins, allowed_origins)
-    |> Plug.Conn.put_private(:cors_origin, cors_origin)
-    |> Plug.Conn.put_private(:cors_methods, cors_methods)
-    |> Plug.Conn.put_private(:cors_headers, cors_headers)
-    |> Plug.Conn.put_private(:auth_config, auth_config)
-    |> Plug.Conn.put_private(:rate_limit_config, rate_limit_config)
-    |> Plug.Conn.put_private(:message_rate_limit_config, message_rate_limit_config)
-    |> Plug.Conn.put_private(:server_name, server_name)
-    |> Plug.Conn.put_private(:server_version, server_version)
-    |> Plug.Conn.put_private(:session_config, session_config)
+    private = %{
+      server_module: server_module,
+      allowed_origins: allowed_origins,
+      cors_origin: cors_origin,
+      cors_methods: cors_methods,
+      cors_headers: cors_headers,
+      auth_config: auth_config,
+      rate_limit_config: rate_limit_config,
+      message_rate_limit_config: message_rate_limit_config,
+      server_name: server_name,
+      server_version: server_version,
+      session_config: session_config
+    }
+
+    %{conn | private: Map.merge(conn.private, private)}
     |> super(opts)
   end
 

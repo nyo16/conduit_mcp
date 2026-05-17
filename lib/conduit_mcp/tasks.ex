@@ -93,6 +93,46 @@ defmodule ConduitMcp.Tasks do
   end
 
   @doc """
+  Deletes a task by ID.
+
+  Returns `:ok` whether or not the task existed.
+  """
+  def delete(task_id) do
+    ensure_table()
+    :ets.delete(:conduit_mcp_tasks, task_id)
+    :ok
+  end
+
+  @doc """
+  Removes terminal-state tasks (`completed`, `failed`, `cancelled`) older than
+  `ttl_ms` milliseconds. Tasks still in `working` or `input_required` are never
+  evicted regardless of age.
+
+  Returns the count of tasks removed.
+  """
+  def cleanup(ttl_ms) do
+    ensure_table()
+    now = System.system_time(:millisecond)
+    terminal_statuses = ~w(completed failed cancelled)
+
+    :ets.foldl(
+      fn {task_id, task}, acc ->
+        created_at = Map.get(task, "created_at", 0)
+        status = Map.get(task, "status", "working")
+
+        if status in terminal_statuses and now - created_at > ttl_ms do
+          :ets.delete(:conduit_mcp_tasks, task_id)
+          acc + 1
+        else
+          acc
+        end
+      end,
+      0,
+      :conduit_mcp_tasks
+    )
+  end
+
+  @doc """
   Lists all tasks, optionally filtered by status.
   """
   def list(opts \\ []) do

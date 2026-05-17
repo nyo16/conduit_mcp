@@ -296,6 +296,22 @@ defmodule ConduitMcp.HandlerTest do
 
       assert response == :ok
     end
+
+    test "notifications/cancelled records cancellation state" do
+      if :ets.whereis(:conduit_mcp_cancellations) != :undefined do
+        :ets.delete_all_objects(:conduit_mcp_cancellations)
+      end
+
+      notification = %{
+        "jsonrpc" => "2.0",
+        "method" => "notifications/cancelled",
+        "params" => %{"requestId" => "abc-123", "reason" => "user abort"}
+      }
+
+      assert :ok = Handler.handle_request(notification, TestServer)
+      assert ConduitMcp.Cancellation.cancelled?("abc-123")
+      assert ConduitMcp.Cancellation.reason("abc-123") == "user abort"
+    end
   end
 
   describe "handle_request/2 with invalid requests" do
@@ -716,6 +732,54 @@ defmodule ConduitMcp.HandlerTest do
       assert response["result"]["completion"]["total"] == 0
     end
 
+    test "completion/complete rejects unknown ref.type with -32602" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 9,
+        "method" => "completion/complete",
+        "params" => %{
+          "ref" => %{"type" => "ref/garbage", "name" => "x"},
+          "argument" => %{"name" => "a", "value" => "b"}
+        }
+      }
+
+      response = Handler.handle_request(request, ImplementedCallbacksServer)
+
+      assert response["error"]["code"] == ConduitMcp.Errors.invalid_params()
+      assert response["error"]["message"] =~ ~s(Invalid completion ref type "ref/garbage")
+    end
+
+    test "completion/complete rejects ref missing required field" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 9,
+        "method" => "completion/complete",
+        "params" => %{
+          "ref" => %{"type" => "ref/prompt"},
+          "argument" => %{"name" => "a", "value" => "b"}
+        }
+      }
+
+      response = Handler.handle_request(request, ImplementedCallbacksServer)
+      assert response["error"]["code"] == ConduitMcp.Errors.invalid_params()
+      assert response["error"]["message"] =~ "missing name"
+    end
+
+    test "completion/complete rejects ref without type" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 9,
+        "method" => "completion/complete",
+        "params" => %{
+          "ref" => %{},
+          "argument" => %{"name" => "a", "value" => "b"}
+        }
+      }
+
+      response = Handler.handle_request(request, ImplementedCallbacksServer)
+      assert response["error"]["code"] == ConduitMcp.Errors.invalid_params()
+    end
+
     test "logging/setLevel returns the server's response with level" do
       request = %{
         "jsonrpc" => "2.0",
@@ -772,6 +836,204 @@ defmodule ConduitMcp.HandlerTest do
       assert response["jsonrpc"] == "2.0"
       assert response["id"] == 7
       assert response["result"]["unsubscribed"] == "test://resource1"
+    end
+  end
+
+  describe "tasks/* methods" do
+    setup do
+      if :ets.whereis(:conduit_mcp_tasks) != :undefined do
+        :ets.delete_all_objects(:conduit_mcp_tasks)
+      end
+
+      :ok
+    end
+
+    test "tasks/get returns task metadata for an existing task" do
+      {:ok, _} = ConduitMcp.Tasks.create("t1", %{"tool" => "echo"})
+
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tasks/get",
+        "params" => %{"taskId" => "t1"}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+
+      assert response["result"]["task"]["task_id"] == "t1"
+      assert response["result"]["task"]["status"] == "working"
+    end
+
+    test "tasks/get returns -32002 for missing task" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tasks/get",
+        "params" => %{"taskId" => "missing"}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+
+      assert response["error"]["code"] == ConduitMcp.Errors.resource_not_found()
+    end
+
+    test "tasks/get returns invalid_params when taskId missing" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tasks/get",
+        "params" => %{}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+      assert response["error"]["code"] == ConduitMcp.Errors.invalid_params()
+    end
+
+    test "tasks/cancel transitions a working task to cancelled" do
+      {:ok, _} = ConduitMcp.Tasks.create("t2", %{"tool" => "echo"})
+
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tasks/cancel",
+        "params" => %{"taskId" => "t2"}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+      assert response["result"]["task"]["status"] == "cancelled"
+    end
+
+    test "tasks/result returns the result for a completed task" do
+      {:ok, _} = ConduitMcp.Tasks.create("t3", %{"tool" => "echo"})
+
+      ConduitMcp.Tasks.update("t3", %{
+        "status" => "completed",
+        "result" => %{"content" => [%{"type" => "text", "text" => "done"}]}
+      })
+
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tasks/result",
+        "params" => %{"taskId" => "t3"}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+
+      assert response["result"]["content"] == [%{"type" => "text", "text" => "done"}]
+    end
+
+    test "tasks/result errors when task is still working" do
+      {:ok, _} = ConduitMcp.Tasks.create("t4", %{"tool" => "echo"})
+
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tasks/result",
+        "params" => %{"taskId" => "t4"}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+      assert response["error"]["code"] == -32004
+      assert response["error"]["message"] =~ "Task not finished"
+    end
+
+    test "tasks/list returns all tasks" do
+      {:ok, _} = ConduitMcp.Tasks.create("t5")
+      {:ok, _} = ConduitMcp.Tasks.create("t6")
+
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tasks/list",
+        "params" => %{}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+      task_ids = Enum.map(response["result"]["tasks"], & &1["task_id"])
+      assert "t5" in task_ids
+      assert "t6" in task_ids
+    end
+
+    test "tasks/list filters by status" do
+      {:ok, _} = ConduitMcp.Tasks.create("working_one")
+      {:ok, _} = ConduitMcp.Tasks.create("done_one")
+      ConduitMcp.Tasks.update("done_one", %{"status" => "completed"})
+
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tasks/list",
+        "params" => %{"status" => "completed"}
+      }
+
+      response = Handler.handle_request(request, TestServer)
+      task_ids = Enum.map(response["result"]["tasks"], & &1["task_id"])
+      assert task_ids == ["done_one"]
+    end
+  end
+
+  describe "resources/templates/list" do
+    test "returns empty list when server does not implement the callback" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "resources/templates/list"
+      }
+
+      response = Handler.handle_request(request, TestServer)
+
+      assert response["result"] == %{"resourceTemplates" => []}
+    end
+  end
+
+  describe "capability advertisement on initialize" do
+    setup do
+      ConduitMcp.ServerMeta.clear(TestServer)
+      ConduitMcp.ServerMeta.clear(ImplementedCallbacksServer)
+      :ok
+    end
+
+    test "server without optional callbacks advertises only base capabilities" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "initialize",
+        "params" => %{
+          "protocolVersion" => "2025-11-25",
+          "clientInfo" => %{"name" => "test", "version" => "1.0"},
+          "capabilities" => %{}
+        }
+      }
+
+      caps = Handler.handle_request(request, TestServer)["result"]["capabilities"]
+
+      assert Map.has_key?(caps, "tools")
+      assert Map.has_key?(caps, "resources")
+      assert Map.has_key?(caps, "prompts")
+      refute Map.has_key?(caps, "completions")
+      refute Map.has_key?(caps, "logging")
+      refute Map.has_key?(caps["resources"], "subscribe")
+    end
+
+    test "server with all optional callbacks advertises completions, logging, subscribe" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "initialize",
+        "params" => %{
+          "protocolVersion" => "2025-11-25",
+          "clientInfo" => %{"name" => "test", "version" => "1.0"},
+          "capabilities" => %{}
+        }
+      }
+
+      caps =
+        Handler.handle_request(request, ImplementedCallbacksServer)["result"]["capabilities"]
+
+      assert caps["completions"] == %{}
+      assert caps["logging"] == %{}
+      assert caps["resources"]["subscribe"] == true
     end
   end
 end

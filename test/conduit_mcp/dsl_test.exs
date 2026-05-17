@@ -390,20 +390,31 @@ defmodule ConduitMcp.DSLTest do
   end
 
   describe "DSL resource definitions" do
-    test "generates resource schemas correctly" do
+    test "generates resource schemas correctly (static only in resources/list)" do
       conn = %Plug.Conn{}
       {:ok, result} = DSLTestServer.handle_list_resources(conn)
 
       resources = result["resources"]
       assert is_list(resources)
-      assert length(resources) == 2
 
-      user_resource = Enum.find(resources, fn r -> r["uri"] == "user://{id}" end)
-      assert user_resource["description"] == "User profile data"
-      assert user_resource["mimeType"] == "application/json"
+      # Templated URIs belong in resources/templates/list per MCP spec
+      refute Enum.any?(resources, fn r -> r["uri"] == "user://{id}" end)
 
       static_resource = Enum.find(resources, fn r -> r["uri"] == "static://readme" end)
       assert static_resource["mimeType"] == "text/markdown"
+    end
+
+    test "templated resources appear in resources/templates/list" do
+      conn = %Plug.Conn{}
+      {:ok, result} = DSLTestServer.handle_list_resource_templates(conn)
+
+      templates = result["resourceTemplates"]
+      assert is_list(templates)
+
+      user_template = Enum.find(templates, fn r -> r["uriTemplate"] == "user://{id}" end)
+      assert user_template["description"] == "User profile data"
+      assert user_template["mimeType"] == "application/json"
+      refute Map.has_key?(user_template, "uri")
     end
 
     test "executes resource read with URI template" do
@@ -544,6 +555,98 @@ defmodule ConduitMcp.DSLTest do
       assert schema["inputSchema"]["properties"]["opt"]["default"] == "default_val"
     end
 
+    test "emits title when set" do
+      schema =
+        SchemaBuilder.build_tool_schema(%{
+          name: "x",
+          description: "",
+          params: [],
+          title: "Friendly Name"
+        })
+
+      assert schema["title"] == "Friendly Name"
+    end
+
+    test "omits title when nil or empty" do
+      schema_nil =
+        SchemaBuilder.build_tool_schema(%{name: "x", description: "", params: [], title: nil})
+
+      schema_empty =
+        SchemaBuilder.build_tool_schema(%{name: "x", description: "", params: [], title: ""})
+
+      refute Map.has_key?(schema_nil, "title")
+      refute Map.has_key?(schema_empty, "title")
+    end
+
+    test "emits icons when non-empty" do
+      icons = [%{"src" => "https://example.com/x.svg", "mimeType" => "image/svg+xml"}]
+
+      schema =
+        SchemaBuilder.build_tool_schema(%{
+          name: "x",
+          description: "",
+          params: [],
+          icons: icons
+        })
+
+      assert schema["icons"] == icons
+    end
+
+    test "omits icons when nil or empty list" do
+      schema_nil =
+        SchemaBuilder.build_tool_schema(%{name: "x", description: "", params: [], icons: nil})
+
+      schema_empty =
+        SchemaBuilder.build_tool_schema(%{name: "x", description: "", params: [], icons: []})
+
+      refute Map.has_key?(schema_nil, "icons")
+      refute Map.has_key?(schema_empty, "icons")
+    end
+
+    test "emits outputSchema when set" do
+      output = %{"type" => "object", "properties" => %{"id" => %{"type" => "string"}}}
+
+      schema =
+        SchemaBuilder.build_tool_schema(%{
+          name: "x",
+          description: "",
+          params: [],
+          output_schema: output
+        })
+
+      assert schema["outputSchema"] == output
+    end
+
+    test "emits execution.taskSupport when set" do
+      schema_supported =
+        SchemaBuilder.build_tool_schema(%{
+          name: "x",
+          description: "",
+          params: [],
+          task_support: :supported
+        })
+
+      schema_required =
+        SchemaBuilder.build_tool_schema(%{
+          name: "x",
+          description: "",
+          params: [],
+          task_support: :required
+        })
+
+      schema_none =
+        SchemaBuilder.build_tool_schema(%{
+          name: "x",
+          description: "",
+          params: [],
+          task_support: :none
+        })
+
+      assert schema_supported["execution"] == %{"taskSupport" => "supported"}
+      assert schema_required["execution"] == %{"taskSupport" => "required"}
+      refute Map.has_key?(schema_none, "execution")
+    end
+
     test "builds prompt schema" do
       prompt_def = %{
         name: "test_prompt",
@@ -630,6 +733,42 @@ defmodule ConduitMcp.DSLTest do
 
       result = error("Invalid params", -32602)
       assert result == {:error, %{"code" => -32602, "message" => "Invalid params"}}
+    end
+
+    test "execution_error/1 returns a successful result with isError=true" do
+      import ConduitMcp.DSL.Helpers
+
+      assert {:ok,
+              %{
+                "content" => [%{"type" => "text", "text" => "User missing"}],
+                "isError" => true
+              }} = execution_error("User missing")
+    end
+
+    test "structured/2 emits content + structuredContent" do
+      import ConduitMcp.DSL.Helpers
+
+      payload = %{"id" => "42", "email" => "x@example.com"}
+
+      assert {:ok,
+              %{
+                "content" => [%{"type" => "text", "text" => "Got user"}],
+                "structuredContent" => ^payload
+              }} = structured(payload, "Got user")
+    end
+
+    test "structured/1 falls back to JSON-encoded text when message omitted" do
+      import ConduitMcp.DSL.Helpers
+
+      payload = %{"id" => "42"}
+
+      assert {:ok,
+              %{
+                "content" => [%{"type" => "text", "text" => text}],
+                "structuredContent" => ^payload
+              }} = structured(payload)
+
+      assert {:ok, ^payload} = JSON.decode(text)
     end
 
     test "system/1 creates system message" do

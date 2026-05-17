@@ -212,7 +212,7 @@ defmodule ConduitMcp.Plugs.Auth do
 
   defp do_verify(credential, %{strategy: :bearer_token, token: expected_token})
        when not is_nil(expected_token) do
-    if credential == expected_token do
+    if Plug.Crypto.secure_compare(credential, expected_token) do
       {:ok, %{authenticated: true}}
     else
       {:error, "Invalid token"}
@@ -221,7 +221,7 @@ defmodule ConduitMcp.Plugs.Auth do
 
   defp do_verify(credential, %{strategy: :api_key, api_key: expected_key})
        when not is_nil(expected_key) do
-    if credential == expected_key do
+    if Plug.Crypto.secure_compare(credential, expected_key) do
       {:ok, %{authenticated: true}}
     else
       {:error, "Invalid API key"}
