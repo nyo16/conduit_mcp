@@ -1,6 +1,6 @@
 defmodule ConduitMcp.Tasks.EtsStore do
   @moduledoc """
-  ETS-backed task store. Default implementation used by `ConduitMcp.Tasks`.
+  ETS-backed task store. Default implementation of `ConduitMcp.Tasks.Store`.
 
   All state lives in the named ETS table `:conduit_mcp_tasks`, which is
   created lazily on first call. The table is `:public` so any process can
@@ -12,11 +12,14 @@ defmodule ConduitMcp.Tasks.EtsStore do
   an interval.
   """
 
+  @behaviour ConduitMcp.Tasks.Store
+
   @table :conduit_mcp_tasks
 
   @doc """
   Creates a new task with the given id and metadata. Returns the stored task.
   """
+  @impl true
   def create(task_id, metadata \\ %{}) do
     ensure_table()
 
@@ -34,6 +37,7 @@ defmodule ConduitMcp.Tasks.EtsStore do
   @doc """
   Fetches a task by id.
   """
+  @impl true
   def get(task_id) do
     ensure_table()
 
@@ -47,6 +51,7 @@ defmodule ConduitMcp.Tasks.EtsStore do
   Merges `updates` into the existing task. Returns the new task or
   `{:error, :not_found}`.
   """
+  @impl true
   def update(task_id, updates) do
     ensure_table()
 
@@ -64,6 +69,7 @@ defmodule ConduitMcp.Tasks.EtsStore do
   @doc """
   Cancels a task by setting status to `"cancelled"`.
   """
+  @impl true
   def cancel(task_id) do
     update(task_id, %{"status" => "cancelled"})
   end
@@ -71,6 +77,7 @@ defmodule ConduitMcp.Tasks.EtsStore do
   @doc """
   Deletes a task. Returns `:ok` whether or not it existed.
   """
+  @impl true
   def delete(task_id) do
     ensure_table()
     :ets.delete(@table, task_id)
@@ -82,6 +89,7 @@ defmodule ConduitMcp.Tasks.EtsStore do
   than `ttl_ms`. Tasks in `working` or `input_required` are never evicted.
   Returns the number of rows removed.
   """
+  @impl true
   def cleanup(ttl_ms) do
     ensure_table()
     now = System.system_time(:millisecond)
@@ -107,6 +115,7 @@ defmodule ConduitMcp.Tasks.EtsStore do
   @doc """
   Lists all tasks, optionally filtered by `:status`.
   """
+  @impl true
   def list(opts \\ []) do
     ensure_table()
     status_filter = Keyword.get(opts, :status)
