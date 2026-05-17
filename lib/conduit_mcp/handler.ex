@@ -448,16 +448,44 @@ defmodule ConduitMcp.Handler do
   defp ensure_resource_uri(response, _uri), do: response
 
   defp build_capabilities(server_module) do
-    if ServerMeta.has?(server_module, :capabilities) do
-      server_module.__capabilities__()
+    base =
+      if ServerMeta.has?(server_module, :capabilities) do
+        server_module.__capabilities__()
+      else
+        %{
+          "tools" => %{"listChanged" => false},
+          "resources" => %{"listChanged" => false},
+          "prompts" => %{"listChanged" => false}
+        }
+      end
+
+    base
+    |> maybe_put_subscribe(server_module)
+    |> maybe_put_completions(server_module)
+    |> maybe_put_logging(server_module)
+  end
+
+  defp maybe_put_subscribe(caps, server_module) do
+    if ServerMeta.has?(server_module, :subscribe) and Map.has_key?(caps, "resources") do
+      Map.update!(caps, "resources", &Map.put(&1, "subscribe", true))
     else
-      # DSL and manual mode servers always define all 6 callbacks,
-      # so we advertise all capabilities by default.
-      %{
-        "tools" => %{"listChanged" => false},
-        "resources" => %{"listChanged" => false},
-        "prompts" => %{"listChanged" => false}
-      }
+      caps
+    end
+  end
+
+  defp maybe_put_completions(caps, server_module) do
+    if ServerMeta.has?(server_module, :complete) do
+      Map.put(caps, "completions", %{})
+    else
+      caps
+    end
+  end
+
+  defp maybe_put_logging(caps, server_module) do
+    if ServerMeta.has?(server_module, :set_log_level) do
+      Map.put(caps, "logging", %{})
+    else
+      caps
     end
   end
 end

@@ -774,4 +774,54 @@ defmodule ConduitMcp.HandlerTest do
       assert response["result"]["unsubscribed"] == "test://resource1"
     end
   end
+
+  describe "capability advertisement on initialize" do
+    setup do
+      ConduitMcp.ServerMeta.clear(TestServer)
+      ConduitMcp.ServerMeta.clear(ImplementedCallbacksServer)
+      :ok
+    end
+
+    test "server without optional callbacks advertises only base capabilities" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "initialize",
+        "params" => %{
+          "protocolVersion" => "2025-11-25",
+          "clientInfo" => %{"name" => "test", "version" => "1.0"},
+          "capabilities" => %{}
+        }
+      }
+
+      caps = Handler.handle_request(request, TestServer)["result"]["capabilities"]
+
+      assert Map.has_key?(caps, "tools")
+      assert Map.has_key?(caps, "resources")
+      assert Map.has_key?(caps, "prompts")
+      refute Map.has_key?(caps, "completions")
+      refute Map.has_key?(caps, "logging")
+      refute Map.has_key?(caps["resources"], "subscribe")
+    end
+
+    test "server with all optional callbacks advertises completions, logging, subscribe" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "initialize",
+        "params" => %{
+          "protocolVersion" => "2025-11-25",
+          "clientInfo" => %{"name" => "test", "version" => "1.0"},
+          "capabilities" => %{}
+        }
+      }
+
+      caps =
+        Handler.handle_request(request, ImplementedCallbacksServer)["result"]["capabilities"]
+
+      assert caps["completions"] == %{}
+      assert caps["logging"] == %{}
+      assert caps["resources"]["subscribe"] == true
+    end
+  end
 end
