@@ -5,12 +5,13 @@ defmodule ConduitMcp.Server do
   An MCP server provides tools, resources, and prompts to LLM clients.
   Servers implement callbacks to handle client requests concurrently.
 
-  ## Changes in v0.4.0
+  ## Architecture
 
-  The server is now fully stateless - just pure compiled functions:
+  Server modules are stateless — just pure compiled functions:
+
   - No GenServer, no Agent, no process overhead
   - No supervision tree required
-  - Callbacks receive the Plug.Conn for request context
+  - Callbacks receive the `Plug.Conn` for request context
   - Each HTTP request runs in parallel (limited only by Bandit's process pool)
 
   ## Example (Using DSL - Recommended)

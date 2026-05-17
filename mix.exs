@@ -174,6 +174,10 @@ defmodule ConduitMcp.MixProject do
           ConduitMcp.Plugs.RateLimit,
           ConduitMcp.Plugs.MessageRateLimit
         ],
+        Security: [
+          ConduitMcp.Plugs.OriginValidation,
+          ConduitMcp.Plugs.SecurityHeaders
+        ],
         Sessions: [
           ConduitMcp.Session,
           ConduitMcp.Session.Store,

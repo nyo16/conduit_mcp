@@ -7,11 +7,25 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
 
   ## Options
 
-  - `:server_module` (required) - The MCP server module to route requests to
-  - `:cors_origin` - CORS allow-origin header (default: "*")
-  - `:cors_methods` - CORS allow-methods header (default: "GET, POST, OPTIONS")
-  - `:cors_headers` - CORS allow-headers header (default: "content-type, authorization")
-  - `:auth` - Authentication plug configuration (optional)
+  - `:server_module` (required) — the MCP server module to route requests to
+  - `:server_name` — advertised server name in the `initialize` response (falls
+    back to the module's `__endpoint_config__/0` if defined)
+  - `:server_version` — advertised server version (same fallback behavior)
+  - `:auth` — authentication plug configuration. See `ConduitMcp.Plugs.Auth`.
+  - `:rate_limit` — HTTP-level rate limit configuration. See `ConduitMcp.Plugs.RateLimit`.
+  - `:message_rate_limit` — per-message rate limit configuration. See
+    `ConduitMcp.Plugs.MessageRateLimit`.
+  - `:session` — session-store configuration. Enables `Mcp-Session-Id`
+    handling. See `ConduitMcp.Session`.
+  - `:allowed_origins` — list of allowed `Origin` header values (also accepts
+    `"*"` and regex). See `ConduitMcp.Plugs.OriginValidation`.
+  - `:cors_origin` — CORS allow-origin header (default: `"*"`)
+  - `:cors_methods` — CORS allow-methods header (default: `"GET, POST, OPTIONS"`)
+  - `:cors_headers` — CORS allow-headers header (default: `"content-type, authorization"`)
+
+  When used via `ConduitMcp.Endpoint`, the `:auth`, `:rate_limit`, and
+  `:message_rate_limit` options are auto-extracted from the endpoint config
+  unless overridden here.
 
   ## Example
 

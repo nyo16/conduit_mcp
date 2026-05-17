@@ -17,7 +17,7 @@ defmodule MyApp.RedisSessionStore do
 
   @impl true
   def create(session_id, metadata) do
-    data = Jason.encode!(metadata)
+    data = JSON.encode!(metadata)
     ttl = Map.get(metadata, "ttl", @default_ttl)
     {:ok, "OK"} = Redix.command(:redix, ["SET", key(session_id), data, "EX", to_string(ttl)])
     :ok
@@ -27,7 +27,7 @@ defmodule MyApp.RedisSessionStore do
   def get(session_id) do
     case Redix.command(:redix, ["GET", key(session_id)]) do
       {:ok, nil} -> {:error, :not_found}
-      {:ok, data} -> {:ok, Jason.decode!(data)}
+      {:ok, data} -> {:ok, JSON.decode!(data)}
     end
   end
 

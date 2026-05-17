@@ -45,7 +45,7 @@ defmodule MyApp.ReadUser do
       "contents" => [%{
         "uri" => "user://#{id}",
         "mimeType" => "application/json",
-        "text" => Jason.encode!(user)
+        "text" => JSON.encode!(user)
       }]
     }}
   end
@@ -283,7 +283,7 @@ def execute(%{id: id}, _conn) do
     user ->
       {:ok, %{
         "content" => [
-          %{"type" => "text", "text" => Jason.encode!(%{
+          %{"type" => "text", "text" => JSON.encode!(%{
             id: user.id,
             name: user.name,
             roles: user.roles
