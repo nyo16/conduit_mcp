@@ -6,7 +6,10 @@ defmodule ConduitMcp.Tasks.StoreDispatchTest do
   defmodule MockStore do
     @behaviour ConduitMcp.Tasks.Store
 
-    def start, do: Agent.start(fn -> %{calls: [], tasks: %{}} end, name: __MODULE__)
+    # start_link so the agent is linked to the (per-test) test process and is
+    # torn down automatically when the test ends — no stale state can leak
+    # into the next test's `calls()` assertions.
+    def start_link, do: Agent.start_link(fn -> %{calls: [], tasks: %{}} end, name: __MODULE__)
     def calls, do: Agent.get(__MODULE__, & &1.calls) |> Enum.reverse()
 
     defp record(call),
@@ -115,16 +118,8 @@ defmodule ConduitMcp.Tasks.StoreDispatchTest do
 
   describe "dispatch to configured store" do
     setup do
-      MockStore.start()
+      start_supervised!(%{id: MockStore, start: {MockStore, :start_link, []}})
       Application.put_env(:conduit_mcp, :tasks_store, MockStore)
-
-      on_exit(fn ->
-        case Process.whereis(MockStore) do
-          nil -> :ok
-          pid -> Process.exit(pid, :shutdown)
-        end
-      end)
-
       :ok
     end
 

@@ -9,6 +9,10 @@ defmodule Examples.ObanTasks.SmokeTest do
 
   use ExUnit.Case, async: false
 
+  # Requires the full app booted on a fixed port — excluded by default in
+  # test_helper.exs. Run with `mix test --include integration`.
+  @moduletag :integration
+
   @url "http://localhost:4041/"
 
   setup_all do
@@ -49,9 +53,8 @@ defmodule Examples.ObanTasks.SmokeTest do
         "arguments" => %{"duration_ms" => 200}
       })
 
-    # Wait for the first attempt to land in input_required + snooze.
-    Process.sleep(2_000)
-    task = get_task(task_id)
+    # Poll for the first attempt to land in input_required + snooze.
+    task = poll_until_status(task_id, "input_required", 30)
     assert task["status"] == "input_required"
     assert %{"elicit" => %{"schema" => %{"properties" => %{"script" => _}}}} = task["metadata"]
 
@@ -97,22 +100,27 @@ defmodule Examples.ObanTasks.SmokeTest do
   end
 
   defp poll_until_terminal(task_id, max_attempts) do
+    poll_until(
+      task_id,
+      max_attempts,
+      &(&1["status"] in ~w(completed failed cancelled)),
+      "a terminal state"
+    )
+  end
+
+  defp poll_until_status(task_id, status, max_attempts) do
+    poll_until(task_id, max_attempts, &(&1["status"] == status), "status #{inspect(status)}")
+  end
+
+  defp poll_until(task_id, max_attempts, predicate, description) do
     Enum.reduce_while(1..max_attempts, nil, fn _, _ ->
       Process.sleep(100)
       task = get_task(task_id)
-
-      if task["status"] in ~w(completed failed cancelled) do
-        {:halt, task}
-      else
-        {:cont, nil}
-      end
+      if predicate.(task), do: {:halt, task}, else: {:cont, nil}
     end)
     |> case do
-      nil ->
-        flunk("task #{task_id} did not reach a terminal state within budget")
-
-      task ->
-        task
+      nil -> flunk("task #{task_id} did not reach #{description} within budget")
+      task -> task
     end
   end
 

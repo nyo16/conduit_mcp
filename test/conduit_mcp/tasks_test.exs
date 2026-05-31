@@ -49,6 +49,10 @@ defmodule ConduitMcp.TasksTest do
       assert updated["status"] == "completed"
       assert updated["result"] == "done"
     end
+
+    test "propagates :not_found from the store for an unknown id" do
+      assert {:error, :not_found} = Tasks.update("missing", %{"status" => "completed"})
+    end
   end
 
   describe "cancel/1" do
@@ -56,6 +60,10 @@ defmodule ConduitMcp.TasksTest do
       Tasks.create("task-4")
       {:ok, cancelled} = Tasks.cancel("task-4")
       assert cancelled["status"] == "cancelled"
+    end
+
+    test "propagates :not_found from the store for an unknown id" do
+      assert {:error, :not_found} = Tasks.cancel("missing")
     end
   end
 
@@ -91,6 +99,37 @@ defmodule ConduitMcp.TasksTest do
       refute Tasks.valid_transition?("completed", "working")
       refute Tasks.valid_transition?("failed", "working")
       refute Tasks.valid_transition?("cancelled", "working")
+    end
+
+    test "rejects unknown status strings without raising" do
+      refute Tasks.valid_transition?("bogus", "working")
+      refute Tasks.valid_transition?("working", "bogus")
+      refute Tasks.valid_transition?("", "")
+    end
+  end
+
+  # Relies on `async: false` (module-level): mutates the global
+  # `:tasks_max_rows` app env and the shared ETS table. Keep this suite
+  # synchronous or this test will flake.
+  describe "create/2 row cap (W1)" do
+    setup do
+      prev = Application.get_env(:conduit_mcp, :tasks_max_rows)
+
+      on_exit(fn ->
+        if is_nil(prev),
+          do: Application.delete_env(:conduit_mcp, :tasks_max_rows),
+          else: Application.put_env(:conduit_mcp, :tasks_max_rows, prev)
+      end)
+
+      :ok
+    end
+
+    test "returns {:error, :task_limit_reached} once the configured cap is hit" do
+      Application.put_env(:conduit_mcp, :tasks_max_rows, 2)
+
+      assert {:ok, _} = Tasks.create("cap-1")
+      assert {:ok, _} = Tasks.create("cap-2")
+      assert {:error, :task_limit_reached} = Tasks.create("cap-3")
     end
   end
 

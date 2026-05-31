@@ -20,22 +20,46 @@ defmodule ConduitMcp.Tasks.EtsStore do
 
   @table :conduit_mcp_tasks
 
+  # Default cap on the number of rows the table holds. Because `working`
+  # and `input_required` rows are never auto-evicted (see `cleanup/1`), an
+  # untrusted client looping a task-creating tool could otherwise grow the
+  # table without bound. Override with
+  # `config :conduit_mcp, :tasks_max_rows, <n>` (`:infinity` disables it).
+  @default_max_rows 10_000
+
   @doc """
-  Creates a new task with the given id and metadata. Returns the stored task.
+  Creates a new task with the given id and metadata. Returns the stored task,
+  or `{:error, :task_limit_reached}` when the configured row cap is hit.
+
+  The cap defaults to #{@default_max_rows} rows and is configurable via
+  `config :conduit_mcp, :tasks_max_rows`. Terminal-state rows are reclaimed
+  by `ConduitMcp.Tasks.Janitor`; `working`/`input_required` rows are not, so
+  the cap is the backstop against unbounded growth.
   """
   @impl true
   def create(task_id, metadata \\ %{}) do
     ensure_table()
 
-    task =
-      Map.merge(metadata, %{
-        "task_id" => task_id,
-        "status" => "working",
-        "created_at" => System.system_time(:millisecond)
-      })
+    if at_capacity?() do
+      {:error, :task_limit_reached}
+    else
+      task =
+        Map.merge(metadata, %{
+          "task_id" => task_id,
+          "status" => "working",
+          "created_at" => System.system_time(:millisecond)
+        })
 
-    :ets.insert(@table, {task_id, task})
-    {:ok, task}
+      :ets.insert(@table, {task_id, task})
+      {:ok, task}
+    end
+  end
+
+  defp at_capacity? do
+    case Application.get_env(:conduit_mcp, :tasks_max_rows, @default_max_rows) do
+      :infinity -> false
+      max when is_integer(max) -> :ets.info(@table, :size) >= max
+    end
   end
 
   @doc """
@@ -139,6 +163,10 @@ defmodule ConduitMcp.Tasks.EtsStore do
     end
 
     :ok
+  rescue
+    # Lost a check-then-create race with a concurrent request — the table
+    # now exists, which is all we need.
+    ArgumentError -> :ok
   end
 
   defmodule Owner do

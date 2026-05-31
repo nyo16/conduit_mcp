@@ -19,18 +19,33 @@ defmodule Examples.ObanTasks.Worker do
     attempt.
   """
 
-  use Oban.Worker, queue: :mcp_tasks, max_attempts: 3
+  use Oban.Worker,
+    queue: :mcp_tasks,
+    max_attempts: 3,
+    unique: [period: 300, keys: [:task_id]]
 
   alias ConduitMcp.{Cancellation, Tasks}
 
   @chunks 10
   @snooze_secs 5
+  # Cap on client-supplied duration so a single render can't sleep forever.
+  @max_duration_ms 60_000
+
+  # Bound how long any single attempt may run. Oban.Engines.Lite defaults to
+  # :infinity, so without this a long/adversarial render holds a queue slot.
+  @impl Oban.Worker
+  def timeout(_job), do: :timer.minutes(5)
 
   @impl Oban.Worker
-  def perform(%Oban.Job{id: job_id, args: %{"task_id" => task_id, "tool" => tool} = args}) do
-    # Stamp the row with the running job id on first attempt so the Store
-    # can use Oban.cancel_job/1 from the cancel/1 callback.
-    {:ok, _} = Tasks.update(task_id, %{"oban_job_id" => job_id})
+  def perform(%Oban.Job{
+        id: job_id,
+        attempt: attempt,
+        args: %{"task_id" => task_id, "tool" => tool} = args
+      }) do
+    # Stamp the row with the running job id on the first attempt only so the
+    # Store can use Oban.cancel_job/1 from the cancel/1 callback. Tolerate a
+    # vanished row (deleted/cancelled mid-flight) rather than crashing.
+    if attempt == 1, do: Tasks.update(task_id, %{"oban_job_id" => job_id})
 
     case tool do
       "slow_render" -> render(task_id, args)
@@ -41,7 +56,8 @@ defmodule Examples.ObanTasks.Worker do
 
   # --- slow_render: straightforward long-running tool ---
 
-  defp render(task_id, %{"duration_ms" => total}) do
+  defp render(task_id, %{"duration_ms" => requested}) do
+    total = min(requested, @max_duration_ms)
     chunk_ms = max(div(total, @chunks), 50)
 
     Enum.reduce_while(1..@chunks, :ok, fn step, _ ->
@@ -50,7 +66,7 @@ defmodule Examples.ObanTasks.Worker do
           {:halt, {:cancel, "cancelled by client"}}
 
         true ->
-          {:ok, _} = Tasks.update(task_id, %{"progress" => round(step / @chunks * 100)})
+          _ = Tasks.update(task_id, %{"progress" => round(step / @chunks * 100)})
           Process.sleep(chunk_ms)
           {:cont, :ok}
       end
@@ -81,7 +97,7 @@ defmodule Examples.ObanTasks.Worker do
           # "working" with metadata.input set, and Oban retries this job.
           existing_meta = Map.get(task, "metadata") || %{}
 
-          {:ok, _} =
+          _ =
             Tasks.update(task_id, %{
               "status" => "input_required",
               "metadata" =>
@@ -113,12 +129,12 @@ defmodule Examples.ObanTasks.Worker do
   # --- helpers ---
 
   defp finalize({:cancel, _reason} = c, task_id, _result_fun) do
-    {:ok, _} = Tasks.update(task_id, %{"status" => "cancelled"})
+    _ = Tasks.update(task_id, %{"status" => "cancelled"})
     c
   end
 
   defp finalize(_, task_id, result_fun) do
-    {:ok, _} = Tasks.update(task_id, %{"status" => "completed", "result" => result_fun.()})
+    _ = Tasks.update(task_id, %{"status" => "completed", "result" => result_fun.()})
     :ok
   end
 
