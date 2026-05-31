@@ -144,6 +144,10 @@ defmodule ConduitMcp.Cancellation do
     end
 
     :ok
+  rescue
+    # Lost a check-then-create race with a concurrent request — the table
+    # now exists, which is all we need.
+    ArgumentError -> :ok
   end
 
   defmodule Owner do

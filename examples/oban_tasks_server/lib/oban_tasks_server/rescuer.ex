@@ -13,6 +13,14 @@ defmodule Examples.ObanTasks.Rescuer do
   One-shot: runs `handle_continue/2` then idles. The supervisor keeps
   it alive so a crash report is visible if the migration ordering ever
   changes (e.g., this races with Migrator).
+
+  > #### Upgrade path {: .warning}
+  >
+  > `rescue_executing/0` issues raw SQL against Oban's internal
+  > `oban_jobs` table, so it is coupled to Oban's schema and state
+  > semantics. On a Postgres deployment, drop this module entirely and
+  > use `Oban.Plugins.Lifeline` instead. Recheck the column/state names
+  > below whenever you bump Oban.
   """
 
   use GenServer
@@ -36,6 +44,8 @@ defmodule Examples.ObanTasks.Rescuer do
     {:noreply, state}
   end
 
+  # Verified with oban 2.22 — raw oban_jobs columns/states below match this
+  # version. Recheck on upgrade (Oban's internal schema is not a public API).
   defp rescue_executing do
     Ecto.Adapters.SQL.query!(
       Repo,

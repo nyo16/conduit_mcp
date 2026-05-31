@@ -97,8 +97,12 @@ defmodule MyApp.McpTaskWorker do
     max_attempts: 3,
     unique: [period: 300, fields: [:args], keys: [:task_id]]
 
+  # Allowlist of handler names → modules. NEVER resolve a client-supplied
+  # string to a module via String.to_existing_atom/1 + apply/3.
+  @handlers %{"analysis" => MyApp.AnalysisHandler}
+
   @impl Oban.Worker
-  def perform(%Oban.Job{args: %{"task_id" => task_id} = args}) do
+  def perform(%Oban.Job{attempt: attempt, max_attempts: max, args: %{"task_id" => task_id} = args}) do
     update_status(task_id, "working")
 
     case execute(args) do
@@ -107,7 +111,12 @@ defmodule MyApp.McpTaskWorker do
         :ok
 
       {:error, reason} ->
-        update_task(task_id, %{status: "failed", result: %{"error" => inspect(reason)}})
+        # Only mark "failed" on the final attempt; let earlier retries stay
+        # "working" so the client doesn't see status flicker on each retry.
+        if attempt >= max do
+          update_task(task_id, %{status: "failed", result: %{"error" => inspect(reason)}})
+        end
+
         {:error, reason}
 
       {:input_required, schema} ->
@@ -120,8 +129,10 @@ defmodule MyApp.McpTaskWorker do
   end
 
   defp execute(%{"handler" => handler} = args) do
-    module = String.to_existing_atom("Elixir." <> handler)
-    apply(module, :execute, [args])
+    case Map.fetch(@handlers, handler) do
+      {:ok, module} -> module.execute(args)
+      :error -> {:error, "unknown handler: #{handler}"}
+    end
   end
 
   defp update_status(task_id, status), do: update_task(task_id, %{status: status})
@@ -147,22 +158,25 @@ defmodule MyApp.ObanTaskStore do
   import Ecto.Query
   @repo MyApp.Repo
 
+  # Task insert, job insert, and the oban_job_id back-link all commit in one
+  # transaction. A crash mid-sequence rolls back — no orphaned task, no
+  # unlinked job (which would leave cancel/1 unable to reach the job).
   def create_with_job(task_id, worker_args, opts \\ []) do
-    # Create the task record
     attrs = %{task_id: task_id, status: "working", method: worker_args["method"]}
-    {:ok, _task} = @repo.insert(MyApp.McpTask.changeset(%MyApp.McpTask{}, attrs))
-
-    # Enqueue the Oban job
     job_args = Map.put(worker_args, "task_id", task_id)
     worker = Keyword.get(opts, :worker, MyApp.McpTaskWorker)
-    {:ok, job} = worker.new(job_args) |> Oban.insert()
 
-    # Link task to job
-    @repo.get!(MyApp.McpTask, task_id)
-    |> MyApp.McpTask.changeset(%{oban_job_id: job.id})
-    |> @repo.update()
-
-    {:ok, %{"task_id" => task_id, "status" => "working"}}
+    Ecto.Multi.new()
+    |> Ecto.Multi.insert(:task, MyApp.McpTask.changeset(%MyApp.McpTask{}, attrs))
+    |> Oban.insert(:job, worker.new(job_args))
+    |> Ecto.Multi.update(:link, fn %{task: task, job: job} ->
+      MyApp.McpTask.changeset(task, %{oban_job_id: job.id})
+    end)
+    |> @repo.transaction()
+    |> case do
+      {:ok, %{link: task}} -> {:ok, to_map(task)}
+      {:error, _step, reason, _changes} -> {:error, reason}
+    end
   end
 
   def get(task_id) do
@@ -178,9 +192,19 @@ defmodule MyApp.ObanTaskStore do
         {:error, :not_found}
 
       task ->
-        if task.oban_job_id, do: Oban.cancel_job(task.oban_job_id)
-        @repo.update(MyApp.McpTask.changeset(task, %{status: "cancelled"}))
-        :ok
+        # Don't crash if the job already finished — log a non-:ok return.
+        with id when not is_nil(id) <- task.oban_job_id,
+             {:error, reason} <- Oban.cancel_job(id) do
+          require Logger
+          Logger.warning("Oban.cancel_job(#{id}) failed: #{inspect(reason)}")
+        end
+
+        # Return the updated task per the Store `cancel/1` contract
+        # ({:ok, task} | {:error, :not_found}), not a bare :ok.
+        case @repo.update(MyApp.McpTask.changeset(task, %{status: "cancelled"})) do
+          {:ok, updated} -> {:ok, to_map(updated)}
+          {:error, changeset} -> {:error, changeset}
+        end
     end
   end
 

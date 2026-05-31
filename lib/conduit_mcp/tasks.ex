@@ -44,6 +44,12 @@ defmodule ConduitMcp.Tasks do
   @valid_statuses ~w(working input_required completed failed cancelled)a
   @default_store ConduitMcp.Tasks.EtsStore
 
+  # Allowed status transitions (string keys match the on-the-wire task map).
+  @transitions %{
+    "working" => ~w(completed failed cancelled input_required),
+    "input_required" => ~w(working cancelled)
+  }
+
   @doc """
   Generates a unique task ID.
   """
@@ -100,17 +106,7 @@ defmodule ConduitMcp.Tasks do
   Validates that a status transition is allowed.
   """
   def valid_transition?(from, to) do
-    case {String.to_existing_atom(from), String.to_existing_atom(to)} do
-      {:working, :completed} -> true
-      {:working, :failed} -> true
-      {:working, :cancelled} -> true
-      {:working, :input_required} -> true
-      {:input_required, :working} -> true
-      {:input_required, :cancelled} -> true
-      _ -> false
-    end
-  rescue
-    ArgumentError -> false
+    to in Map.get(@transitions, from, [])
   end
 
   @doc "Returns the list of valid task statuses."
