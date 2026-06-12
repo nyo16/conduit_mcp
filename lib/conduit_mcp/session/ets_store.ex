@@ -53,6 +53,9 @@ defmodule ConduitMcp.Session.EtsStore do
     end
 
     :ok
+  rescue
+    # Lost check-then-create race: another process created the table first.
+    ArgumentError -> :ok
   end
 
   @impl true

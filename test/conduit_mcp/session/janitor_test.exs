@@ -38,8 +38,11 @@ defmodule ConduitMcp.Session.JanitorTest do
       stale_created_at = System.system_time(:millisecond) - 60_000
       :ets.insert(:conduit_mcp_sessions, {"stale", %{"created_at" => stale_created_at}})
 
+      handler_id = "janitor-test-#{System.unique_integer([:positive])}"
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
       :telemetry.attach(
-        "janitor-test-#{System.unique_integer([:positive])}",
+        handler_id,
         [:conduit_mcp, :session, :cleanup],
         fn _event, measurements, metadata, parent ->
           send(parent, {:cleanup_ran, measurements, metadata})
@@ -75,8 +78,11 @@ defmodule ConduitMcp.Session.JanitorTest do
     end
 
     test "does not crash and emits no cleanup telemetry" do
+      handler_id = "janitor-noop-#{System.unique_integer([:positive])}"
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
       :telemetry.attach(
-        "janitor-noop-#{System.unique_integer([:positive])}",
+        handler_id,
         [:conduit_mcp, :session, :cleanup],
         fn _event, _m, _md, parent -> send(parent, :unexpected_cleanup) end,
         self()

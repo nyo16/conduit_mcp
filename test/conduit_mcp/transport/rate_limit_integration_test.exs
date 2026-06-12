@@ -3,8 +3,8 @@ defmodule ConduitMcp.Transport.RateLimitIntegrationTest do
   import Plug.Test
   import Plug.Conn
 
-  alias ConduitMcp.Transport.StreamableHTTP
   alias ConduitMcp.TestServer
+  alias ConduitMcp.Transport.StreamableHTTP
 
   @backend ConduitMcp.TestRateLimiter
 

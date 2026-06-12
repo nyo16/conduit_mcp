@@ -26,8 +26,11 @@ defmodule ConduitMcp.Tasks.JanitorTest do
 
     Tasks.create("alive")
 
+    handler_id = "tasks-janitor-#{System.unique_integer([:positive])}"
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
     :telemetry.attach(
-      "tasks-janitor-#{System.unique_integer([:positive])}",
+      handler_id,
       [:conduit_mcp, :tasks, :cleanup],
       fn _e, m, _md, parent -> send(parent, {:tick, m}) end,
       self()

@@ -75,8 +75,11 @@ defmodule ConduitMcp.CancellationTest do
 
   describe "telemetry" do
     test "emits [:conduit_mcp, :request, :cancelled] on cancel" do
+      handler_id = "cancel-test-#{System.unique_integer([:positive])}"
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
       :telemetry.attach(
-        "cancel-test-#{System.unique_integer([:positive])}",
+        handler_id,
         [:conduit_mcp, :request, :cancelled],
         fn _event, m, md, parent -> send(parent, {:cancelled, m, md}) end,
         self()

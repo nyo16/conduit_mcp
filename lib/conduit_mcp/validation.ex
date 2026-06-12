@@ -291,23 +291,32 @@ defmodule ConduitMcp.Validation do
   # Custom constraint validation — single pass over the schema
 
   defp validate_custom_constraints(params, schema) do
-    Enum.reduce_while(schema, {:ok, params}, fn {param_name, param_opts}, {:ok, acc_params} ->
-      param_value = Map.get(acc_params, param_name)
-
-      if param_value == nil do
-        {:cont, {:ok, acc_params}}
-      else
-        with :ok <- check_enum(param_name, param_value, param_opts),
-             :ok <- check_min_value(param_name, param_value, param_opts),
-             :ok <- check_max_value(param_name, param_value, param_opts),
-             :ok <- check_min_length(param_name, param_value, param_opts),
-             :ok <- check_max_length(param_name, param_value, param_opts),
-             :ok <- check_custom_validator(param_name, param_value, param_opts) do
-          {:cont, {:ok, acc_params}}
-        else
-          {:error, error} -> {:halt, {:error, [error]}}
+    errors =
+      Enum.flat_map(schema, fn {param_name, param_opts} ->
+        case Map.get(params, param_name) do
+          nil -> []
+          param_value -> collect_constraint_errors(param_name, param_value, param_opts)
         end
-      end
+      end)
+
+    case errors do
+      [] -> {:ok, params}
+      errors -> {:error, errors}
+    end
+  end
+
+  defp collect_constraint_errors(param_name, value, opts) do
+    [
+      check_enum(param_name, value, opts),
+      check_min_value(param_name, value, opts),
+      check_max_value(param_name, value, opts),
+      check_min_length(param_name, value, opts),
+      check_max_length(param_name, value, opts),
+      check_custom_validator(param_name, value, opts)
+    ]
+    |> Enum.flat_map(fn
+      :ok -> []
+      {:error, error} -> [error]
     end)
   end
 
@@ -381,46 +390,42 @@ defmodule ConduitMcp.Validation do
   defp check_min_length(param_name, value, opts) do
     min_len = Keyword.get(opts, :__min_length__) || Keyword.get(opts, :min_length)
 
-    case min_len do
-      nil ->
+    cond do
+      min_len == nil or not is_binary(value) ->
         :ok
 
-      min_len when is_binary(value) and byte_size(value) >= min_len ->
+      # String.length/1 counts graphemes — "characters" as users understand
+      # them — unlike byte_size/1, which over-counts multi-byte UTF-8.
+      String.length(value) >= min_len ->
         :ok
 
-      min_len when is_binary(value) ->
+      true ->
         {:error,
          %{
            parameter: to_string(param_name),
            value: value,
            message: "must be at least #{min_len} characters long"
          }}
-
-      _ ->
-        :ok
     end
   end
 
   defp check_max_length(param_name, value, opts) do
     max_len = Keyword.get(opts, :__max_length__) || Keyword.get(opts, :max_length)
 
-    case max_len do
-      nil ->
+    cond do
+      max_len == nil or not is_binary(value) ->
         :ok
 
-      max_len when is_binary(value) and byte_size(value) <= max_len ->
+      String.length(value) <= max_len ->
         :ok
 
-      max_len when is_binary(value) ->
+      true ->
         {:error,
          %{
            parameter: to_string(param_name),
            value: value,
            message: "must be no more than #{max_len} characters long"
          }}
-
-      _ ->
-        :ok
     end
   end
 
@@ -453,19 +458,8 @@ defmodule ConduitMcp.Validation do
     end
   end
 
-  @custom_constraint_markers [
-    :__enum_values__,
-    :__min_value__,
-    :__max_value__,
-    :__min_length__,
-    :__max_length__,
-    :validator,
-    :min,
-    :max,
-    :min_length,
-    :max_length,
-    :enum
-  ]
+  # Single source of truth lives in SchemaConverter (resolved at compile time).
+  @custom_constraint_markers SchemaConverter.custom_constraint_markers()
 
   defp remove_custom_constraint_markers(schema) do
     Enum.map(schema, fn {param_name, param_opts} ->

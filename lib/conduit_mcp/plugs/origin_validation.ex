@@ -9,6 +9,19 @@ defmodule ConduitMcp.Plugs.OriginValidation do
   - OPTIONS requests always pass (CORS preflight)
   - Requests without an `Origin` header pass (browser-less clients don't send it)
   - Disallowed origins receive a 403 JSON error response
+
+  ## Why missing `Origin` passes
+
+  Native MCP clients (Claude Desktop, IDEs, CLIs) are not browsers and do not
+  send an `Origin` header. The attack this plug defends against — DNS
+  rebinding — requires a browser, and browsers always attach `Origin` to
+  cross-origin requests. Rejecting header-less requests would therefore break
+  every legitimate non-browser client without adding protection.
+
+  The MCP specification recommends Origin validation for any server a browser
+  could reach (especially servers bound to loopback on developer machines).
+  Transports log a startup warning when `:allowed_origins` is unset; pass
+  `allowed_origins: "*"` to acknowledge and silence it.
   """
 
   @behaviour Plug

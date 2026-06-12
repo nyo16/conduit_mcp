@@ -13,6 +13,12 @@ defmodule ConduitMcp.Transport.SSE do
   - `:cors_methods` - CORS allow-methods header (default: "GET, POST, OPTIONS")
   - `:cors_headers` - CORS allow-headers header (default: "content-type, authorization")
   - `:auth` - Authentication plug configuration (optional)
+  - `:base_url` - Public base URL advertised in the SSE `endpoint` event
+    (e.g. `"https://mcp.example.com"`). Defaults to deriving it from the
+    request's `Host` header (sanitized). Set this when running behind a proxy.
+  - `:allowed_origins` - list of allowed `Origin` header values. Unset means
+    no Origin validation (a startup warning is logged) — see
+    `ConduitMcp.Plugs.OriginValidation`.
 
   ## Example
 
@@ -104,6 +110,8 @@ defmodule ConduitMcp.Transport.SSE do
       raise ArgumentError, "server_module is required"
     end
 
+    ConduitMcp.Transport.StreamableHTTP.warn_if_origins_unset(opts, __MODULE__)
+
     opts
   end
 
@@ -131,10 +139,12 @@ defmodule ConduitMcp.Transport.SSE do
     server_name = Keyword.get(opts, :server_name) || Keyword.get(endpoint_config, :name)
     server_version = Keyword.get(opts, :server_version) || Keyword.get(endpoint_config, :version)
     allowed_origins = Keyword.get(opts, :allowed_origins)
+    base_url = Keyword.get(opts, :base_url)
 
     private = %{
       server_module: server_module,
       allowed_origins: allowed_origins,
+      sse_base_url: base_url,
       cors_origin: cors_origin,
       cors_methods: cors_methods,
       cors_headers: cors_headers,
@@ -232,11 +242,7 @@ defmodule ConduitMcp.Transport.SSE do
   end
 
   defp send_sse_endpoint_info(conn) do
-    # Build the full endpoint URL
-    # Get the host from the connection
-    host = get_req_header(conn, "host") |> List.first() || "localhost:4001"
-    scheme = if conn.scheme == :https, do: "https", else: "http"
-    endpoint_url = "#{scheme}://#{host}/message"
+    endpoint_url = "#{message_base_url(conn)}/message"
 
     # Send as SSE message
     sse_message = "event: endpoint\ndata: #{endpoint_url}\n\n"
@@ -252,17 +258,47 @@ defmodule ConduitMcp.Transport.SSE do
     end
   end
 
+  # Prefer the configured :base_url; otherwise fall back to the client Host
+  # header, sanitized so a hostile value can't smuggle CR/LF or whitespace
+  # into the SSE stream we emit it on.
+  @doc false
+  def message_base_url(conn) do
+    case conn.private[:sse_base_url] do
+      base_url when is_binary(base_url) ->
+        String.trim_trailing(base_url, "/")
+
+      _ ->
+        host =
+          get_req_header(conn, "host")
+          |> List.first()
+          |> sanitize_host()
+
+        scheme = if conn.scheme == :https, do: "https", else: "http"
+        "#{scheme}://#{host}"
+    end
+  end
+
+  defp sanitize_host(nil), do: "localhost:4001"
+  defp sanitize_host(host), do: String.replace(host, ~r/[\r\n\s\/]/, "")
+
+  @keep_alive_interval 15_000
+
   defp keep_alive_loop(conn) do
-    # Send periodic keepalive comments
-    :timer.sleep(15_000)
-
-    case chunk(conn, ": keepalive\n\n") do
-      {:ok, conn} ->
+    # receive/after rather than :timer.sleep so the process stays responsive
+    # to messages (e.g. adapter bookkeeping) between keepalives.
+    receive do
+      {:plug_conn, :sent} ->
         keep_alive_loop(conn)
+    after
+      @keep_alive_interval ->
+        case chunk(conn, ": keepalive\n\n") do
+          {:ok, conn} ->
+            keep_alive_loop(conn)
 
-      {:error, _reason} ->
-        # Client disconnected
-        conn
+          {:error, _reason} ->
+            # Client disconnected
+            conn
+        end
     end
   end
 end

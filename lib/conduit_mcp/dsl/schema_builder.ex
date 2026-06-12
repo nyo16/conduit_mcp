@@ -452,19 +452,8 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
   - `__validation_schema_for_tool__/1`
   - `__validation_schema_for_prompt__/1`
   """
-  @custom_constraint_markers [
-    :__enum_values__,
-    :__min_value__,
-    :__max_value__,
-    :__min_length__,
-    :__max_length__,
-    :validator,
-    :min,
-    :max,
-    :min_length,
-    :max_length,
-    :enum
-  ]
+  # Single source of truth lives in SchemaConverter (resolved at compile time).
+  @custom_constraint_markers ConduitMcp.Validation.SchemaConverter.custom_constraint_markers()
 
   def generate_validation_lookup_functions(tools, prompts) do
     tool_schemas = compile_tool_validation_schemas(tools)
@@ -537,28 +526,24 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
   # Private helpers for schema validation
 
   defp validate_tool_schema(tool) do
-    try do
-      nimble_schema = build_nimble_options_schema(tool)
+    nimble_schema = build_nimble_options_schema(tool)
 
-      case validate_nimble_options_schema(nimble_schema) do
-        :ok -> {:ok, tool.name}
-        {:error, reason} -> {:error, {tool.name, reason}}
-      end
-    rescue
-      error -> {:error, {tool.name, Exception.message(error)}}
+    case validate_nimble_options_schema(nimble_schema) do
+      :ok -> {:ok, tool.name}
+      {:error, reason} -> {:error, {tool.name, reason}}
     end
+  rescue
+    error -> {:error, {tool.name, Exception.message(error)}}
   end
 
   defp validate_prompt_schema(prompt) do
-    try do
-      nimble_schema = build_nimble_options_prompt_schema(prompt)
+    nimble_schema = build_nimble_options_prompt_schema(prompt)
 
-      case validate_nimble_options_schema(nimble_schema) do
-        :ok -> {:ok, prompt.name}
-        {:error, reason} -> {:error, {prompt.name, reason}}
-      end
-    rescue
-      error -> {:error, {prompt.name, Exception.message(error)}}
+    case validate_nimble_options_schema(nimble_schema) do
+      :ok -> {:ok, prompt.name}
+      {:error, reason} -> {:error, {prompt.name, reason}}
     end
+  rescue
+    error -> {:error, {prompt.name, Exception.message(error)}}
   end
 end

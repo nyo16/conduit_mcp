@@ -7,8 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **JWT algorithm allow-list** — `ConduitMcp.Plugs.OAuth` now validates the
+  token header `alg` against an allow-list (new `:algorithms` option,
+  default: RS/ES/PS families) *before* key lookup, and requires the resolved
+  signing key to match the header algorithm's family. Static `oct` keys
+  implicitly allow their HS algorithms, so existing HMAC setups keep working.
+  Set `:algorithms` explicitly if you rely on a non-default algorithm.
+- **JWKS fetch hardening** — the JWKS key provider now requires `https`
+  (override with `allow_insecure_jwks: true` for dev), no longer follows
+  redirects, applies connect/receive timeouts, and caps responses at 1MB.
+  A failed refresh now serves previously cached keys with a logged warning
+  instead of failing.
+- **WWW-Authenticate header hygiene** — config-sourced values (resource URI,
+  scopes) are stripped of CR/LF/quotes before header interpolation. The SSE
+  `endpoint` event URL can now be pinned with the new `:base_url` option;
+  the `Host`-header fallback is sanitized.
+- **Origin-validation startup warning** — transports log a warning at init
+  when `:allowed_origins` is unset (DNS-rebinding exposure for
+  browser-reachable servers). Pass `allowed_origins: "*"` to opt out
+  explicitly.
+
+### Changed
+
+- **Validation `min_length`/`max_length` now count graphemes**
+  (`String.length/1`) instead of bytes — multi-byte UTF-8 input is no longer
+  over-counted. Behavior change for non-ASCII parameter values.
+- **Custom-constraint validation reports all violations at once** instead of
+  halting at the first failing parameter — clients fixing bad input no longer
+  need one round-trip per error.
+
+### Fixed
+
+- **HS (HMAC) token verification crashed** — the OAuth plug passed the oct
+  JWK map to `Joken.Signer.create/2`, which requires the raw binary secret;
+  static `oct` keys now work. Malformed signing keys now yield a 401 instead
+  of crashing the request process.
+- **ETS table-creation races** in the JWKS cache and session store could
+  crash a request under concurrent cold start; both now tolerate losing the
+  check-then-create race (matching the tasks/cancellation stores).
+- **Unknown JWK key types** silently fell back to RS256, masking
+  misconfiguration with a confusing signature error; they are now rejected
+  with a logged warning.
+- **`.credo.exs` accidentally disabled nearly the whole default check suite**
+  (`enabled:` replaces the suite; `extra:` adjusts it). The full suite now
+  runs locally and in CI.
+
+### Deprecated
+
+- Leaving `:allowed_origins` unset logs a warning; a future major release
+  will require an explicit Origin policy for browser-reachable transports.
+
 ### Added
 
+- **`require_session: true`** session option for
+  `ConduitMcp.Transport.StreamableHTTP` — rejects non-`initialize` POSTs
+  without an `Mcp-Session-Id` header (HTTP 400), per the MCP specification.
+- **`:base_url` option** for `ConduitMcp.Transport.SSE` and **`:algorithms`**
+  for `ConduitMcp.Plugs.OAuth` (see Security).
 - **`resources/templates/list` method** — MCP-spec-required endpoint for
   discovering URI-templated resources. Templated resources (URIs with
   `{param}` placeholders) now appear here instead of in `resources/list`.

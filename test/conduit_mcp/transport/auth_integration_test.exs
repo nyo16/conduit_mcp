@@ -3,8 +3,8 @@ defmodule ConduitMcp.Transport.AuthIntegrationTest do
   import Plug.Test
   import Plug.Conn
 
-  alias ConduitMcp.Transport.StreamableHTTP
   alias ConduitMcp.TestServer
+  alias ConduitMcp.Transport.StreamableHTTP
 
   describe "StreamableHTTP with bearer token authentication" do
     setup do

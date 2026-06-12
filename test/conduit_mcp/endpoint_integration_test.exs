@@ -213,6 +213,8 @@ defmodule ConduitMcp.EndpointIntegrationTest do
     end
 
     test "validates required params" do
+      on_exit(fn -> ConduitMcp.Validation.update_validation_config([]) end)
+
       ConduitMcp.Validation.update_validation_config(
         runtime_validation: true,
         strict_mode: true,
@@ -227,8 +229,6 @@ defmodule ConduitMcp.EndpointIntegrationTest do
 
       response = parse_response(conn)
       assert response["error"]["code"] == -32602
-    after
-      ConduitMcp.Validation.update_validation_config([])
     end
   end
 

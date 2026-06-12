@@ -1,5 +1,6 @@
 defmodule ConduitMcp.EndpointTest do
-  use ExUnit.Case, async: true
+  # async: false — one test mutates the global validation config
+  use ExUnit.Case, async: false
 
   # --- Components ---
 
@@ -548,7 +549,10 @@ defmodule ConduitMcp.EndpointTest do
         }
       }
 
-      # With validation enabled, missing required 'text' should produce an error
+      # With validation enabled, missing required 'text' should produce an error.
+      # on_exit (not `after`) so global config is restored even on process kill.
+      on_exit(fn -> ConduitMcp.Validation.update_validation_config([]) end)
+
       ConduitMcp.Validation.update_validation_config(
         runtime_validation: true,
         strict_mode: true,
@@ -559,8 +563,6 @@ defmodule ConduitMcp.EndpointTest do
 
       # Should be a validation error (-32602)
       assert result["error"]["code"] == -32602
-    after
-      ConduitMcp.Validation.update_validation_config([])
     end
   end
 

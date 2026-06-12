@@ -16,9 +16,15 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   - `:message_rate_limit` — per-message rate limit configuration. See
     `ConduitMcp.Plugs.MessageRateLimit`.
   - `:session` — session-store configuration. Enables `Mcp-Session-Id`
-    handling. See `ConduitMcp.Session`.
+    handling. See `ConduitMcp.Session`. Add `require_session: true` to reject
+    non-`initialize` POSTs that omit the `Mcp-Session-Id` header (HTTP 400),
+    per the MCP specification's session requirements.
   - `:allowed_origins` — list of allowed `Origin` header values (also accepts
-    `"*"` and regex). See `ConduitMcp.Plugs.OriginValidation`.
+    `"*"` and regex). See `ConduitMcp.Plugs.OriginValidation`. Unset means no
+    Origin validation (a startup warning is logged): requests without an
+    `Origin` header always pass because non-browser MCP clients don't send
+    one, but browser-originated requests can then reach loopback servers via
+    DNS rebinding — set an allowlist for any server a browser could reach.
   - `:cors_origin` — CORS allow-origin header (default: `"*"`)
   - `:cors_methods` — CORS allow-methods header (default: `"GET, POST, OPTIONS"`)
   - `:cors_headers` — CORS allow-headers header (default: `"content-type, authorization"`)
@@ -100,6 +106,9 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
         strategy = Keyword.get(auth_opts, :strategy)
 
         if strategy == :oauth and Code.ensure_loaded?(ConduitMcp.Plugs.OAuth) do
+          # apply/3 keeps the optional OAuth plug (compiled only when Joken is
+          # present) from producing undefined-module compile warnings
+          # credo:disable-for-lines:4 Credo.Check.Refactor.Apply
           apply(ConduitMcp.Plugs.OAuth, :call, [
             conn,
             apply(ConduitMcp.Plugs.OAuth, :init, [auth_opts])
@@ -159,8 +168,26 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     store = Keyword.get(session_config, :store, Session.EtsStore)
 
     if is_nil(session_id) do
-      # No session header — only allowed for initialize requests
-      conn
+      # No session header — fine unless the server requires sessions, in
+      # which case only `initialize` may go without one (per MCP spec).
+      if Keyword.get(session_config, :require_session, false) and
+           not initialize_request?(conn) do
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(
+          400,
+          JSON.encode!(
+            ConduitMcp.Protocol.error_response(
+              nil,
+              ConduitMcp.Protocol.invalid_request(),
+              "Mcp-Session-Id header required. Send an initialize request to obtain one."
+            )
+          )
+        )
+        |> halt()
+      else
+        conn
+      end
     else
       # Has session header — validate it exists in store
       case Session.get(session_id, store) do
@@ -194,7 +221,25 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
       raise ArgumentError, "server_module is required"
     end
 
+    warn_if_origins_unset(opts, __MODULE__)
+
     opts
+  end
+
+  @doc false
+  # Shared by both transports. Warns once per boot (init/1) when no Origin
+  # policy was chosen at all; pass `allowed_origins: "*"` to opt out explicitly.
+  def warn_if_origins_unset(opts, transport) do
+    unless Keyword.has_key?(opts, :allowed_origins) do
+      Logger.warning(
+        "#{inspect(transport)}: no :allowed_origins configured — Origin headers are " <>
+          "not validated, which leaves browser-reachable servers open to DNS-rebinding " <>
+          "attacks. Set allowed_origins: [\"https://yourapp.example\"] per the MCP " <>
+          "specification, or allowed_origins: \"*\" to opt out explicitly."
+      )
+    end
+
+    :ok
   end
 
   def call(conn, opts) do
@@ -280,7 +325,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
             conn = add_mcp_protocol_version_header(conn)
 
             conn =
-              if is_initialize_response?(response_map) and session_config != false do
+              if initialize_response?(response_map) and session_config != false do
                 create_session_for_initialize(conn, response_map, session_config)
               else
                 conn
@@ -342,7 +387,10 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     put_resp_header(conn, "mcp-protocol-version", ConduitMcp.Protocol.protocol_version())
   end
 
-  defp is_initialize_response?(response_map) do
+  defp initialize_request?(%Plug.Conn{body_params: %{"method" => "initialize"}}), do: true
+  defp initialize_request?(_conn), do: false
+
+  defp initialize_response?(response_map) do
     case response_map do
       %{"result" => %{"protocolVersion" => _, "serverInfo" => _}} -> true
       _ -> false
