@@ -3,8 +3,8 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
   import Plug.Test
   import Plug.Conn
 
-  alias ConduitMcp.Transport.StreamableHTTP
   alias ConduitMcp.TestServer
+  alias ConduitMcp.Transport.StreamableHTTP
 
   @opts StreamableHTTP.init(server_module: TestServer)
 
@@ -255,6 +255,25 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
     end
   end
 
+  describe "origin validation startup warning" do
+    import ExUnit.CaptureLog
+
+    test "init warns when :allowed_origins is unset" do
+      log = capture_log(fn -> StreamableHTTP.init(server_module: TestServer) end)
+      assert log =~ "allowed_origins"
+      assert log =~ "DNS-rebinding"
+    end
+
+    test "init stays quiet when :allowed_origins is set (even to \"*\")" do
+      log =
+        capture_log(fn ->
+          StreamableHTTP.init(server_module: TestServer, allowed_origins: "*")
+        end)
+
+      refute log =~ "DNS-rebinding"
+    end
+  end
+
   describe "session management" do
     @session_opts StreamableHTTP.init(
                     server_module: TestServer,
@@ -347,6 +366,77 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
       response = JSON.decode!(conn.resp_body)
       assert response["error"]
       assert response["error"]["message"] =~ "Session not found"
+    end
+
+    test "require_session: true rejects non-initialize POST without session header" do
+      opts =
+        StreamableHTTP.init(
+          server_module: TestServer,
+          session: [store: ConduitMcp.Session.EtsStore, require_session: true]
+        )
+
+      body = JSON.encode!(%{"jsonrpc" => "2.0", "id" => 1, "method" => "tools/list"})
+
+      conn =
+        conn(:post, "/", body)
+        |> put_req_header("content-type", "application/json")
+        |> StreamableHTTP.call(opts)
+
+      assert conn.status == 400
+      response = JSON.decode!(conn.resp_body)
+      assert response["error"]["message"] =~ "Mcp-Session-Id"
+    end
+
+    test "require_session: true still allows initialize without session header" do
+      opts =
+        StreamableHTTP.init(
+          server_module: TestServer,
+          session: [store: ConduitMcp.Session.EtsStore, require_session: true]
+        )
+
+      conn =
+        conn(:post, "/", initialize_request_body())
+        |> put_req_header("content-type", "application/json")
+        |> StreamableHTTP.call(opts)
+
+      assert conn.status == 200
+      assert [_session_id] = get_resp_header(conn, "mcp-session-id")
+    end
+
+    test "require_session: true accepts requests with a valid session header" do
+      opts =
+        StreamableHTTP.init(
+          server_module: TestServer,
+          session: [store: ConduitMcp.Session.EtsStore, require_session: true]
+        )
+
+      init_conn =
+        conn(:post, "/", initialize_request_body())
+        |> put_req_header("content-type", "application/json")
+        |> StreamableHTTP.call(opts)
+
+      session_id = get_resp_header(init_conn, "mcp-session-id") |> List.first()
+
+      body = JSON.encode!(%{"jsonrpc" => "2.0", "id" => 2, "method" => "tools/list"})
+
+      conn =
+        conn(:post, "/", body)
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("mcp-session-id", session_id)
+        |> StreamableHTTP.call(opts)
+
+      assert conn.status == 200
+    end
+
+    test "without require_session, non-initialize POST passes without session header" do
+      body = JSON.encode!(%{"jsonrpc" => "2.0", "id" => 1, "method" => "tools/list"})
+
+      conn =
+        conn(:post, "/", body)
+        |> put_req_header("content-type", "application/json")
+        |> StreamableHTTP.call(@session_opts)
+
+      assert conn.status == 200
     end
 
     test "sessions disabled (session: false) — no session header returned" do

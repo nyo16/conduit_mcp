@@ -380,9 +380,10 @@ defmodule ConduitMcp.Endpoint do
 
               case ConduitMcp.DSL.extract_uri_params_compiled(uri, param_names, regex) do
                 {:ok, params} ->
-                  atom_params = Map.new(params, fn {k, v} -> {String.to_existing_atom(k), v} end)
-
-                  mod.execute(atom_params, conn)
+                  case ConduitMcp.Endpoint.atomize_uri_params(params) do
+                    {:ok, atom_params} -> mod.execute(atom_params, conn)
+                    :error -> nil
+                  end
 
                 :no_match ->
                   nil
@@ -414,19 +415,17 @@ defmodule ConduitMcp.Endpoint do
     end
   end
 
-  @custom_constraint_markers [
-    :__enum_values__,
-    :__min_value__,
-    :__max_value__,
-    :__min_length__,
-    :__max_length__,
-    :validator,
-    :min,
-    :max,
-    :min_length,
-    :max_length,
-    :enum
-  ]
+  # Single source of truth lives in SchemaConverter (resolved at compile time).
+  @custom_constraint_markers ConduitMcp.Validation.SchemaConverter.custom_constraint_markers()
+
+  @doc false
+  # URI template param names are compile-time-defined atoms; an unknown name
+  # means the URI matched a different shape — treat as no-match, don't crash.
+  def atomize_uri_params(params) do
+    {:ok, Map.new(params, fn {k, v} -> {String.to_existing_atom(k), v} end)}
+  rescue
+    ArgumentError -> :error
+  end
 
   defp generate_tool_validation_clauses(tools) do
     Enum.map(tools, fn mod ->

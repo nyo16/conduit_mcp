@@ -3,7 +3,7 @@ defmodule ConduitMcp.TelemetryTest do
   import Plug.Test
   import Plug.Conn
 
-  alias ConduitMcp.{Handler, TestServer, TelemetryTestHelper}
+  alias ConduitMcp.{Handler, TelemetryTestHelper, TestServer}
   alias ConduitMcp.Plugs.Auth
 
   describe "request telemetry events" do

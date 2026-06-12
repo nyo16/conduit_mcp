@@ -3,8 +3,8 @@ defmodule ConduitMcp.Transport.SSETest do
   import Plug.Test
   import Plug.Conn
 
-  alias ConduitMcp.Transport.SSE
   alias ConduitMcp.TestServer
+  alias ConduitMcp.Transport.SSE
 
   @opts SSE.init(server_module: TestServer)
 
@@ -82,10 +82,12 @@ defmodule ConduitMcp.Transport.SSETest do
 
       # Give it time to start - if headers were wrong, it would error immediately (< 100ms)
       # If it's still running after 200ms, it successfully entered the keep-alive loop
+      # Generous window: on a loaded CI runner the spawned task may take a
+      # while to schedule before it can prove it's parked in the loop.
       receive do
         {:conn_result, _} -> flunk("Connection should have entered infinite loop")
       after
-        200 -> assert true
+        1000 -> assert true
       end
     end
 
@@ -108,6 +110,28 @@ defmodule ConduitMcp.Transport.SSETest do
         |> SSE.call(@opts)
 
       assert conn.status == 406
+    end
+  end
+
+  describe "endpoint event URL" do
+    test "uses configured :base_url when set" do
+      conn =
+        conn(:get, "/sse")
+        |> Plug.Conn.put_private(:sse_base_url, "https://mcp.example.com/")
+
+      assert SSE.message_base_url(conn) == "https://mcp.example.com"
+    end
+
+    test "falls back to sanitized Host header" do
+      conn = %{conn(:get, "/sse") | req_headers: [{"host", "mcp.example.com:4001"}]}
+
+      assert SSE.message_base_url(conn) == "http://mcp.example.com:4001"
+    end
+
+    test "strips dangerous characters from Host fallback" do
+      conn = %{conn(:get, "/sse") | req_headers: [{"host", "evil.com/path bad\r\ninjected"}]}
+
+      assert SSE.message_base_url(conn) == "http://evil.compathbadinjected"
     end
   end
 

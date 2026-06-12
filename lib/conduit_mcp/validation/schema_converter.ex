@@ -175,42 +175,43 @@ defmodule ConduitMcp.Validation.SchemaConverter do
   Used during compile time to catch schema generation errors.
   """
   def validate_schema(schema) do
-    try do
-      # Remove custom constraint markers before validating with NimbleOptions
-      clean_schema = remove_custom_constraint_markers(schema)
+    # Remove custom constraint markers before validating with NimbleOptions
+    clean_schema = remove_custom_constraint_markers(schema)
 
-      # Test the schema with empty options to validate its structure
-      NimbleOptions.validate([], clean_schema)
-      :ok
-    rescue
-      error ->
-        {:error, Exception.message(error)}
-    end
+    # Test the schema with empty options to validate its structure
+    NimbleOptions.validate([], clean_schema)
+    :ok
+  rescue
+    error ->
+      {:error, Exception.message(error)}
   end
 
-  # Private helper to clean schema - same as in main validation module
+  @custom_constraint_markers [
+    :__enum_values__,
+    :__min_value__,
+    :__max_value__,
+    :__min_length__,
+    :__max_length__,
+    :validator,
+    :min,
+    :max,
+    :min_length,
+    :max_length,
+    :enum
+  ]
+
+  @doc """
+  Custom constraint markers stored alongside NimbleOptions options.
+
+  Single source of truth — these must be stripped from a schema before
+  handing it to NimbleOptions. Used by `ConduitMcp.Validation`,
+  `ConduitMcp.DSL.SchemaBuilder`, and `ConduitMcp.Endpoint`.
+  """
+  def custom_constraint_markers, do: @custom_constraint_markers
+
   defp remove_custom_constraint_markers(schema) do
-    custom_markers = [
-      :__enum_values__,
-      :__min_value__,
-      :__max_value__,
-      :__min_length__,
-      :__max_length__,
-      :validator,
-      :min,
-      :max,
-      :min_length,
-      :max_length,
-      :enum
-    ]
-
     Enum.map(schema, fn {param_name, param_opts} ->
-      clean_opts =
-        Enum.reduce(custom_markers, param_opts, fn marker, acc ->
-          Keyword.delete(acc, marker)
-        end)
-
-      {param_name, clean_opts}
+      {param_name, Keyword.drop(param_opts, @custom_constraint_markers)}
     end)
   end
 
@@ -321,10 +322,21 @@ defmodule ConduitMcp.Validation.SchemaConverter do
   end
 
   defp get_original_value(field_name, original_params) when is_map(original_params) do
-    Map.get(original_params, field_name) || Map.get(original_params, String.to_atom(field_name))
+    case original_params do
+      %{^field_name => value} -> value
+      _ -> get_atom_keyed_value(original_params, field_name)
+    end
   end
 
   defp get_original_value(_field_name, _original_params), do: nil
+
+  # Field names come from developer-defined schemas, so the atom should exist;
+  # never mint new atoms from request-derived strings.
+  defp get_atom_keyed_value(params, field_name) do
+    Map.get(params, String.to_existing_atom(field_name))
+  rescue
+    ArgumentError -> nil
+  end
 
   defp extract_constraint_message(message) do
     cond do

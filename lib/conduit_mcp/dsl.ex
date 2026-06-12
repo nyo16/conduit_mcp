@@ -1162,15 +1162,15 @@ defmodule ConduitMcp.DSL do
       case handler do
         {:fn_ast, handler_ast} ->
           quote do
-            def handle_call_tool(_conn, unquote(tool_name), params) do
-              unquote(handler_ast).(_conn, params)
+            def handle_call_tool(conn, unquote(tool_name), params) do
+              unquote(handler_ast).(conn, params)
             end
           end
 
         {:mfa, {mod, fun}} ->
           quote do
-            def handle_call_tool(_conn, unquote(tool_name), params) do
-              apply(unquote(mod), unquote(fun), [_conn, params])
+            def handle_call_tool(conn, unquote(tool_name), params) do
+              apply(unquote(mod), unquote(fun), [conn, params])
             end
           end
 
@@ -1189,16 +1189,16 @@ defmodule ConduitMcp.DSL do
       case handler do
         {:fn_ast, handler_ast} ->
           quote do
-            def handle_get_prompt(_conn, unquote(prompt_name), args) do
-              messages = unquote(handler_ast).(_conn, args)
+            def handle_get_prompt(conn, unquote(prompt_name), args) do
+              messages = unquote(handler_ast).(conn, args)
               {:ok, %{"messages" => messages}}
             end
           end
 
         {:mfa, {mod, fun}} ->
           quote do
-            def handle_get_prompt(_conn, unquote(prompt_name), args) do
-              messages = apply(unquote(mod), unquote(fun), [_conn, args])
+            def handle_get_prompt(conn, unquote(prompt_name), args) do
+              messages = apply(unquote(mod), unquote(fun), [conn, args])
               {:ok, %{"messages" => messages}}
             end
           end

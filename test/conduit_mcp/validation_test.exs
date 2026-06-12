@@ -1,5 +1,6 @@
 defmodule ConduitMcp.ValidationTest do
-  use ExUnit.Case, async: true
+  # async: false — mutates the global validation config (update_validation_config/1)
+  use ExUnit.Case, async: false
 
   alias ConduitMcp.Validation
   alias ConduitMcp.Validation.SchemaConverter
@@ -198,7 +199,9 @@ defmodule ConduitMcp.ValidationTest do
     end
 
     test "validation can be disabled via configuration" do
-      # Mock disabled validation
+      # on_exit (not `after`) so the global config is restored even if the
+      # test process is killed mid-run
+      on_exit(fn -> Validation.update_validation_config([]) end)
       Validation.update_validation_config(runtime_validation: false)
 
       params = %{"invalid" => "params"}
@@ -207,8 +210,6 @@ defmodule ConduitMcp.ValidationTest do
                Validation.validate_tool_params(TestValidationServer, "simple_tool", params)
 
       assert validated_params == params
-    after
-      Validation.update_validation_config([])
     end
   end
 
@@ -496,6 +497,35 @@ defmodule ConduitMcp.ValidationTest do
 
       assert validated_params["name"] == "Alice Johnson"
       assert validated_params["age"] == 30
+    end
+
+    test "collects all constraint violations in one pass" do
+      # name too short AND age over max AND bad enum — all three must be reported
+      params = %{
+        "name" => "A",
+        "age" => 200,
+        "email" => "alice@example.com",
+        "role" => "invalid"
+      }
+
+      assert {:error, errors} =
+               Validation.validate_tool_params(IntegrationTestServer, "validate_user", params)
+
+      reported_params = Enum.map(errors, & &1["parameter"])
+      assert "name" in reported_params
+      assert "age" in reported_params
+      assert "role" in reported_params
+      assert length(errors) >= 3
+    end
+
+    test "min_length counts graphemes, not bytes" do
+      # "héllo" is 5 graphemes but 6 bytes — must satisfy min_length: 5
+      params = %{"name" => "héllo", "age" => 30, "email" => "alice@example.com"}
+
+      assert {:ok, validated} =
+               Validation.validate_tool_params(IntegrationTestServer, "validate_user", params)
+
+      assert validated["name"] == "héllo"
     end
 
     test "DSL-generated validation catches constraint violations" do

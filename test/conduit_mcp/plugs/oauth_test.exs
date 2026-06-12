@@ -142,6 +142,165 @@ defmodule ConduitMcp.Plugs.OAuthTest do
     end
   end
 
+  describe "algorithm allow-list" do
+    test "rejects token whose header alg is not in the allow-list" do
+      # HS256 is not in the default allow-list when no oct key is configured
+      hs_signer = Joken.Signer.create("HS256", "shared-secret")
+
+      {:ok, token, _} =
+        Joken.encode_and_sign(
+          %{
+            "iss" => "https://auth.example.com",
+            "aud" => "https://mcp.example.com",
+            "exp" => System.system_time(:second) + 3600
+          },
+          hs_signer
+        )
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(@oauth_opts)
+
+      assert result.halted
+      assert result.status == 401
+    end
+
+    test "explicit :algorithms option restricts accepted algs" do
+      opts =
+        OAuth.init(
+          issuer: "https://auth.example.com",
+          audience: "https://mcp.example.com",
+          algorithms: ["ES256"],
+          key_provider: {ConduitMcp.OAuth.KeyProvider.Static, keys: [@rsa_public_key]}
+        )
+
+      token = sign_token(%{"scope" => "read"})
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(opts)
+
+      # RS256 token rejected because only ES256 is allowed
+      assert result.halted
+      assert result.status == 401
+    end
+
+    test "HS flow works with a static oct key without explicit :algorithms" do
+      secret = :crypto.strong_rand_bytes(32)
+
+      oct_key = %{
+        "kty" => "oct",
+        "kid" => "hmac-key",
+        "k" => Base.url_encode64(secret, padding: false)
+      }
+
+      opts =
+        OAuth.init(
+          issuer: "https://auth.example.com",
+          audience: "https://mcp.example.com",
+          key_provider: {ConduitMcp.OAuth.KeyProvider.Static, keys: [oct_key]}
+        )
+
+      signer = Joken.Signer.create("HS256", secret, %{"kid" => "hmac-key"})
+
+      {:ok, token, _} =
+        Joken.encode_and_sign(
+          %{
+            "iss" => "https://auth.example.com",
+            "aud" => "https://mcp.example.com",
+            "sub" => "user-456",
+            "exp" => System.system_time(:second) + 3600
+          },
+          signer
+        )
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(opts)
+
+      refute result.halted
+      assert result.assigns[:oauth_claims]["sub"] == "user-456"
+    end
+
+    test "rejects token when header alg does not fit the key family" do
+      # HS256 header alg against an RSA key — allow-list includes HS via
+      # explicit option, but the key family check must still reject it
+      opts =
+        OAuth.init(
+          issuer: "https://auth.example.com",
+          audience: "https://mcp.example.com",
+          algorithms: ["RS256", "HS256"],
+          key_provider: {ConduitMcp.OAuth.KeyProvider.Static, keys: [@rsa_public_key]}
+        )
+
+      hs_signer = Joken.Signer.create("HS256", "attacker-controlled", %{"kid" => "test-key"})
+
+      {:ok, token, _} =
+        Joken.encode_and_sign(
+          %{
+            "iss" => "https://auth.example.com",
+            "aud" => "https://mcp.example.com",
+            "exp" => System.system_time(:second) + 3600
+          },
+          hs_signer
+        )
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(opts)
+
+      assert result.halted
+      assert result.status == 401
+    end
+
+    test "rejects key with unknown kty cleanly" do
+      weird_key = %{"kty" => "OKP", "kid" => "ed-key", "crv" => "Ed25519", "x" => "abc"}
+
+      opts =
+        OAuth.init(
+          issuer: "https://auth.example.com",
+          audience: "https://mcp.example.com",
+          key_provider: {ConduitMcp.OAuth.KeyProvider.Static, keys: [weird_key]}
+        )
+
+      token = sign_token(%{})
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(opts)
+
+      assert result.halted
+      assert result.status == 401
+    end
+  end
+
+  describe "WWW-Authenticate header hygiene" do
+    test "strips CRLF and quotes from config-sourced header values" do
+      opts =
+        OAuth.init(
+          issuer: "https://auth.example.com",
+          audience: "https://mcp.example.com",
+          resource_uri: "https://mcp.example.com\r\nX-Injected: 1",
+          scopes_supported: ["read\"", "write\r\n"],
+          key_provider: {ConduitMcp.OAuth.KeyProvider.Static, keys: [@rsa_public_key]}
+        )
+
+      result =
+        conn(:get, "/")
+        |> OAuth.call(opts)
+
+      [www_auth] = get_resp_header(result, "www-authenticate")
+      refute www_auth =~ "\r"
+      refute www_auth =~ "\n"
+      assert www_auth =~ "resource_metadata=\"https://mcp.example.comX-Injected: 1/"
+    end
+  end
+
   describe "WWW-Authenticate headers" do
     test "401 includes resource_metadata and scope in WWW-Authenticate" do
       result =
