@@ -28,3 +28,23 @@ session, so task routing to implementation agents is not viable.
   Note: "cancellation cleanup telemetry" review suggestion moot — no such event exists.
 - Phase 5 ✅ T18: CI already had sobelow+deps.audit+hex.audit jobs (no change needed);
   CHANGELOG updated (Security/Changed/Fixed/Deprecated/Added).
+- Review ✅ elixir-reviewer + security-analyzer: no blockers. Fixed in-branch: stale_max_age
+  cap (24h, fails closed) + piped-if style. Pre-existing follow-ups logged in
+  reviews/hardening-review.md. Re-verified: 646 tests green.
+- Pushed: feature/hardening @ b4f11ed → origin.
+
+**State**: COMPLETED
+
+## Metrics
+
+| Metric | Value |
+|--------|-------|
+| Cycles | 1 |
+| Phases | 6 |
+| Tasks Completed | 18/18 (+2 review fixes) |
+| Tasks Blocked | 0 |
+| Retries | 0 |
+| Review Issues Fixed | 2 (3 logged pre-existing) |
+| Files Modified | 28 (13 lib, 14 test, 1 tooling) + docs |
+| Tests Added | 27 (619 → 646) |
+| Bonus Bugs Found | 2 (HS signer crash; SSE server_name copy-paste) |
