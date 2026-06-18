@@ -136,6 +136,48 @@ defmodule ConduitMcp.HandlerTest do
       assert response["error"]["message"] == "Tool execution failed"
     end
 
+    test "handles tools/call with tool error when request carries _meta" do
+      # Regression: clients (e.g. the Python MCP SDK) send a _meta progressToken
+      # on every tools/call. Error responses have no "result" key, so merging
+      # _meta there used to raise and surface as a generic "Internal server
+      # error" instead of the real tool error.
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 5,
+        "method" => "tools/call",
+        "params" => %{
+          "_meta" => %{"progressToken" => 1},
+          "name" => "fail",
+          "arguments" => %{}
+        }
+      }
+
+      response = Handler.handle_request(request, TestServer)
+
+      assert response["id"] == 5
+      assert response["error"]["code"] == -32000
+      assert response["error"]["message"] == "Tool execution failed"
+      refute Map.has_key?(response, "result")
+    end
+
+    test "merges _meta into the result of a successful tools/call" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 4,
+        "method" => "tools/call",
+        "params" => %{
+          "_meta" => %{"progressToken" => 7},
+          "name" => "echo",
+          "arguments" => %{"message" => "Hello!"}
+        }
+      }
+
+      response = Handler.handle_request(request, TestServer)
+
+      assert response["result"]["content"] == [%{"type" => "text", "text" => "Hello!"}]
+      assert response["result"]["_meta"] == %{"progressToken" => 7}
+    end
+
     test "handles tools/call with unknown tool" do
       request = %{
         "jsonrpc" => "2.0",
