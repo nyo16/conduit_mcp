@@ -581,11 +581,21 @@ defmodule ConduitMcp.Handler do
     end
   end
 
-  # Adds _meta field from request params to the response result if present.
+  # Adds the request's _meta to the response result when present.
+  #
+  # Only success responses carry a "result" key. Error responses
+  # (%{"error" => ...}) have no "result", so we must not try to write into
+  # ["result", "_meta"] there — doing so raises "could not put/update key on a
+  # nil value", which the caller would mask as a generic "Internal server
+  # error". Clients commonly send a _meta (e.g. a progressToken) on every
+  # tools/call, so this path is hit whenever a tool returns an error.
   defp maybe_add_meta(response, params) do
     case Map.get(params, "_meta") do
-      nil -> response
-      meta when is_map(meta) -> put_in(response, ["result", "_meta"], meta)
+      meta when is_map(meta) and is_map_key(response, "result") ->
+        put_in(response, ["result", "_meta"], meta)
+
+      _ ->
+        response
     end
   end
 

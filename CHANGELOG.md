@@ -140,6 +140,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   field indicates `:ok` / `:error` and whose payload includes
   validation failures.
 
+## [0.9.7] - 2026-06-18
+
+### Fixed
+
+- **`tools/call` errors crashed when the request carried `_meta`** —
+  `Handler.maybe_add_meta/2` unconditionally wrote the request's `_meta` into
+  `["result", "_meta"]`, but error responses (`%{"error" => ...}`) have no
+  `"result"` key. With a `_meta` present (clients such as the Python MCP SDK
+  send a `progressToken` on every `tools/call`), this raised
+  `"could not put/update key \"_meta\" on a nil value"`, which the handler
+  masked as a generic `"Internal server error"` — so every tool that returned
+  an error surfaced the wrong message. `_meta` is now only merged into
+  responses that have a `"result"`; error responses pass through untouched.
+
 ## [0.9.3] - 2026-04-18
 
 ### Fixed
