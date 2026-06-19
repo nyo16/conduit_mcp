@@ -88,5 +88,27 @@ defmodule ConduitMcp.CancellationTest do
       Cancellation.cancel("evt-1", "client abort")
       assert_receive {:cancelled, %{count: 1}, %{request_id: "evt-1", reason: "client abort"}}
     end
+
+    test "emits [:conduit_mcp, :cancellation, :cleanup] with the removed count" do
+      handler_id = "cleanup-test-#{System.unique_integer([:positive])}"
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      :telemetry.attach(
+        handler_id,
+        [:conduit_mcp, :cancellation, :cleanup],
+        fn _event, m, _md, parent -> send(parent, {:cleanup, m}) end,
+        self()
+      )
+
+      stale_at = System.system_time(:millisecond) - 60_000
+
+      :ets.insert(
+        :conduit_mcp_cancellations,
+        {"stale-evt", %{"reason" => nil, "cancelled_at" => stale_at}}
+      )
+
+      assert Cancellation.cleanup(30_000) == 1
+      assert_receive {:cleanup, %{removed: 1}}
+    end
   end
 end

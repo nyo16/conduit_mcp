@@ -37,6 +37,8 @@ defmodule ConduitMcp.Errors do
   |------|----------|---------|
   | `-32000` | `server_error/0` | Generic tool/server error (default for `error/1`) |
   | `-32002` | `resource_not_found/0` | The requested resource URI was not found |
+  | `-32004` | `task_not_ready/0` | A `tasks/result` was requested before the task finished |
+  | `-32800` | `request_cancelled/0` | The request was cancelled (`notifications/cancelled`) |
   """
 
   # JSON-RPC 2.0 standard error codes
@@ -49,6 +51,8 @@ defmodule ConduitMcp.Errors do
   # MCP-specific error codes
   @server_error -32000
   @resource_not_found -32002
+  @task_not_ready -32004
+  @request_cancelled -32800
 
   @doc "Parse error — invalid JSON received (`-32700`)"
   def parse_error, do: @parse_error
@@ -70,4 +74,10 @@ defmodule ConduitMcp.Errors do
 
   @doc "Resource not found — the requested URI did not match any resource (`-32002`)"
   def resource_not_found, do: @resource_not_found
+
+  @doc "Task not ready — `tasks/result` requested before the task finished (`-32004`)"
+  def task_not_ready, do: @task_not_ready
+
+  @doc "Request cancelled — client sent `notifications/cancelled` for this request (`-32800`)"
+  def request_cancelled, do: @request_cancelled
 end

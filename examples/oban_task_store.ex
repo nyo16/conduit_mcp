@@ -180,6 +180,13 @@ defmodule MyApp.ObanTaskStore do
 
   @doc """
   Creates a new MCP task and optionally enqueues an Oban job.
+
+  When the caller stamps an owner via `ConduitMcp.Tasks.create/3`, it arrives
+  under `metadata["owner"]` and is persisted verbatim in the `metadata` column.
+  `to_map/1` promotes it back to the top-level `"owner"` key so the framework's
+  owner-scoping (`get/2`, `cancel/2`, `list/2`) can enforce it — see the "Owner
+  scoping" section of `ConduitMcp.Tasks.Store`. For heavy multi-tenant use,
+  prefer a dedicated indexed `owner` column over the JSON blob.
   """
   @impl true
   def create(task_id, metadata \\ %{}) do
@@ -322,5 +329,13 @@ defmodule MyApp.ObanTaskStore do
       "metadata" => task.metadata,
       "created_at" => task.inserted_at
     }
+    |> promote_owner(task.metadata)
   end
+
+  # Surface the stamped owner at the top level so ConduitMcp.Tasks owner-scoping
+  # can read it. No-op for unowned tasks (back-compat).
+  defp promote_owner(map, %{"owner" => owner}) when not is_nil(owner),
+    do: Map.put(map, "owner", owner)
+
+  defp promote_owner(map, _metadata), do: map
 end

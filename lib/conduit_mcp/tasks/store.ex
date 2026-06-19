@@ -57,6 +57,31 @@ defmodule ConduitMcp.Tasks.Store do
   See `examples/oban_tasks_server/` for an Oban + SQLite implementation
   and `examples/oban_task_store.ex` for a Postgres-flavored reference.
 
+  ## Owner scoping (BOLA/IDOR protection)
+
+  The `tasks/*` routes key purely on the client-supplied `taskId`. To stop one
+  principal from reading or cancelling another's task, `ConduitMcp.Tasks`
+  applies **owner scoping** in the facade — the store behaviour itself stays
+  unchanged. When a task is created with an owner
+  (`ConduitMcp.Tasks.create/3`, typically `create(id, meta, owner(conn))`), the
+  facade compares the caller's principal against the task's owner on every
+  `get/2`, `cancel/2`, and `list/2`, returning `{:error, :not_found}` on a
+  mismatch so existence isn't leaked.
+
+  For this to work, **a store must round-trip the owner at the top-level
+  `"owner"` key** of the map returned by `get/1` and `list/1` — the same place
+  `create/2` received it in `metadata`. The default `EtsStore` does this for
+  free because it persists the metadata map verbatim. A store that shreds
+  metadata into columns (or a nested JSON blob) must promote `"owner"` back to
+  the top level in its `to_map`/read path, e.g. add an `owner` column and
+  surface it as `"owner"`.
+
+  Scoping is **fully opt-in and back-compatible**: a `nil` caller principal
+  (unauthenticated, or the 2-arg `ConduitMcp.Handler.handle_request/2` path) and
+  an unowned task (`"owner"` absent/`nil`) are always accessible. Scoping only
+  ever denies when the caller has a principal *and* the task is stamped with a
+  different one. Apps that never stamp an owner see no behaviour change.
+
   ## Configuration
 
       # Default — in-memory ETS, zero config

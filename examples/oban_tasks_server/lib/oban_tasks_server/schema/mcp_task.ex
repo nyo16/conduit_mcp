@@ -46,8 +46,19 @@ defmodule Examples.ObanTasks.Schema.McpTask do
     |> maybe_put("args", row.args)
     |> maybe_put("result", row.result)
     |> maybe_put("metadata", row.metadata)
+    |> promote_owner(row.metadata)
   end
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  # Owner scoping: a task stamped via `ConduitMcp.Tasks.create/3` carries its
+  # owner in the metadata blob; surface it at the top-level "owner" key so the
+  # framework's owner-scoping (get/2, cancel/2, list/2) can enforce it. This
+  # example server runs unauthenticated, so the owner is always nil here and
+  # this is a no-op — see the "Owner scoping" section of `ConduitMcp.Tasks.Store`.
+  defp promote_owner(map, %{"owner" => owner}) when not is_nil(owner),
+    do: Map.put(map, "owner", owner)
+
+  defp promote_owner(map, _metadata), do: map
 end

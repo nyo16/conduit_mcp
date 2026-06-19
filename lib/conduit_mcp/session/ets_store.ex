@@ -110,6 +110,8 @@ defmodule ConduitMcp.Session.EtsStore do
     ensure_table()
     now = System.system_time(:millisecond)
 
+    # Deleting the *current* element during `:ets.foldl` is guaranteed safe by
+    # ETS for set tables — do NOT "fix" this into collect-then-delete.
     :ets.foldl(
       fn {session_id, metadata}, acc ->
         created_at = Map.get(metadata, "created_at", 0)

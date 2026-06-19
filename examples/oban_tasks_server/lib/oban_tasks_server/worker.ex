@@ -30,6 +30,9 @@ defmodule Examples.ObanTasks.Worker do
   @snooze_secs 5
   # Cap on client-supplied duration so a single render can't sleep forever.
   @max_duration_ms 60_000
+  # Fallback when the client-supplied duration isn't a usable non-negative
+  # integer (args arrive as JSON, so don't assume a clean value).
+  @default_duration_ms 1_000
 
   # Bound how long any single attempt may run. Oban.Engines.Lite defaults to
   # :infinity, so without this a long/adversarial render holds a queue slot.
@@ -57,18 +60,16 @@ defmodule Examples.ObanTasks.Worker do
   # --- slow_render: straightforward long-running tool ---
 
   defp render(task_id, %{"duration_ms" => requested}) do
-    total = min(requested, @max_duration_ms)
+    total = clamp_duration(requested)
     chunk_ms = max(div(total, @chunks), 50)
 
     Enum.reduce_while(1..@chunks, :ok, fn step, _ ->
-      cond do
-        cancelled?(task_id) ->
-          {:halt, {:cancel, "cancelled by client"}}
-
-        true ->
-          _ = Tasks.update(task_id, %{"progress" => round(step / @chunks * 100)})
-          Process.sleep(chunk_ms)
-          {:cont, :ok}
+      if cancelled?(task_id) do
+        {:halt, {:cancel, "cancelled by client"}}
+      else
+        _ = Tasks.update(task_id, %{"progress" => round(step / @chunks * 100)})
+        Process.sleep(chunk_ms)
+        {:cont, :ok}
       end
     end)
     |> finalize(task_id, fn ->
@@ -118,6 +119,10 @@ defmodule Examples.ObanTasks.Worker do
                 })
             })
 
+          # Snooze does NOT consume a retry: Oban's snooze_job/3 (Lite delegates
+          # to Basic) increments max_attempts alongside the attempt, so the
+          # input_required wait is effectively unbounded by max_attempts: 3 —
+          # that limit only governs genuine failures. (Verified vs oban 2.22.1.)
           {:snooze, @snooze_secs}
         end
 
@@ -127,6 +132,13 @@ defmodule Examples.ObanTasks.Worker do
   end
 
   # --- helpers ---
+
+  # Defensive: `duration_ms` is a validated :integer param on the happy path,
+  # but worker args come back from JSON in the DB, so a manually-enqueued or
+  # malformed job could carry a non-integer. Clamp to a usable non-negative
+  # integer so `div/2` and `Process.sleep/1` never receive a bad value.
+  defp clamp_duration(ms) when is_integer(ms) and ms >= 0, do: min(ms, @max_duration_ms)
+  defp clamp_duration(_other), do: @default_duration_ms
 
   defp finalize({:cancel, _reason} = c, task_id, _result_fun) do
     _ = Tasks.update(task_id, %{"status" => "cancelled"})

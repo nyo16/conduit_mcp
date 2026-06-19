@@ -168,17 +168,10 @@ defmodule ConduitMcp.Tasks.StoreDispatchTest do
 
   describe "optional-callback fallbacks" do
     setup do
-      previous = Application.get_env(:conduit_mcp, :tasks_store)
+      # No on_exit here: the module-level setup already snapshots and restores
+      # :tasks_store after every test. A second restore here was redundant (and
+      # misleading — it captured whatever the outer setup left, not the original).
       Application.put_env(:conduit_mcp, :tasks_store, MinimalStore)
-
-      on_exit(fn ->
-        if previous do
-          Application.put_env(:conduit_mcp, :tasks_store, previous)
-        else
-          Application.delete_env(:conduit_mcp, :tasks_store)
-        end
-      end)
-
       :ok
     end
 

@@ -112,6 +112,10 @@ defmodule Examples.ObanTasks.SmokeTest do
     poll_until(task_id, max_attempts, &(&1["status"] == status), "status #{inspect(status)}")
   end
 
+  # Iron-Law exception: Process.sleep is acceptable here. This is an
+  # :integration test that drives the real HTTP transport against an async
+  # Oban worker — there's no deterministic event to await across the process
+  # boundary, so bounded polling is the pragmatic choice.
   defp poll_until(task_id, max_attempts, predicate, description) do
     Enum.reduce_while(1..max_attempts, nil, fn _, _ ->
       Process.sleep(100)
@@ -124,8 +128,12 @@ defmodule Examples.ObanTasks.SmokeTest do
     end
   end
 
+  # Iron-Law exception (Process.sleep): polling for the HTTP server to accept
+  # connections during :integration boot. Budget is 100 × 100ms = 10s — the
+  # first boot runs cold SQLite migrations (Oban schema + mcp_tasks), which can
+  # exceed the previous 5s on a slow/cold CI runner.
   defp wait_for_server do
-    Enum.reduce_while(1..50, :error, fn _, _ ->
+    Enum.reduce_while(1..100, :error, fn _, _ ->
       try do
         case Req.get!("http://localhost:4041/health") do
           %{status: 200} -> {:halt, :ok}
@@ -139,7 +147,7 @@ defmodule Examples.ObanTasks.SmokeTest do
     end)
     |> case do
       :ok -> :ok
-      :error -> flunk("server did not come up on :4041 within 5s")
+      :error -> flunk("server did not come up on :4041 within 10s")
     end
   end
 end

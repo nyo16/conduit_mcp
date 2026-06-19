@@ -18,6 +18,17 @@ defmodule Examples.ObanTasks.Store do
   `update(_, %{"status" => "cancelled"})`) because tasks here are
   backed by Oban jobs — we want to mark the row cancelled *and* tell
   Oban to drop the job from its queue so it doesn't keep retrying.
+
+  ## Owner scoping
+
+  The framework owner-scopes `tasks/*` by comparing the caller's principal to
+  the task's `"owner"` (see the "Owner scoping" section of
+  `ConduitMcp.Tasks.Store`). `create/2` persists the whole metadata map, so an
+  owner stamped via `ConduitMcp.Tasks.create/3` is stored, and
+  `McpTask.to_map/1` promotes it back to the top-level `"owner"` key. This
+  example server runs **unauthenticated**, so the principal is always `nil` and
+  scoping is a no-op here; add an auth plug (and optionally an indexed `owner`
+  column) to enforce per-principal isolation in a real deployment.
   """
 
   @behaviour ConduitMcp.Tasks.Store
@@ -82,14 +93,19 @@ defmodule Examples.ObanTasks.Store do
         {:error, :not_found}
 
       %McpTask{oban_job_id: job_id} = row ->
-        if job_id, do: cancel_oban_job(job_id)
-
+        # Update the row FIRST, then drop the Oban job only on a successful
+        # write. Reversed, a failed Repo.update would leave the row "working"
+        # with the job already cancelled — a task that can never finish.
         row
         |> McpTask.changeset(%{status: "cancelled"})
         |> Repo.update()
         |> case do
-          {:ok, updated} -> {:ok, McpTask.to_map(updated)}
-          {:error, changeset} -> {:error, changeset}
+          {:ok, updated} ->
+            if job_id, do: cancel_oban_job(job_id)
+            {:ok, McpTask.to_map(updated)}
+
+          {:error, changeset} ->
+            {:error, changeset}
         end
     end
   end

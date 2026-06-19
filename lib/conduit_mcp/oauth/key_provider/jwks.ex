@@ -27,6 +27,26 @@ if Code.ensure_loaded?(Req) do
     bounded by `:stale_max_age` (default 24 hours), after which the provider
     fails closed so revoked keys cannot validate tokens indefinitely.
 
+    ## Security considerations
+
+    **The `jwks_uri` must be trusted operator config — never client-derived.**
+    Fetches are hardened against SSRF abuse (`https`-only unless
+    `allow_insecure_jwks`, redirects disabled, 1MB body cap), but the URI
+    *itself* is not range-checked: a `jwks_uri` pointing at a private or
+    link-local address — e.g. the cloud metadata endpoint
+    `http(s)://169.254.169.254/...` — **is fetched, not rejected**. Set
+    `jwks_uri` from a configuration source you control. If it must come from a
+    less-trusted source, restrict outbound egress at the network layer (the
+    library deliberately does not block private ranges, since for most
+    deployments the JWKS endpoint *is* an internal/private host).
+
+    **Revocation lag during an outage.** While the JWKS endpoint is
+    unreachable, cached keys keep validating tokens until `:stale_max_age`
+    (default 24h), then the provider fails closed. The trade-off: a key
+    revoked *during* an outage can still validate tokens for up to
+    `:stale_max_age`. Lower it if your threat model needs faster revocation;
+    raise it to tolerate longer authorization-server outages.
+
     ## Requirements
 
     Requires the `req` package. Use `0.6.1` or newer: earlier versions carry
@@ -96,6 +116,17 @@ if Code.ensure_loaded?(Req) do
       fetch_and_cache(jwks_uri, config)
     end
 
+    # The table is owned by a supervised `Owner` Agent (started from
+    # `ConduitMcp.Application`, like `ConduitMcp.Tasks.EtsStore.Owner` and
+    # `ConduitMcp.Cancellation.Owner`) so it stays stable across short-lived
+    # Bandit request processes. This matters for more than caching: without a
+    # stable owner the table is created by whichever request first fetches keys
+    # and is destroyed when that request ends — which not only defeats
+    # cross-request caching but can make a *concurrent* request's `:ets.insert`
+    # raise `ArgumentError` when the owner dies mid-operation (this path runs on
+    # every authenticated request). `ensure_table/0` below is a self-healing
+    # fallback for the rare case the table is missing (e.g. isolated unit tests
+    # that don't boot the application).
     defp ensure_table do
       if :ets.whereis(@table) == :undefined do
         :ets.new(@table, [:named_table, :public, :set, read_concurrency: true])
@@ -218,6 +249,43 @@ if Code.ensure_loaded?(Req) do
 
         [] ->
           {:error, reason}
+      end
+    end
+
+    defmodule Owner do
+      @moduledoc """
+      Long-lived process that owns the `:conduit_mcp_jwks_cache` ETS table so
+      the JWKS cache survives — and stays stable under concurrency — across
+      short-lived Bandit request processes. Started under `ConduitMcp.Supervisor`
+      by `ConduitMcp.Application` whenever this provider module is available.
+
+      Without a stable owner the table would be created by whichever request
+      first fetched keys and destroyed when that request ended, both defeating
+      cross-request caching and risking an `:ets.insert`/`:ets.lookup`
+      `ArgumentError` in a concurrent request when the owner dies mid-operation.
+      """
+
+      use Agent
+
+      def start_link(_opts) do
+        Agent.start_link(
+          fn ->
+            # Create unconditionally (like Cancellation.Owner / Tasks.EtsStore.Owner):
+            # at app boot the table does not exist yet, and owning it is the whole
+            # point. A guarded create would let an earlier `ensure_table/0` keep the
+            # table under a short-lived process while this Owner stays alive but
+            # owns nothing — silently defeating the guarantee.
+            :ets.new(:conduit_mcp_jwks_cache, [
+              :named_table,
+              :public,
+              :set,
+              read_concurrency: true
+            ])
+
+            :ok
+          end,
+          name: __MODULE__
+        )
       end
     end
   end
