@@ -11,19 +11,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **Patched two vulnerable transitive dependencies** flagged by `mix deps.audit`.
-  `mint` `1.7.1` -> `1.9.3` (CONTINUATION flood and unbounded PUSH_PROMISE stream
-  map growth, both high; plus request-line CRLF injection and a Content-Length
-  parsing issue) and `req` `0.5.17` -> `0.7.2` (unbounded archive/compression
-  extraction driven by response content-type, high; multipart header injection,
-  moderate). Both reach this library only through the optional JWKS key provider,
-  and the decompression one is genuinely reachable there — `ConduitMcp.OAuth.KeyProvider.JWKS`
-  caps the JWKS body at 1MB, but the cap applies after Req decompresses. The
-  declared constraint `{:req, "~> 0.5"}` already permitted the patched line, so
-  only `mix.lock` moved; the JWKS moduledoc now recommends `{:req, "~> 0.6"}`.
-  `finch`, `hpax` and `castore` moved as required transitives. `plug` and
-  `plug_crypto` were deliberately held at their locked versions — neither is
-  implicated, and unrelated bumps do not belong in a release lock.
+- **Patched every dependency carrying a published advisory.** Verified against
+  OSV across all 47 locked packages, which now report none.
+
+  | Package | From | To | Advisories fixed |
+  |---|---|---|---|
+  | `plug` | 1.19.2 | 1.20.3 | quadratic-time decoding of nested query/body params (high, CVE-2026-54892); multipart `:length` not charged for part headers, enabling unbounded temp-file creation (medium, CVE-2026-56814); cookie attribute injection in `Plug.Conn.Cookies.encode/2` (low, CVE-2026-56813) |
+  | `bandit` | 1.11.1 | 1.12.4 | quadratic CPU blow-up reassembling fragmented WebSocket messages (high, CVE-2026-65623) |
+  | `mint` | 1.7.1 | 1.9.3 | CONTINUATION/HEADERS flood (high); unbounded `streams` map growth via PUSH_PROMISE (high); request-line CRLF injection (low); Content-Length `+` prefix (moderate) |
+  | `req` | 0.5.17 | 0.7.2 | unbounded archive/compression extraction driven by response content-type (high); multipart header injection (moderate) |
+
+  The `plug` and `bandit` advisories are the ones that matter for a deployed
+  server: both are remote denial-of-service reachable through the transports on
+  any request, with no configuration required. The `mint` and `req` ones reach
+  this library only through the optional JWKS key provider — where the
+  decompression advisory is genuinely reachable rather than merely present, since
+  `ConduitMcp.OAuth.KeyProvider.JWKS` caps the JWKS body at 1MB but Req
+  decompresses before that cap applies.
+
+  No declared constraint changed: `~> 1.19`, `~> 1.9` and `~> 0.5` all already
+  permitted the patched releases, so only `mix.lock` moved. `bandit 1.12` requires
+  `thousand_island ~> 1.5`, so that moved too (1.4.3 -> 1.5.0); `plug_crypto`
+  (2.1.1 -> 2.2.0), `finch` (0.20.0 -> 0.23.0), `hpax` and `castore` followed as
+  transitives. The JWKS moduledoc now recommends `{:req, "~> 0.6"}`.
 - **JWT algorithm allow-list** — `ConduitMcp.Plugs.OAuth` now validates the
   token header `alg` against an allow-list (new `:algorithms` option,
   default: RS/ES/PS families) *before* key lookup, and requires the resolved
