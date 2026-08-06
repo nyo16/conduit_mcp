@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-08-05
+
 Follow-up hardening from a re-review of the 0.9.4–0.9.7 changes (PRs #13–#17).
 
 ### Security
@@ -623,7 +625,8 @@ None - This release is fully backward compatible.
 - Basic authentication
 - Phoenix integration example
 
-[Unreleased]: https://github.com/nyo16/conduit_mcp/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/nyo16/conduit_mcp/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/nyo16/conduit_mcp/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/nyo16/conduit_mcp/compare/v0.9.7...v0.10.0
 [0.9.7]: https://github.com/nyo16/conduit_mcp/compare/v0.9.6...v0.9.7
 [0.8.5]: https://github.com/nyo16/conduit_mcp/compare/v0.8.0...v0.8.5
