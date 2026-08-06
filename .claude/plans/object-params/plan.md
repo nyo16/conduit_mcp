@@ -1,12 +1,15 @@
 # Plan: Make object parameters functional
 
-**Status:** DRAFT — awaiting approval
+**Status:** APPROVED — ready for `/phx:work`
 **Branch:** `fix/object-params` (off `master`)
 **Slug:** `object-params`
 **Source:** downstream investigation report (conduit_mcp 0.9.7 consumer) + first-party
 verification in this tree
 **Depth:** standard (findings supplied; verification done inline, no research agents spawned
 per Iron Law #7)
+**Decisions taken:** nested runtime validation = **B2** (wire through NimbleOptions);
+`additionalProperties` promoted from optional to required by that choice. Ships as two PRs —
+phases 1–3, then phases 4–5.
 
 ## Problem
 
@@ -197,51 +200,131 @@ missed. Phase 4 is the design fork. Phase 5 is optional scope.
 - [ ] Tests for `field :rows, :array, "d", [] do items :object do field ... end end`.
 - [ ] Verify.
 
-### Phase 4 — Nested runtime validation: decide, then act `[validation]`
+### Phase 4 — Nested runtime validation via NimbleOptions (decision: **B2**) `[validation]`
 
-Blocked on the open decision below. Whichever branch is chosen, this is required:
+NimbleOptions capability verified against the locked 1.1.1 (probe in `scratchpad.md`).
+What works and what constrains the design:
 
+| Probe | Result |
+|---|---|
+| `type: :map, keys: [name: [type: :string, required: true]]` w/ atom keys | **OK** |
+| ...missing required nested key | rejected: `required :name option not found` |
+| ...wrong nested type | rejected: `expected string, got: 1` |
+| ...undeclared nested key | rejected: `unknown options [:zzz]` |
+| ...**string** keys | rejected: `expected atom, got: "name"` |
+| `keys: [*: [type: :any]]` wildcard w/ string keys | **rejected** — wildcard is still atom-only |
+| `{:map, :string, :any}` **+** `keys:` | **spec-invalid** — cannot combine |
+| deep nesting (object in object) | **OK**, errors carry a path: `in options [:bag, :inner]` |
+
+Two hard consequences:
+
+1. **There is no way to get NimbleOptions nested validation on string-keyed maps.** So B2
+   necessarily requires atomising nested object keys before validation. Normalising to
+   *string* keys — what the Phase 4 sketch in the previous draft assumed — is a dead end.
+2. **The dead `{:fields, fields}` bridge is not merely unwired, it is wrong.** It emits
+   `{:schema, nested_schema}`, and `:schema` is not a valid NimbleOptions option
+   (`unknown options [:schema], valid options are: [:type, :required, ...]`). Wiring it as
+   written would crash schema compilation. It must be rewritten to `keys:` or deleted.
+
+**Security constraint — do not lose this property.** `String.to_atom` on client-supplied
+keys is unbounded atom creation, and atoms are never garbage-collected. That is a
+memory-exhaustion DoS on a server library. The existing `String.to_existing_atom` +
+rescue at `validation.ex:239-243` is deliberately safe; B2 must stay at least as safe.
+The way to have both: atomise a nested key **only when it matches a declared field name**.
+Those atoms already exist, created at compile time by the DSL. Undeclared keys are never
+atomised.
+
+Design that follows from the above:
+
+- Object **with** declared nested fields → `type: :map, keys: [<declared specs>]`, with
+  schema-driven key normalisation.
+- Object **without** declared fields (open bag) → keep Phase 1's `{:map, :any, :any}`,
+  no `keys:`, pass-through.
+
+Tasks:
+
+- [ ] Add a schema-driven nested-key normaliser: given a param's `nested:` field list,
+      atomise only those incoming keys whose string form matches a declared field name;
+      leave every other key as a string. Never call `String.to_atom` on client input.
+- [ ] Replace the blanket recursion in `convert_keys_to_atoms/1` (`validation.ex:248`) for
+      object-typed params with that schema-driven pass. Note this blanket recursion is the
+      root of RC3's non-determinism, so removing it is a fix, not collateral.
+- [ ] **Audit blast radius:** `convert_keys_to_atoms/1` runs on every param of every type.
+      Run the full suite and specifically re-check any test that relies on nested values
+      being atomised (grep `convert_keys_to_atoms` consumers and the prompt path too —
+      `compile_validation_schema(%{args: args})` at `schema_converter.ex:67` shares it).
+- [ ] `convert_param_to_nimble_option/1` (`schema_converter.ex:74`) — destructure `nested:`
+      and emit `type: :map, keys: [...]` for objects with declared fields. It currently
+      ignores `nested:` entirely (RC4).
+- [ ] Recurse for depth: nested objects inside nested objects must emit nested `keys:`.
+      Verified supported, with path-carrying errors.
+- [ ] Delete or rewrite the broken `convert_validation_opt({:fields, fields}, acc)` bridge
+      at `schema_converter.ex:158-162`. Do not leave it emitting an invalid `:schema` key.
+- [ ] Decide the undeclared-nested-key policy and make the error message good. NimbleOptions'
+      native rejection for a *string* undeclared key is `expected atom, got: "zzz"`, which is
+      useless to an API consumer — pre-check undeclared keys and emit a proper
+      "unknown field `zzz` in object `bag`" error instead.
 - [ ] Fix `schema_converter.ex:18` — the moduledoc claim `:object -> :map (with nested
-      validation)` is false today and stays false under option B1.
-- [ ] Either wire or delete the dead `convert_validation_opt({:fields, fields}, acc)`
-      bridge at `schema_converter.ex:158-162`. Leaving unwired "future support" code in
-      place is what let RC4 go unnoticed.
+      validation)` becomes true only once this phase lands; until then it is false.
+- [ ] Confirm the handler-facing contract is unchanged: `validation.ex:220`'s
+      `convert_keys_to_strings/1` recurses, so handlers keep receiving string keys.
+      Add a test asserting that explicitly — it is the property that makes atomisation an
+      internal detail.
+- [ ] Tests: missing nested required; wrong nested type; undeclared nested key; deep
+      nesting; object inside array items; open bag still accepts anything; and **both** DSL
+      front ends (`param` and `Component.Schema` `field`).
+- [ ] Verify (same gate as Phase 1).
 
-### Phase 5 — `additionalProperties` (optional scope) `[schema]`
+### Phase 5 — `additionalProperties`, merged into Phase 4 `[schema]`
+
+**Now coupled to Phase 4, not optional.** Once Phase 4 rejects undeclared nested keys,
+`additionalProperties` stops being cosmetic: it becomes the knob that selects between
+strict rejection and pass-through, and the JSON Schema must agree with what the validator
+actually enforces. Shipping Phase 4 without it means the schema says nothing while the
+validator rejects.
 
 - [ ] Honour `opts[:additional_properties]` in `schema_builder.ex` `build_property/1` for
-      `:object`, so callers can describe an open bag precisely instead of relying on the
-      empty-`properties` convention.
-- [ ] Tests for `additional_properties: true | false | %{...}`.
+      `:object`, emitting `"additionalProperties"` in the JSON Schema.
+- [ ] Make the same opt drive the validator: `additional_properties: true` → allow
+      undeclared keys (open bag semantics even when fields are declared);
+      `false`/absent → reject.
+- [ ] Reconcile with the open-bag case: an object with no declared fields and no opt should
+      keep behaving as `{:map, :any, :any}`.
+- [ ] Tests for `additional_properties: true | false` against both the emitted JSON Schema
+      and runtime validation, asserting the two agree.
 - [ ] Verify.
 
-## Open decision — nested runtime validation (Phase 4)
+## Resolved decision — nested runtime validation
 
-Phase 1 makes objects pass validation as opaque maps. The JSON Schema still advertises
-nested `required` fields, so the server tells clients about constraints it does not
-enforce. Three ways to resolve:
+**Chosen: B2 — wire nested schemas through NimbleOptions.** (User decision, this session.)
 
-- **B1 — Document, don't enforce.** Fix the lying moduledoc, delete the dead `:fields`
-  bridge, note that nested shape is advisory. Smallest change, ships with Phase 1, honest.
-- **B2 — Wire nested schemas through NimbleOptions.** Requires deterministic key types,
-  which `convert_keys_to_atoms/1` does not provide (RC3). Would mean normalising
-  object-typed values to string keys *before* validation — a real change to
-  `validation.ex`'s key handling with blast radius beyond objects.
-- **B3 — Hand-roll nested validation** against the `nested:` tree in `SchemaConverter`,
-  independent of NimbleOptions. Most control, most new code, and a second validation path
-  to keep in sync with the JSON Schema builder.
+Rejected alternatives, recorded so the next reader doesn't relitigate:
 
-Recommendation: **B1 now**, B2/B3 as a separate plan once objects are actually in use.
-Shipping B2 inside the unblock couples a key-handling change to a crash fix.
+- **B1 — document, don't enforce.** Smallest change, but leaves the server advertising
+  nested `required` constraints it never checks.
+- **B3 — hand-roll nested validation** against the `nested:` tree. Most control, but adds a
+  second validation path to keep in sync with the JSON Schema builder. NimbleOptions turns
+  out to support everything needed (including depth and error paths), so the extra path
+  isn't justified.
+
+B2's cost is now known rather than assumed: it requires schema-driven key atomisation
+(string keys are impossible — see the Phase 4 probe table) and it touches
+`convert_keys_to_atoms/1`, which every param type flows through. That blast radius has its
+own audit task.
 
 ## Split decision
 
-One plan, phases 1–3 as a single PR (they are all "object params work"), Phase 4 folded in
-if B1 is chosen, Phase 5 separate. Rationale: phases 2–3 are the same class of defect as
-phase 1 and touch the same two files; splitting them means two rounds of the same tests.
-Phase 5 is additive API surface and reviews better alone.
+Two PRs:
 
-If you'd rather land the unblock immediately: Phase 1 alone is a coherent, shippable PR.
+- **PR 1 — phases 1–3, "object params work".** Same class of defect, same two front-end
+  files, one round of tests. This is the unblock and it is independently shippable.
+- **PR 2 — phases 4+5, "nested object validation".** Now that B2 is chosen, these are one
+  unit: Phase 4 makes the validator reject undeclared nested keys, and Phase 5 is the knob
+  that makes the published JSON Schema agree with it. Splitting them ships a validator whose
+  behaviour the schema doesn't describe. This PR also carries the
+  `convert_keys_to_atoms/1` change, so it wants its own review and its own revert unit.
+
+If you want the unblock even sooner: Phase 1 alone is coherent and shippable.
 
 ## Risks
 
@@ -249,29 +332,46 @@ If you'd rather land the unblock immediately: Phase 1 alone is a coherent, shipp
   path, so the tests written in Phase 1 define the contract for the first time. Expect the
   generated JSON Schema shape to need a judgement call (e.g. whether an open object emits
   `"properties": {}` or omits the key).
-- **`{:map, :any, :any}` is permissive by design.** It accepts any map. That is correct
-  given RC3, but it means a typo'd nested key reaches the handler silently until Phase 4
-  resolves. Worth stating in the release notes.
+- **`{:map, :any, :any}` is permissive by design.** It accepts any map. Correct given RC3,
+  but a typo'd nested key reaches the handler silently until Phase 4 lands. State it in the
+  release notes for whatever version ships PR 1 alone.
 - **Two DSLs, one schema pipeline.** `ConduitMcp.DSL` and `ConduitMcp.Component.Schema`
-  both feed `SchemaBuilder` and `SchemaConverter`. Every Phase 1 fix in the shared
-  pipeline must be tested from *both* front ends or the component path will drift again —
-  it already has (RC6).
-- **Version/compat.** This is a public library at 0.9.7. Phase 2's arity-trap change alters
-  behaviour for code that currently crashes, so it is not a breaking change; Phase 5 adds
-  opts. A patch or minor bump is fine.
+  both feed `SchemaBuilder` and `SchemaConverter`. Every fix in the shared pipeline must be
+  tested from *both* front ends or the component path will drift again — it already has
+  (RC6).
+- **B2's blast radius is the real risk in this plan.** `convert_keys_to_atoms/1` is on the
+  path for every param of every type, tools and prompts alike
+  (`compile_validation_schema(%{args: args})`, `schema_converter.ex:67`). Changing its
+  recursion to be schema-driven is the right fix for RC3's non-determinism, but it is the
+  one change here that can break params that work today. Hence the explicit audit task.
+- **Atom-table safety is a hard constraint, not a preference.** If Phase 4 is implemented
+  with `String.to_atom` instead of match-against-declared-names, it introduces a
+  remote memory-exhaustion DoS in a server library. Any review of PR 2 should check this
+  specifically.
+- **Phase 4 changes rejection behaviour for input that is accepted today.** After PR 1, an
+  object with undeclared keys validates; after PR 2 it may not. That is a behavioural
+  break for anyone who adopted objects between the two releases — narrow, but real. Either
+  ship both in one version or note it.
+- **Version/compat.** Public library at 0.9.7. Phase 2's arity-trap change only affects
+  code that currently crashes, so it is not breaking. Phase 5 adds opts. PR 1 is a patch
+  or minor; PR 2 should be a minor given the rejection-behaviour change.
 
 ## Self-check
 
 - *Does the plan cover every finding in the source report?* Yes — see the completeness
   matrix below, plus 8 findings the report did not have.
-- *Is anything in the plan unverified?* No. Every file:line and every failure mode was
-  reproduced in this tree. The only unverified items are the design options in Phase 4,
-  which are explicitly a decision, not a claim.
-- *What would make this plan wrong?* If the intended contract for `:object` is
-  "atom-keyed map" rather than "JSON object", then RC3's fix is wrong and the real fix is
-  in `convert_keys_to_atoms/1`. The handler-facing contract
-  (`convert_keys_to_strings/1` at `validation.ex:220`) says string keys, so JSON object is
-  the right reading — but a maintainer should confirm.
+- *Is anything in the plan unverified?* Every file:line, every failure mode, and every
+  NimbleOptions capability claim was reproduced in this tree — including the two facts that
+  changed the design (string-keyed nested validation is impossible; the `:fields` bridge
+  emits an invalid option). What remains unverified is the *implementation* of the
+  schema-driven normaliser in Phase 4, which does not exist yet.
+- *What would make this plan wrong?* If the intended contract for `:object` is "atom-keyed
+  map" rather than "JSON object", then RC3's fix is wrong and the real fix is in
+  `convert_keys_to_atoms/1`. The handler-facing contract (`convert_keys_to_strings/1` at
+  `validation.ex:220`) says string keys, so JSON object is the right reading — but a
+  maintainer should confirm before PR 2.
+- *What is the riskiest task?* Replacing the blanket recursion in `convert_keys_to_atoms/1`.
+  Everything else is additive or local; that one is subtractive on a shared path.
 
 ## Completeness matrix
 
@@ -284,7 +384,7 @@ Every finding from the source report, plus first-party additions. No finding is 
 | Bug 2b — same latent nil in `build_items_schema/1` (`:271`) | Phase 1 (RC2) |
 | Bug 3 — `:object` → `:map` (`schema_converter.ex:86`) | Phase 1 (RC3) |
 | Minor — arity trap on 3-arg + block | Phase 2 (RC5) |
-| Enhancement — no `additionalProperties` | Phase 5 |
+| Enhancement — no `additionalProperties` | Phase 5, now coupled to Phase 4 by the B2 decision |
 | Repro module for the upstream issue | Phase 1 tests (we *are* upstream — `origin` is `nyo16/conduit_mcp`, so this becomes a regression test, not an issue) |
 | **NEW** — `items :object do ... end` broken (case D) | Phase 1 (RC1) |
 | **NEW** — `Component.Schema` blockless object crashes (case E) | Phase 1 (RC2) |
@@ -295,6 +395,9 @@ Every finding from the source report, plus first-party additions. No finding is 
 | **NEW** — `schema_converter.ex:18` moduledoc falsely claims nested validation | Phase 4 (RC4) |
 | **NEW** — report's `{:map, :string, :any}` alternative is a regression | Phase 1 (RC3), proved |
 | **NEW** — `Component.Schema` is the correct reference implementation for RC1 | Phase 1 approach |
+| **NEW** — dead `:fields` bridge emits an **invalid** NimbleOptions option (`:schema`), so wiring it as written would crash schema compilation | Phase 4 (RC4), proved |
+| **NEW** — nested validation on string-keyed maps is **impossible** in NimbleOptions 1.1.1 (`{:map, :string, :any}` + `keys:` is spec-invalid; even `keys: [*: ...]` is atom-only) | Phase 4 design, proved |
+| **NEW** — B2 requires atomising nested keys, which collides with atom-table DoS safety; must match against declared field names only | Phase 4 security constraint |
 
 ## Verification gate (every phase)
 

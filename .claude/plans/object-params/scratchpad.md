@@ -14,8 +14,23 @@
 - **`convert_type(:object)` → `{:map, :any, :any}`, not `{:map, :string, :any}`.** Proved
   below. The report offered the latter as "stricter, also works"; in this codebase it is a
   regression.
-- **Nested runtime validation is a separate decision, not part of the unblock.** Wiring it
-  requires changing `convert_keys_to_atoms/1`, whose blast radius exceeds objects.
+- **Nested runtime validation: B2 chosen** (user decision, this session) — wire nested
+  schemas through NimbleOptions rather than documenting non-enforcement (B1) or hand-rolling
+  (B3). Lands as its own PR (phases 4+5) because it carries the `convert_keys_to_atoms/1`
+  change, which is on the path for every param of every type.
+- **B2's key direction is atoms, not strings.** The first draft of this plan assumed
+  normalising nested object values to *string* keys. Probing NimbleOptions 1.1.1 proved that
+  impossible: `{:map, :string, :any}` cannot be combined with `keys:` at all, and even the
+  `keys: [*: ...]` wildcard is atom-only. So B2 must atomise.
+- **Atomisation must match against declared field names only.** `String.to_atom` on
+  client-supplied keys is unbounded atom creation and atoms are never GC'd — a remote
+  memory-exhaustion DoS in a server library. The existing `String.to_existing_atom` +
+  rescue at `validation.ex:239-243` is deliberately safe and B2 must stay at least as safe.
+  Declared field names are already interned at compile time by the DSL, so matching against
+  them needs no new atoms.
+- **Phase 5 (`additionalProperties`) is no longer optional.** Under B2 the validator starts
+  rejecting undeclared nested keys, so the published JSON Schema has to say so. Shipping
+  Phase 4 alone would mean a validator whose behaviour the schema doesn't describe.
 
 ## Corrections to the source report
 
@@ -56,6 +71,47 @@ needed; it is throwaway and lives outside the repo.
 
 `/tmp/keytype.exs` mirrors `validation.ex:235-256` verbatim and prints the key-type matrix
 in correction #3.
+
+`/tmp/nimble_nested.exs` probes NimbleOptions 1.1.1 nested-schema capability. Verbatim
+output, since the whole B2 design rests on it:
+
+```
+1. type: :map + keys: [...] (atom-keyed nested schema)
+  valid atom-keyed        -> OK %{name: "n", age: 3}
+  missing required        -> REJECT required :name option not found, received options: [:age] (in options [:bag])
+  wrong nested type       -> REJECT invalid value for :name option: expected string, got: 1 (in options [:bag])
+  undeclared extra key    -> REJECT unknown options [:zzz], valid options are: [:name, :age] (in options [:bag])
+  string keys             -> REJECT invalid map in :bag option: invalid value for map key: expected atom, got: "name"
+
+2. keys: [*: ...] wildcard
+  atom keys               -> OK %{a: 1}
+  string keys             -> REJECT ... expected atom, got: "a"
+
+3. {:map, :string, :any} + keys
+  string-keyed map w/ keys -> SPEC-INVALID expected a keyword list, but an entry ... not a two-element tuple
+
+4. does the dead :fields bridge shape work? [type: :map, schema: [...]]
+  type: :map, schema: [...] -> SPEC-INVALID unknown options [:schema], valid options are: [:type, :required, ...]
+
+5. deep nesting: object in object
+  deep valid              -> OK %{inner: %{k: "v"}}
+  deep missing required   -> REJECT required :k option not found, received options: [] (in options [:bag, :inner])
+
+6. list of objects (array items)
+  list of maps            -> OK [%{a: 1}]
+```
+
+Four things this settled:
+
+- Nested validation works, including depth, and errors carry a key path (`[:bag, :inner]`) —
+  so B3's hand-rolled path buys nothing.
+- **Atom keys are mandatory.** No configuration produces nested validation on string keys.
+- **The dead `{:fields, fields}` bridge is wrong, not just unwired** — it emits
+  `{:schema, ...}`, and `:schema` is not a valid NimbleOptions option. Wiring it as written
+  would crash schema compilation. Rewrite to `keys:` or delete.
+- Undeclared nested keys are rejected by default, and for a *string* key the native message
+  is `expected atom, got: "zzz"` — useless to an API consumer. Phase 4 needs its own
+  unknown-field pre-check to produce a decent error.
 
 ## Dead ends / things checked and dismissed
 
