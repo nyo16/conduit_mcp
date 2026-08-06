@@ -106,6 +106,7 @@ end
 | `min: n` / `max: n` | number, integer | Numeric bounds |
 | `min_length: n` / `max_length: n` | string | String length bounds |
 | `validator: fn` | All | Custom validator function |
+| `additional_properties: bool` | object | Allow keys the block did not declare |
 
 ### Nested Objects
 
@@ -118,6 +119,32 @@ schema do
   end
 end
 ```
+
+Nested fields are enforced at runtime — required, types, and the constraints
+above — to any depth, and undeclared keys are rejected. Declare the field
+without a block for an open object (any keys, nothing enforced), or pass
+`additional_properties: true` to enforce the declared fields while letting
+everything else through.
+
+### Array Items
+
+```elixir
+schema do
+  field :tags, :array, "Tags" do
+    items :string
+  end
+
+  field :rows, :array, "Rows" do
+    items :object do
+      field :id, :integer, "Row id", required: true
+    end
+  end
+end
+```
+
+`items` is the only thing an `:array` block accepts; a bare `field` there is a
+compile error. Item schemas are published for clients but not enforced
+server-side.
 
 ## Defining the Endpoint
 

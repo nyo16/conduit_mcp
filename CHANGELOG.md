@@ -7,8 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-05
+
 ### Security
 
+- **Patched every dependency carrying a published advisory.** Verified against
+  OSV across all 47 locked packages, which now report none.
+
+  | Package | From | To | Advisories fixed |
+  |---|---|---|---|
+  | `plug` | 1.19.2 | 1.20.3 | quadratic-time decoding of nested query/body params (high, CVE-2026-54892); multipart `:length` not charged for part headers, enabling unbounded temp-file creation (medium, CVE-2026-56814); cookie attribute injection in `Plug.Conn.Cookies.encode/2` (low, CVE-2026-56813) |
+  | `bandit` | 1.11.1 | 1.12.4 | quadratic CPU blow-up reassembling fragmented WebSocket messages (high, CVE-2026-65623) |
+  | `mint` | 1.7.1 | 1.9.3 | CONTINUATION/HEADERS flood (high); unbounded `streams` map growth via PUSH_PROMISE (high); request-line CRLF injection (low); Content-Length `+` prefix (moderate) |
+  | `req` | 0.5.17 | 0.7.2 | unbounded archive/compression extraction driven by response content-type (high); multipart header injection (moderate) |
+
+  The `plug` and `bandit` advisories are the ones that matter for a deployed
+  server: both are remote denial-of-service reachable through the transports on
+  any request, with no configuration required. The `mint` and `req` ones reach
+  this library only through the optional JWKS key provider — where the
+  decompression advisory is genuinely reachable rather than merely present, since
+  `ConduitMcp.OAuth.KeyProvider.JWKS` caps the JWKS body at 1MB but Req
+  decompresses before that cap applies.
+
+  No declared constraint changed: `~> 1.19`, `~> 1.9` and `~> 0.5` all already
+  permitted the patched releases, so only `mix.lock` moved. `bandit 1.12` requires
+  `thousand_island ~> 1.5`, so that moved too (1.4.3 -> 1.5.0); `plug_crypto`
+  (2.1.1 -> 2.2.0), `finch` (0.20.0 -> 0.23.0), `hpax` and `castore` followed as
+  transitives. The JWKS moduledoc now recommends `{:req, "~> 0.6"}`.
 - **JWT algorithm allow-list** — `ConduitMcp.Plugs.OAuth` now validates the
   token header `alg` against an allow-list (new `:algorithms` option,
   default: RS/ES/PS families) *before* key lookup, and requires the resolved
@@ -105,6 +130,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`examples/oban_tasks_server/`** — runnable example demonstrating
   the same lifecycle backed by Oban + SQLite for durability, with the
   `input_required` state exercised via `{:snooze, _}`.
+- **Object parameters actually work.** `:object` params (`ConduitMcp.DSL`) and
+  `:object` fields (`ConduitMcp.Component.Schema`) were dead code: every
+  declaration form crashed at compile time, and the one shape that compiled was
+  rejected at runtime by the validator. All forms now compile and validate —
+  blockless (open) objects, block objects with declared fields, objects nested
+  in objects, and `items :object` inside an `:array`.
+- **Nested runtime validation.** A declared object's nested fields are now
+  enforced by NimbleOptions to any depth: required fields, types, and the
+  custom constraints (`enum`, `min`/`max`, length limits, `validator`). Errors
+  name the full path (`bag.inner.city`). Undeclared nested keys are rejected
+  with an actionable message instead of NimbleOptions' `expected atom, got:
+  "zzz"`. Nested keys are atomised only when they match a *declared* field
+  name, so client input can never mint an atom.
+- **`additional_properties:` option** for `:object` params and fields —
+  `true` enforces the declared fields and passes undeclared keys through to the
+  handler; `false` (the default once fields are declared) rejects them. It also
+  drives `"additionalProperties"` in the generated JSON Schema, which is now
+  always emitted for objects so the published schema matches what the server
+  enforces.
+- **`items/1,2` in `ConduitMcp.Component.Schema`** — component-mode array
+  fields had no way to declare an item type at all, and a bare `field` inside
+  an `:array` block silently corrupted the parent field list. `items` is now
+  the only thing an `:array` block accepts, at every nesting depth.
+- **3-arg (and 2-arg) block forms** — `param :bag, :object, "desc" do ... end`
+  and `field :bag, :object do ... end` used to bind to the blockless clause
+  (`[do: ...]` is a keyword list), silently discarding the block; the form the
+  `field/4` docs themselves showed was broken. Both now work in both DSLs. A
+  block on a type that has no block form raises a `CompileError` naming the
+  file and line.
+- **Type coercion now follows nested objects.** A nested `:integer` field
+  accepts the same `"30"` the top level does; previously coercion stopped at
+  depth 0 while nested type *checking* did not, so the two disagreed.
+- **The two DSL front ends now accept the same programs.** `ConduitMcp.DSL`
+  silently swallowed a bare `field` inside an `:array` block, an `items` outside
+  one, and a `field` outside any object block, and raised a bare
+  `FunctionClauseError` for `items :string do ... end`. All four are now
+  `CompileError`s naming the file and line, matching `Component.Schema`. The
+  compile-time scope plumbing both DSLs share moved into one place.
 
 ### Fixed
 
@@ -115,6 +178,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mode: replace the single-map lookup with per-tool function clauses
   plus a catch-all. Servers that never declared OAuth scopes now
   compile cleanly under `--warnings-as-errors`.
+- **`min:`/`max:`/`validator:` were bypassable by sending a number as a string.**
+  Custom constraints are checked by this library rather than NimbleOptions, and
+  the checks ran *before* type coercion — so `check_min_value/3` skipped a binary
+  value, coercion then turned it into a number, and the markers had already been
+  stripped from the schema NimbleOptions sees. With `type_coercion: true` (the
+  default), `"5"` passed `min: 18` and the handler received `5`. `validator:`
+  was worse: the function was called with the uncoerced binary, and `"5" > 18` is
+  `true` in Erlang term order. Coercion now runs first, so every constraint sees
+  the value the handler will see. Note `enum:` now matches after coercion too —
+  `enum: [1, 2, 3]` accepts `"1"` for an `:integer` field, where it previously
+  rejected it.
 
 ### Changed
 
@@ -127,6 +201,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **OAuth scope rejection** on `tools/call` now returns a JSON-RPC
   error with the request's id (previously `nil`, breaking client
   correlation).
+- **Validation errors now always carry a `parameter`.** A type mismatch used to
+  return `parameter: nil` and NimbleOptions' raw prose, while a missing required
+  field returned the field name — so a client author had to special-case the
+  failure kind to locate the field. Every error now names its parameter, dotted
+  for nested fields (`bag.inner.city`). Type-error messages no longer carry
+  NimbleOptions' internal `(in options [:bag])` suffix, because the parameter
+  says it.
+- **Undeclared parameters are rejected with a proper error.** Previously left to
+  NimbleOptions, which reported no parameter name and — for a name that did not
+  already exist as an atom — raised out of validation entirely, so the same
+  mistake surfaced as either a validation error or an internal error depending
+  on the VM's atom table. Now always
+  `%{"parameter" => name, "message" => "unknown parameter \"name\""}`.
 
 ### Removed
 
@@ -139,6 +226,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to `[:conduit_mcp, :tool, :execute]` whose metadata's `:status`
   field indicates `:ok` / `:error` and whose payload includes
   validation failures.
+- **`custom_constraint_markers/0`** on `ConduitMcp.Validation.SchemaConverter` —
+  replaced by `strip_markers/1`, which does the stripping itself and recurses
+  into nested `keys:` schemas. Callers that fetched the marker list to do their
+  own `Keyword.drop/2` should call `strip_markers/1` instead; four modules in
+  this library did exactly that and now share the one implementation.
 
 ## [0.9.7] - 2026-06-18
 
@@ -474,6 +566,9 @@ None - This release is fully backward compatible.
 - Basic authentication
 - Phoenix integration example
 
+[Unreleased]: https://github.com/nyo16/conduit_mcp/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/nyo16/conduit_mcp/compare/v0.9.7...v0.10.0
+[0.9.7]: https://github.com/nyo16/conduit_mcp/compare/v0.9.6...v0.9.7
 [0.8.5]: https://github.com/nyo16/conduit_mcp/compare/v0.8.0...v0.8.5
 [0.8.0]: https://github.com/nyo16/conduit_mcp/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/nyo16/conduit_mcp/compare/v0.6.5...v0.7.0

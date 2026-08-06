@@ -9,7 +9,7 @@ Add `hammer` to your dependencies:
 ```elixir
 def deps do
   [
-    {:conduit_mcp, "~> 0.9.0"},
+    {:conduit_mcp, "~> 0.10"},
     {:hammer, "~> 7.2"}
   ]
 end

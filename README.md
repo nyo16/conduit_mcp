@@ -27,7 +27,7 @@ An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcont
 ```elixir
 def deps do
   [
-    {:conduit_mcp, "~> 0.9"}
+    {:conduit_mcp, "~> 0.10"}
   ]
 end
 ```
@@ -359,6 +359,41 @@ All three modes support runtime validation via [NimbleOptions](https://hexdocs.p
 | `enum: [...]` | All | `enum: ["red", "green", "blue"]` |
 | `default: value` | All | `default: "guest"` |
 | `validator: fun` | All | `validator: &valid_email?/1` |
+| `additional_properties: bool` | object | `additional_properties: true` |
+
+### Object Parameters
+
+An `:object` param declared with a block validates its nested fields — required,
+types, and the constraints above — to any depth, and rejects undeclared keys:
+
+```elixir
+param :user, :object, "User data", required: true do
+  field :name, :string, "Full name", required: true
+  field :address, :object, "Address" do
+    field :city, :string, "City", required: true
+  end
+end
+```
+
+Declared with no block it is an open bag: any keys accepted, nothing enforced.
+`additional_properties: true` combines the two — declared fields are enforced
+and undeclared keys pass through to the handler. The generated JSON Schema
+always emits `additionalProperties`, so it agrees with what the server enforces.
+
+Array item types are declared with `items`:
+
+```elixir
+param :rows, :array, "Rows" do
+  items :object do
+    field :id, :integer, "Row id", required: true
+  end
+end
+```
+
+Item schemas are published for clients but **not** enforced server-side —
+NimbleOptions cannot attach a nested schema to a list element type.
+
+Handlers always receive string keys, at every depth.
 
 ### Type Coercion
 

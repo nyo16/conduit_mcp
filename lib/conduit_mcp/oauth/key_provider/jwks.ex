@@ -29,9 +29,13 @@ if Code.ensure_loaded?(Req) do
 
     ## Requirements
 
-    Requires the `req` package:
+    Requires the `req` package. Use `0.6.1` or newer: earlier versions carry
+    advisories this provider can reach, including unbounded decompression driven
+    by the response's content-type (GHSA — Req `< 0.6.1`). The 1MB cap below is
+    applied to the *decoded* body, so it does not protect against a compression
+    bomb on its own.
 
-        {:req, "~> 0.5"}
+        {:req, "~> 0.6"}
     """
 
     @behaviour ConduitMcp.OAuth.KeyProvider

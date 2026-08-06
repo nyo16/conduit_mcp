@@ -235,10 +235,15 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
     base = add_description(base, param)
     base = add_enum(base, param)
 
-    # Build nested properties
+    # A blockless `:object` param carries `nested: nil` — an open object,
+    # which is `{"properties": {}}` in JSON Schema, not a crash.
+    nested_params = nested_params || []
     {nested_props, nested_required} = build_properties_and_required(nested_params)
 
-    base = Map.put(base, "properties", nested_props)
+    base =
+      base
+      |> Map.put("properties", nested_props)
+      |> Map.put("additionalProperties", additional_properties?(param, nested_params))
 
     if nested_required != [] do
       Map.put(base, "required", nested_required)
@@ -268,8 +273,19 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
     base
   end
 
+  # Always emitted, because the validator always has an answer and the two must
+  # agree: an object with declared fields rejects undeclared keys unless it opts
+  # in, and an object with no declared fields is an open bag unless it opts out.
+  defp additional_properties?(param, nested_params) do
+    Keyword.get(param.opts, :additional_properties, nested_params == [])
+  end
+
+  # A blockless `:array` param (or an `:array` block with no `items`) carries
+  # `items: nil`. JSON Schema's unconstrained item schema is `{}`.
+  defp build_items_schema(nil), do: %{}
+
   defp build_items_schema(%{type: :object, nested: nested_params}) do
-    {nested_props, nested_required} = build_properties_and_required(nested_params)
+    {nested_props, nested_required} = build_properties_and_required(nested_params || [])
 
     schema = %{
       "type" => "object",
@@ -452,9 +468,6 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
   - `__validation_schema_for_tool__/1`
   - `__validation_schema_for_prompt__/1`
   """
-  # Single source of truth lives in SchemaConverter (resolved at compile time).
-  @custom_constraint_markers ConduitMcp.Validation.SchemaConverter.custom_constraint_markers()
-
   def generate_validation_lookup_functions(tools, prompts) do
     tool_schemas = compile_tool_validation_schemas(tools)
     prompt_schemas = compile_prompt_validation_schemas(prompts)
@@ -462,12 +475,12 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
     # Pre-compute clean schemas (markers stripped) at compile time
     tool_dual =
       Map.new(tool_schemas, fn {name, schema} ->
-        {name, {schema, strip_markers(schema)}}
+        {name, {schema, SchemaConverter.strip_markers(schema)}}
       end)
 
     prompt_dual =
       Map.new(prompt_schemas, fn {name, schema} ->
-        {name, {schema, strip_markers(schema)}}
+        {name, {schema, SchemaConverter.strip_markers(schema)}}
       end)
 
     quote do
@@ -495,12 +508,6 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
         }
       end
     end
-  end
-
-  defp strip_markers(schema) do
-    Enum.map(schema, fn {param_name, param_opts} ->
-      {param_name, Keyword.drop(param_opts, @custom_constraint_markers)}
-    end)
   end
 
   @doc """

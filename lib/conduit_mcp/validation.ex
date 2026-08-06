@@ -191,34 +191,41 @@ defmodule ConduitMcp.Validation do
 
   defp validate_with_schema({full_schema, precomputed_clean}, params, context) do
     config = validation_config()
-    # Convert string keys to atoms for validation
-    atom_params = convert_keys_to_atoms(params)
 
-    # First, handle custom validations that NimbleOptions doesn't support directly
-    case validate_custom_constraints(atom_params, full_schema) do
+    # Atomise keys for NimbleOptions — schema-driven for nested objects.
+    atom_params = normalize_params(params, full_schema)
+
+    # Coerce *before* checking constraints. The custom checks are type-specific
+    # — `check_min_value/3` ignores a binary, and `check_custom_validator/3`
+    # would hand the user's function a binary — so running them on uncoerced
+    # input makes `min:`/`max:`/`validator:` bypassable by sending a number as a
+    # string: the check skips it, coercion then turns it into a number, and the
+    # clean schema has already had those markers stripped, so NimbleOptions does
+    # not check them either. They failed *open*.
+    coerced_params =
+      if Keyword.get(config, :type_coercion, true) do
+        apply_type_coercion(atom_params, full_schema)
+      else
+        atom_params
+      end
+
+    # Handle custom validations that NimbleOptions doesn't support directly
+    case validate_custom_constraints(coerced_params, full_schema) do
       {:error, errors} ->
         formatted_errors = format_validation_errors(errors)
         {:error, formatted_errors}
 
-      {:ok, preprocessed_params} ->
-        # Apply type coercion if enabled
-        coerced_params =
-          if Keyword.get(config, :type_coercion, true) do
-            apply_type_coercion(preprocessed_params, full_schema)
-          else
-            preprocessed_params
-          end
-
+      {:ok, checked_params} ->
         # Use pre-computed clean schema if available, otherwise strip at runtime
-        clean_schema = precomputed_clean || remove_custom_constraint_markers(full_schema)
-        keyword_params = Map.to_list(coerced_params)
+        clean_schema = precomputed_clean || SchemaConverter.strip_markers(full_schema)
+        keyword_params = Map.to_list(checked_params)
 
         case NimbleOptions.validate(keyword_params, clean_schema) do
           {:ok, validated_keyword_params} ->
             # Convert back to map and string keys for consistency
             validated_params = Map.new(validated_keyword_params)
             string_params = convert_keys_to_strings(validated_params)
-            {:ok, string_params}
+            {:ok, restore_additional_properties(string_params, params, full_schema)}
 
           {:error, %NimbleOptions.ValidationError{} = error} ->
             formatted_errors = format_nimble_options_error(error, params)
@@ -232,28 +239,128 @@ defmodule ConduitMcp.Validation do
     end
   end
 
-  defp convert_keys_to_atoms(map) when is_map(map) do
-    for {key, value} <- map, into: %{} do
-      atom_key =
-        if is_binary(key) do
-          try do
-            String.to_existing_atom(key)
-          rescue
-            ArgumentError -> key
-          end
-        else
-          key
-        end
+  # Key normalisation
+  #
+  # NimbleOptions' nested `keys:` validation is atom-key-only, but JSON-RPC
+  # delivers string keys. Top-level keys keep the historical
+  # `String.to_existing_atom`-with-string-fallback behaviour; nested object keys
+  # are matched against the *declared* field names of that object instead.
+  #
+  # Two reasons the nested pass is schema-driven rather than a blanket
+  # recursion. It never mints an atom from client input — unbounded atom
+  # creation is a memory-exhaustion DoS, and declared field names were already
+  # interned at compile time by the DSL. And it makes the key type deterministic:
+  # the old blanket recursion left a nested key an atom or a string depending on
+  # whether it happened to be interned already, which is what made object
+  # validation flaky rather than uniformly broken.
+  defp normalize_params(params, schema) do
+    Map.new(params, fn {key, value} ->
+      atom_key = existing_atom(key)
+      {atom_key, normalize_value(value, param_opts(schema, atom_key))}
+    end)
+  end
 
-      {atom_key, convert_keys_to_atoms(value)}
+  defp param_opts(schema, key) when is_atom(key), do: Keyword.get(schema, key, [])
+  defp param_opts(_schema, _key), do: []
+
+  defp existing_atom(key) when is_binary(key) do
+    String.to_existing_atom(key)
+  rescue
+    ArgumentError -> key
+  end
+
+  defp existing_atom(key), do: key
+
+  # Only an object with a declared `keys:` schema is descended into; every other
+  # value — open bags, arrays, scalars — passes through untouched.
+  defp normalize_value(value, opts) when is_map(value) do
+    case Keyword.get(opts, :keys) do
+      nil -> value
+      nested_schema -> normalize_object(value, nested_schema, additional_properties?(opts))
     end
   end
 
-  defp convert_keys_to_atoms(list) when is_list(list) do
-    Enum.map(list, &convert_keys_to_atoms/1)
+  defp normalize_value(value, _opts), do: value
+
+  defp normalize_object(map, nested_schema, additional?) do
+    declared = declared_names(nested_schema)
+
+    Enum.reduce(map, %{}, fn {key, value}, acc ->
+      case declared_key(declared, nested_schema, key) do
+        {:ok, name} ->
+          Map.put(acc, name, normalize_value(value, Keyword.get(nested_schema, name, [])))
+
+        :error when additional? ->
+          # Dropped so NimbleOptions' `keys:` schema doesn't reject it; merged
+          # back from the original request by restore_additional_properties/3.
+          acc
+
+        :error ->
+          Map.put(acc, key, value)
+      end
+    end)
   end
 
-  defp convert_keys_to_atoms(value), do: value
+  defp declared_names(nested_schema) do
+    Map.new(nested_schema, fn {name, _opts} -> {Atom.to_string(name), name} end)
+  end
+
+  defp declared_key(declared, _nested_schema, key) when is_binary(key) do
+    Map.fetch(declared, key)
+  end
+
+  defp declared_key(_declared, nested_schema, key) when is_atom(key) do
+    if Keyword.has_key?(nested_schema, key), do: {:ok, key}, else: :error
+  end
+
+  defp declared_key(_declared, _nested_schema, _key), do: :error
+
+  defp additional_properties?(opts), do: Keyword.get(opts, :additional_properties, false)
+
+  # An object declared `additional_properties: true` had its undeclared keys
+  # pruned before validation, so they are merged back from the original request.
+  # Declared keys keep the validated value, which carries nested defaults.
+  defp restore_additional_properties(validated, original, schema) do
+    merge_object(validated, original, schema, [])
+  end
+
+  defp merge_object(validated, original, schema, opts) do
+    merged =
+      if additional_properties?(opts) do
+        Map.merge(convert_keys_to_strings(original), validated)
+      else
+        validated
+      end
+
+    Enum.reduce(schema, merged, fn {name, field_opts}, acc ->
+      case Keyword.get(field_opts, :keys) do
+        nil -> acc
+        nested_schema -> merge_nested_object(acc, original, name, nested_schema, field_opts)
+      end
+    end)
+  end
+
+  defp merge_nested_object(acc, original, name, nested_schema, field_opts) do
+    key = Atom.to_string(name)
+
+    with {:ok, validated_value} when is_map(validated_value) <- Map.fetch(acc, key),
+         {:ok, original_value} when is_map(original_value) <- fetch_either(original, key, name) do
+      Map.put(
+        acc,
+        key,
+        merge_object(validated_value, original_value, nested_schema, field_opts)
+      )
+    else
+      _ -> acc
+    end
+  end
+
+  defp fetch_either(map, string_key, atom_key) do
+    case Map.fetch(map, string_key) do
+      {:ok, value} -> {:ok, value}
+      :error -> Map.fetch(map, atom_key)
+    end
+  end
 
   defp convert_keys_to_strings(map) when is_map(map) do
     for {key, value} <- map, into: %{} do
@@ -288,16 +395,21 @@ defmodule ConduitMcp.Validation do
     Map.new(error, fn {k, v} -> {to_string(k), v} end)
   end
 
-  # Custom constraint validation — single pass over the schema
+  # Custom constraint validation — single pass over the schema, recursing into
+  # declared nested objects.
 
   defp validate_custom_constraints(params, schema) do
+    # Undeclared *top-level* keys are checked here rather than left to
+    # NimbleOptions for two reasons. Its message (`unknown options [:zzq]`)
+    # carries no machine-readable parameter, so a client got `parameter: nil` at
+    # depth 0 and a dotted path at every other depth. And an undeclared key that
+    # does not intern stays a binary, which makes `Map.to_list/1` a non-keyword
+    # list and raises out of `NimbleOptions.validate/2` — so the same mistake
+    # surfaced as a validation error or an internal error depending on whether
+    # the atom happened to exist. Same atom-table luck as RC3, one level up.
     errors =
-      Enum.flat_map(schema, fn {param_name, param_opts} ->
-        case Map.get(params, param_name) do
-          nil -> []
-          param_value -> collect_constraint_errors(param_name, param_value, param_opts)
-        end
-      end)
+      unknown_key_errors(nil, params, schema, false) ++
+        collect_schema_errors(params, schema, nil)
 
     case errors do
       [] -> {:ok, params}
@@ -305,20 +417,83 @@ defmodule ConduitMcp.Validation do
     end
   end
 
-  defp collect_constraint_errors(param_name, value, opts) do
-    [
-      check_enum(param_name, value, opts),
-      check_min_value(param_name, value, opts),
-      check_max_value(param_name, value, opts),
-      check_min_length(param_name, value, opts),
-      check_max_length(param_name, value, opts),
-      check_custom_validator(param_name, value, opts)
-    ]
-    |> Enum.flat_map(fn
-      :ok -> []
-      {:error, error} -> [error]
+  # `path` is the dotted parameter path of the enclosing object, `nil` at the
+  # top level. Errors carry it so a nested failure names the field the client
+  # actually sent, e.g. `bag.inner.city`.
+  defp collect_schema_errors(params, schema, path) do
+    Enum.flat_map(schema, fn {name, opts} ->
+      case Map.get(params, name) do
+        nil -> []
+        value -> collect_constraint_errors(join_path(path, name), value, opts)
+      end
     end)
   end
+
+  defp join_path(nil, name), do: to_string(name)
+  defp join_path(path, name), do: "#{path}.#{name}"
+
+  defp collect_constraint_errors(path, value, opts) do
+    own =
+      [
+        check_enum(path, value, opts),
+        check_min_value(path, value, opts),
+        check_max_value(path, value, opts),
+        check_min_length(path, value, opts),
+        check_max_length(path, value, opts),
+        check_custom_validator(path, value, opts)
+      ]
+      |> Enum.flat_map(fn
+        :ok -> []
+        {:error, error} -> [error]
+      end)
+
+    own ++ nested_object_errors(path, value, opts)
+  end
+
+  # NimbleOptions' `keys:` schema handles nested structure — required fields,
+  # types, depth — but it cannot report an undeclared key usefully (for a string
+  # key its message is `expected atom, got: "zzz"`) and it does not know about
+  # the custom constraints, so both are handled here.
+  defp nested_object_errors(path, value, opts) when is_map(value) do
+    case Keyword.get(opts, :keys) do
+      nil ->
+        []
+
+      nested_schema ->
+        unknown_key_errors(path, value, nested_schema, additional_properties?(opts)) ++
+          collect_schema_errors(value, nested_schema, path)
+    end
+  end
+
+  defp nested_object_errors(_path, _value, _opts), do: []
+
+  defp unknown_key_errors(_path, _map, _nested_schema, true), do: []
+
+  defp unknown_key_errors(path, map, nested_schema, false) do
+    declared = declared_names(nested_schema)
+
+    for {key, value} <- map, declared_key(declared, nested_schema, key) == :error do
+      name = key_to_string(key)
+
+      %{
+        parameter: join_path(path, name),
+        value: value,
+        message: unknown_key_message(name, path)
+      }
+    end
+  end
+
+  defp unknown_key_message(name, nil), do: "unknown parameter #{inspect(name)}"
+
+  defp unknown_key_message(name, path),
+    do: "unknown field #{inspect(name)} in object #{inspect(path)}"
+
+  # `declared_key/3` tolerates any key term, so this must too. Reachable through
+  # the public `validate_tool_params/3`, though not over JSON-RPC, where object
+  # keys are always strings.
+  defp key_to_string(key) when is_binary(key), do: key
+  defp key_to_string(key) when is_atom(key), do: Atom.to_string(key)
+  defp key_to_string(key), do: inspect(key)
 
   defp check_enum(param_name, value, opts) do
     enum_values = Keyword.get(opts, :__enum_values__) || Keyword.get(opts, :enum)
@@ -458,15 +633,6 @@ defmodule ConduitMcp.Validation do
     end
   end
 
-  # Single source of truth lives in SchemaConverter (resolved at compile time).
-  @custom_constraint_markers SchemaConverter.custom_constraint_markers()
-
-  defp remove_custom_constraint_markers(schema) do
-    Enum.map(schema, fn {param_name, param_opts} ->
-      {param_name, Keyword.drop(param_opts, @custom_constraint_markers)}
-    end)
-  end
-
   defp apply_type_coercion(params, schema) do
     # Build a map for O(1) lookup instead of O(n) Enum.find per param
     schema_map = Map.new(schema)
@@ -477,9 +643,23 @@ defmodule ConduitMcp.Validation do
           {param_name, value}
 
         param_opts ->
-          {param_name, coerce_value(value, Keyword.get(param_opts, :type))}
+          {param_name, coerce_param(value, param_opts)}
       end
     end)
+  end
+
+  # A declared object's fields are validated for type, so they have to be
+  # coerced for type too — otherwise `%{"age" => "30"}` is accepted at the top
+  # level and the identical `%{"bag" => %{"age" => "30"}}` is rejected.
+  defp coerce_param(value, param_opts) when is_map(value) do
+    case Keyword.get(param_opts, :keys) do
+      nil -> coerce_value(value, Keyword.get(param_opts, :type))
+      nested_schema -> apply_type_coercion(value, nested_schema)
+    end
+  end
+
+  defp coerce_param(value, param_opts) do
+    coerce_value(value, Keyword.get(param_opts, :type))
   end
 
   defp coerce_value(value, :integer) when is_binary(value) do

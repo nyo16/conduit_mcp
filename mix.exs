@@ -1,7 +1,7 @@
 defmodule ConduitMcp.MixProject do
   use Mix.Project
 
-  @version "0.9.7"
+  @version "0.10.0"
   @source_url "https://github.com/nyo16/conduit_mcp"
 
   def project do
@@ -102,7 +102,7 @@ defmodule ConduitMcp.MixProject do
         "Changelog" => "#{@source_url}/blob/master/CHANGELOG.md",
         "MCP Specification" => "https://modelcontextprotocol.io/specification/"
       },
-      files: ~w(lib .formatter.exs mix.exs README.md CHANGELOG.md LICENSE)
+      files: ~w(lib guides .formatter.exs mix.exs README.md CHANGELOG.md LICENSE)
     ]
   end
 
