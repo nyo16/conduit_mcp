@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Follow-up hardening from a re-review of the 0.9.4–0.9.7 changes (PRs #13–#17).
+
+### Security
+
+- **Owner-scoped `tasks/*` routes (IDOR/BOLA).** The experimental `tasks/get`,
+  `tasks/cancel`, `tasks/result`, and `tasks/list` routes keyed purely on the
+  client-supplied `taskId`, so any caller could read or cancel any task (and
+  `tasks/list` returned every task system-wide). They now scope to the caller's
+  principal via a new owner-aware `ConduitMcp.Tasks` API. Scoping is **opt-in and
+  back-compatible**: a request with no principal, or a task created without an
+  owner, behaves exactly as before; a principal mismatch returns
+  `{:error, :not_found}` without leaking the task's existence. Stamp ownership
+  with `ConduitMcp.Tasks.create/3` and configure principal extraction with
+  `:task_owner_fun` (default `conn.assigns[:current_user]` — return a stable
+  scalar such as `sub`/`id`, since ownership is checked by exact match).
+- **JWKS SSRF posture and stale-key window documented** in the
+  `ConduitMcp.OAuth.KeyProvider.JWKS` moduledoc: `jwks_uri` is trusted operator
+  config (private/link-local addresses are still fetched, not blocked — harden
+  egress if the URI is less-trusted), and during a JWKS outage cached keys keep
+  validating until `:stale_max_age` (default 24h) before failing closed.
+
+### Added
+
+- **`ConduitMcp.Tasks` owner-scoped API** — `create/3`, `get/2`, `cancel/2`,
+  `list/2`, and `owner/1`, plus the configurable `:task_owner_fun`. The
+  `ConduitMcp.Tasks.Store` `@moduledoc` documents the top-level `"owner"`
+  convention; reference stores promote it in `to_map/1`.
+- **Named error codes** `ConduitMcp.Errors.task_not_ready/0` (`-32004`) and
+  `request_cancelled/0` (`-32800`), delegated from `ConduitMcp.Protocol`,
+  replacing magic literals.
+- **`[:conduit_mcp, :cancellation, :cleanup]` telemetry** (measurement
+  `%{removed: count}`) emitted by `ConduitMcp.Cancellation.cleanup/1`, mirroring
+  the session janitor.
+
+### Fixed
+
+- **JWKS ETS cache could crash a concurrent request.** The cache table was
+  created by whichever request first fetched keys and destroyed when that
+  process exited, so a concurrent request could hit an `:ets` `ArgumentError`
+  on the authentication path. The table is now owned by a supervised process
+  (`ConduitMcp.OAuth.KeyProvider.JWKS.Owner`, started from
+  `ConduitMcp.Application`), which also lets the cache persist across requests
+  as intended. Complements the 0.10.0 fix that tolerates losing the
+  check-then-create race.
+
+### Changed
+
+- **Example app (`examples/oban_tasks_server/`) and guide hardening** — the
+  Oban exception→telemetry bridge now marks a task `"failed"` on its final
+  attempt (the previous `job.state` guard never fired, since the state is
+  `"executing"` at exception time); `Tasks.Store.cancel/1` updates the row
+  before cancelling the Oban job (so a failed write can't strand a `"working"`
+  row); client-supplied durations are validated; the Oban dep is pinned to
+  `~> 2.22.0` (raw-SQL coupling to internal tables); a logger note warns that
+  crash metadata can leak job args; and the `guides/oban_tasks.md` worker
+  example is corrected.
+
 ## [0.10.0] - 2026-08-05
 
 ### Security
