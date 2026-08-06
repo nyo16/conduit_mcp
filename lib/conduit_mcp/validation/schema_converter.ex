@@ -15,7 +15,8 @@ defmodule ConduitMcp.Validation.SchemaConverter do
   - `:integer` -> `:integer`
   - `:number` -> `:number` (float)
   - `:boolean` -> `:boolean`
-  - `:object` -> `:map` (with nested validation)
+  - `:object` -> `{:map, :any, :any}` for an open object (no declared fields);
+    `:map` with a nested `keys:` schema when nested fields are declared
   - `:array` -> `{:list, type}` where type is the item type
   - `{:array, item_type}` -> `{:list, converted_item_type}`
 
@@ -31,6 +32,30 @@ defmodule ConduitMcp.Validation.SchemaConverter do
   - `min_length: value` -> `min_length: value`
   - `max_length: value` -> `max_length: value`
   - `validator: function` -> `validator: function`
+
+  ## Nested Objects
+
+  An `:object` param that declares nested fields is converted to
+  `type: :map, keys: [...]`, built by recursing through this same function, so
+  nesting works to any depth and NimbleOptions reports errors with a key path
+  (`in options [:bag, :inner]`).
+
+  Undeclared keys in such an object are rejected unless the param carries
+  `additional_properties: true`. An object with no declared fields is an open
+  bag: `{:map, :any, :any}`, anything accepted.
+
+  Nested keys arrive as strings over JSON-RPC and NimbleOptions' nested
+  validation is atom-key-only, so `ConduitMcp.Validation` atomises nested keys
+  before validating — but only those matching a *declared* field name, which
+  are already interned at compile time. Client input never mints an atom.
+
+  ### Enforcement boundary
+
+  Nested validation covers `:object` params and objects nested inside them.
+  It does **not** cover objects inside `:array` items: NimbleOptions has no
+  way to attach a `keys:` schema to a list element type. Item schemas declared
+  with `items :object do ... end` are published in the JSON Schema for clients
+  but are not enforced server-side beyond `{:list, :any}`.
 
   """
 
@@ -71,19 +96,34 @@ defmodule ConduitMcp.Validation.SchemaConverter do
 
   # Private functions
 
-  defp convert_param_to_nimble_option(%{name: name, type: type, opts: opts}) do
-    base_opts = [type: convert_type(type)]
-    validation_opts = extract_validation_opts(opts)
-
-    {name, base_opts ++ validation_opts}
+  defp convert_param_to_nimble_option(%{name: name, type: type, opts: opts} = param) do
+    {name, type_opts(type, param) ++ extract_validation_opts(opts)}
   end
+
+  # `additional_properties: false` on an object with *no* declared fields is a
+  # deliberate "empty object only" contract, so it takes the `keys:` path with
+  # an empty declared list rather than degrading to an open bag.
+  defp type_opts(:object, param) do
+    nested = Map.get(param, :nested) || []
+    additional = Keyword.get(Map.get(param, :opts) || [], :additional_properties)
+
+    if nested == [] and additional != false do
+      [type: {:map, :any, :any}]
+    else
+      [type: :map, keys: dsl_params_to_nimble_options(nested)]
+    end
+  end
+
+  defp type_opts(type, _param), do: [type: convert_type(type)]
 
   defp convert_type(:string), do: :string
   defp convert_type(:integer), do: :integer
   # NimbleOptions uses :float, not :number
   defp convert_type(:number), do: :float
   defp convert_type(:boolean), do: :boolean
-  defp convert_type(:object), do: :map
+  # `:map` is shorthand for `{:map, :atom, :any}`, which rejects the
+  # string-keyed halves of a JSON object (see RC3 in the object-params plan).
+  defp convert_type(:object), do: {:map, :any, :any}
   defp convert_type(:array), do: {:list, :any}
   defp convert_type({:array, item_type}), do: {:list, convert_type(item_type)}
   defp convert_type(:null), do: :any
@@ -154,11 +194,11 @@ defmodule ConduitMcp.Validation.SchemaConverter do
     acc
   end
 
-  # Nested object fields (for future nested object support)
-  defp convert_validation_opt({:fields, fields}, acc) when is_list(fields) do
-    # Convert nested fields to nested schema
-    nested_schema = dsl_params_to_nimble_options(fields)
-    [{:schema, nested_schema} | acc]
+  # Selects between strict and pass-through semantics for an object's
+  # undeclared keys. Consumed by `ConduitMcp.Validation`, stripped before the
+  # schema reaches NimbleOptions.
+  defp convert_validation_opt({:additional_properties, value}, acc) when is_boolean(value) do
+    [{:additional_properties, value} | acc]
   end
 
   # Unknown options are ignored with a warning
@@ -176,7 +216,7 @@ defmodule ConduitMcp.Validation.SchemaConverter do
   """
   def validate_schema(schema) do
     # Remove custom constraint markers before validating with NimbleOptions
-    clean_schema = remove_custom_constraint_markers(schema)
+    clean_schema = strip_markers(schema)
 
     # Test the schema with empty options to validate its structure
     NimbleOptions.validate([], clean_schema)
@@ -197,22 +237,35 @@ defmodule ConduitMcp.Validation.SchemaConverter do
     :max,
     :min_length,
     :max_length,
-    :enum
+    :enum,
+    :additional_properties
   ]
 
   @doc """
-  Custom constraint markers stored alongside NimbleOptions options.
+  Strips custom constraint markers from a schema, recursing through nested
+  `keys:` schemas.
 
-  Single source of truth — these must be stripped from a schema before
-  handing it to NimbleOptions. Used by `ConduitMcp.Validation`,
+  The markers carry constraints NimbleOptions has no native option for
+  (`enum`, `min`/`max`, length limits, custom validators) plus the
+  `additional_properties` knob. They ride alongside the real options in the
+  *full* schema and must be removed before it reaches NimbleOptions, which
+  rejects unknown option keys — including inside a nested `keys:` schema.
+
+  Single source of truth. Used by `ConduitMcp.Validation`,
   `ConduitMcp.DSL.SchemaBuilder`, and `ConduitMcp.Endpoint`.
   """
-  def custom_constraint_markers, do: @custom_constraint_markers
-
-  defp remove_custom_constraint_markers(schema) do
+  def strip_markers(schema) when is_list(schema) do
     Enum.map(schema, fn {param_name, param_opts} ->
-      {param_name, Keyword.drop(param_opts, @custom_constraint_markers)}
+      {param_name, strip_param_markers(param_opts)}
     end)
+  end
+
+  def strip_markers(_schema), do: []
+
+  defp strip_param_markers(param_opts) do
+    param_opts
+    |> Keyword.drop(@custom_constraint_markers)
+    |> Keyword.replace_lazy(:keys, &strip_markers/1)
   end
 
   @doc """
@@ -269,7 +322,7 @@ defmodule ConduitMcp.Validation.SchemaConverter do
         {:ok,
          [
            %{
-             parameter: field_name,
+             parameter: qualify_with_key_path(field_name, message),
              value: nil,
              message: "is required"
            }
@@ -277,6 +330,23 @@ defmodule ConduitMcp.Validation.SchemaConverter do
 
       nil ->
         {:error, :no_field_found}
+    end
+  end
+
+  # For a nested schema NimbleOptions appends the enclosing key path, e.g.
+  # `(in options [:bag, :inner])`. Fold it into the parameter name so a nested
+  # failure names the field the client actually sent (`bag.inner.city`) rather
+  # than an ambiguous bare `city`.
+  defp qualify_with_key_path(field_name, message) do
+    case Regex.run(~r/\(in options \[(.+?)\]\)/, message) do
+      [_, path] ->
+        path
+        |> String.split(",")
+        |> Enum.map_join(".", &String.trim_leading(String.trim(&1), ":"))
+        |> Kernel.<>("." <> field_name)
+
+      nil ->
+        field_name
     end
   end
 

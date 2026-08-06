@@ -53,6 +53,8 @@ defmodule ConduitMcp.Endpoint do
   existing `ConduitMcp.Handler` and all transports without modification.
   """
 
+  alias ConduitMcp.Validation.SchemaConverter
+
   @doc """
   Registers a component module with the endpoint.
 
@@ -415,9 +417,6 @@ defmodule ConduitMcp.Endpoint do
     end
   end
 
-  # Single source of truth lives in SchemaConverter (resolved at compile time).
-  @custom_constraint_markers ConduitMcp.Validation.SchemaConverter.custom_constraint_markers()
-
   @doc false
   # URI template param names are compile-time-defined atoms; an unknown name
   # means the URI matched a different shape — treat as no-match, don't crash.
@@ -431,7 +430,7 @@ defmodule ConduitMcp.Endpoint do
     Enum.map(tools, fn mod ->
       name = mod.__component_name__()
       schema = mod.__validation_schema__()
-      clean_schema = strip_markers(schema)
+      clean_schema = SchemaConverter.strip_markers(schema)
 
       quote do
         def __validation_schema_for_tool__(unquote(name)) do
@@ -445,7 +444,7 @@ defmodule ConduitMcp.Endpoint do
     Enum.map(prompts, fn mod ->
       name = mod.__component_name__()
       schema = mod.__validation_schema__()
-      clean_schema = strip_markers(schema)
+      clean_schema = SchemaConverter.strip_markers(schema)
 
       quote do
         def __validation_schema_for_prompt__(unquote(name)) do
@@ -454,14 +453,6 @@ defmodule ConduitMcp.Endpoint do
       end
     end)
   end
-
-  defp strip_markers(schema) when is_list(schema) do
-    Enum.map(schema, fn {param_name, param_opts} ->
-      {param_name, Keyword.drop(param_opts, @custom_constraint_markers)}
-    end)
-  end
-
-  defp strip_markers(_), do: []
 
   defp build_scope_map(tools) do
     Enum.reduce(tools, %{}, fn mod, acc ->

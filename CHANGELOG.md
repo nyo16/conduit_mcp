@@ -105,6 +105,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`examples/oban_tasks_server/`** — runnable example demonstrating
   the same lifecycle backed by Oban + SQLite for durability, with the
   `input_required` state exercised via `{:snooze, _}`.
+- **Object parameters actually work.** `:object` params (`ConduitMcp.DSL`) and
+  `:object` fields (`ConduitMcp.Component.Schema`) were dead code: every
+  declaration form crashed at compile time, and the one shape that compiled was
+  rejected at runtime by the validator. All forms now compile and validate —
+  blockless (open) objects, block objects with declared fields, objects nested
+  in objects, and `items :object` inside an `:array`.
+- **Nested runtime validation.** A declared object's nested fields are now
+  enforced by NimbleOptions to any depth: required fields, types, and the
+  custom constraints (`enum`, `min`/`max`, length limits, `validator`). Errors
+  name the full path (`bag.inner.city`). Undeclared nested keys are rejected
+  with an actionable message instead of NimbleOptions' `expected atom, got:
+  "zzz"`. Nested keys are atomised only when they match a *declared* field
+  name, so client input can never mint an atom.
+- **`additional_properties:` option** for `:object` params and fields —
+  `true` enforces the declared fields and passes undeclared keys through to the
+  handler; `false` (the default once fields are declared) rejects them. It also
+  drives `"additionalProperties"` in the generated JSON Schema, which is now
+  always emitted for objects so the published schema matches what the server
+  enforces.
+- **`items/1,2` in `ConduitMcp.Component.Schema`** — component-mode array
+  fields had no way to declare an item type at all, and a bare `field` inside
+  an `:array` block silently corrupted the parent field list. `items` is now
+  the only thing an `:array` block accepts.
+- **3-arg (and 2-arg) block forms** — `param :bag, :object, "desc" do ... end`
+  and `field :bag, :object do ... end` used to bind to the blockless clause
+  (`[do: ...]` is a keyword list), silently discarding the block; the form the
+  `field/4` docs themselves showed was broken. Both now work in both DSLs. A
+  block on a type that has no block form raises a `CompileError` naming the
+  file and line.
 
 ### Fixed
 

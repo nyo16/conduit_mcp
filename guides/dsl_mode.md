@@ -120,6 +120,33 @@ All of these are macros imported automatically:
 
 Validation is generated automatically from `param` options. See the README for the full constraints table.
 
+## Object and Array Parameters
+
+```elixir
+tool "create_user", "Create a user" do
+  param :user, :object, "User data", required: true do
+    field :name, :string, "Full name", required: true
+    field :address, :object, "Address" do
+      field :city, :string, "City", required: true
+    end
+  end
+
+  param :tags, :array, "Tags" do
+    items :string
+  end
+
+  handle fn _conn, params ->
+    text(params["user"]["address"]["city"])
+  end
+end
+```
+
+Nested fields are enforced to any depth and undeclared keys are rejected. Drop
+the block for an open object (any keys accepted), or pass
+`additional_properties: true` to enforce declared fields and pass the rest
+through. Array item schemas are published for clients but not enforced
+server-side. Handlers receive string keys at every depth.
+
 ## Custom Validators
 
 ```elixir

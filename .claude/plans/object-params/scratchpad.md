@@ -135,3 +135,77 @@ Four things this settled:
 Branched `fix/object-params` off `master`. Independent of the seven pending `deps/*`
 branches from the dependency update — disjoint file sets (`mix.lock` vs `lib/`), so no
 conflict either way. Land order does not matter.
+
+## Findings from implementation (all 5 phases, one session)
+
+1. **`Component.Schema` DID have RC1 — at depth ≥ 2.** The plan called it the reference
+   implementation. True for one level: its `:object` block clause put
+   `:__component_nested_fields` to `[]` without saving the enclosing scope, and always
+   pushed the finished field into `:component_fields`. So `field :bag, :object do ... field
+   :inner, :object do ... end ... end` wiped the parent's siblings, leaked `inner` into the
+   top-level field list, and then crashed on `Enum.reverse(nil)`. Verified against `HEAD`
+   by loading the old module over the new one: `Protocol.UndefinedError`, `Enumerable not
+   implemented for Atom`. Fixed with an explicit scope save/restore
+   (`__open_nested_scope__/1` + `__close_nested_scope__/2`) and a single
+   `__push_field__/3` choke point, which is also where RC6's bare-`field`-in-`:array`-block
+   rejection lives.
+
+2. **The arity trap is wider than the plan's two sites.** `ConduitMcp.DSL.field/4` has it
+   too — and the `field/4` moduledoc's own example (`field :address, :object, "Address" do`)
+   was one of the broken forms. Also fixed the 2-arg form (`param :bag, :object do ... end`),
+   which otherwise *evaluates the block into the description*. An explicit `param/3`
+   clause is impossible (`def param/3 conflicts with defaults from param/4`), so the 2-arg
+   form is caught by a `param/4` clause matching `[{:do, _}]` in the **description**
+   position.
+
+3. **Custom-constraint markers are spec-invalid inside a NimbleOptions `keys:` schema.**
+   `keys: [name: [type: :string, __min_length__: 2]]` raises
+   `unknown options [:__min_length__]`. So marker stripping had to become recursive — which
+   surfaced that the identical `Keyword.drop` was duplicated in **four** modules
+   (`SchemaConverter`, `SchemaBuilder`, `Validation`, `Endpoint`), each reading a
+   `@custom_constraint_markers` copied at compile time. All four now call the single
+   `SchemaConverter.strip_markers/1`; `custom_constraint_markers/0` is gone.
+
+4. **Nested custom constraints were unenforced too, not just nested `required`/types.**
+   `validate_custom_constraints/2` only walked the top level. It now recurses into declared
+   nested objects, carrying a dotted path, so `enum`/`min`/`max`/length/`validator` work at
+   depth and errors read `bag.inner.zip`.
+
+5. **`additional_properties: true` cannot be expressed in NimbleOptions at all.** Its
+   `keys:` schema rejects anything undeclared and its `keys: [*: ...]` wildcard is atom-only
+   (already in the probe table), so "declared fields enforced + extras allowed" is not a
+   schema you can write. Implemented as prune-then-remerge: undeclared keys are dropped in
+   `normalize_object/3` before validation and merged back from the original request in
+   `restore_additional_properties/3`. Declared keys keep the validated value, so nested
+   defaults survive. This is the only reason the original `params` are threaded that far.
+
+6. **`additionalProperties` must always be emitted for objects.** JSON Schema's implicit
+   default is *allow*, but the validator's default once fields are declared is *reject*.
+   Omitting the key would have published a schema that contradicts enforcement. Defaults:
+   `false` with declared fields, `true` without. And an explicit
+   `additional_properties: false` on a fieldless object now takes the `keys: []` path so
+   "no keys at all" is actually enforced instead of being advertised and ignored.
+
+7. **Nested `required` errors lost the path.** NimbleOptions puts it in the message suffix
+   (`(in options [:bag, :inner])`), which the existing regex parser dropped, so a nested
+   failure reported a bare `city`. `qualify_with_key_path/2` folds it in.
+
+8. **Objects inside `:array` items are not enforceable** — NimbleOptions has no spec for
+   attaching `keys:` to a list element type. Left unenforced rather than hand-rolling a
+   second validation path (which is what B3 was rejected for), and stated as a limitation
+   in the `SchemaConverter` moduledoc, both DSL moduledocs, the README, and both guides.
+   This is the one place the published JSON Schema still describes more than the server
+   checks, and it is now documented rather than silent.
+
+### Dialyzer
+
+`normalize_params/2` and `restore_additional_properties/3` were written with defensive
+non-map fallback clauses; dialyzer flagged both as unreachable (`pattern_match_cov`) because
+`validate_tool_params/3` already guards `is_map(params)`. Removed — baseline was clean and
+had to stay clean.
+
+### Prompt path
+
+Prompt `arg` defs (`dsl.ex` `arg/4`) carry **no** `:nested` key at all, and
+`validation_test.exs` builds param maps by hand without one. Hence
+`convert_param_to_nimble_option/1` reads it with `Map.get/2`, never a destructure.

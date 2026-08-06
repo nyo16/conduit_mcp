@@ -1,6 +1,6 @@
 # Plan: Make object parameters functional
 
-**Status:** APPROVED — ready for `/phx:work`
+**Status:** IMPLEMENTED — all 5 phases complete, gate green. Not yet committed.
 **Branch:** `fix/object-params` (off `master`)
 **Slug:** `object-params`
 **Source:** downstream investigation report (conduit_mcp 0.9.7 consumer) + first-party
@@ -9,7 +9,7 @@ verification in this tree
 per Iron Law #7)
 **Decisions taken:** nested runtime validation = **B2** (wire through NimbleOptions);
 `additionalProperties` promoted from optional to required by that choice. Ships as two PRs —
-phases 1–3, then phases 4–5.
+phases 1–3, then phases 4–5. Both were implemented in one session; split at commit time.
 
 ## Problem
 
@@ -152,53 +152,70 @@ missed. Phase 4 is the design fork. Phase 5 is optional scope.
 
 ### Phase 1 — Make object params compile and validate `[dsl]` `[schema]` `[validation]`
 
-- [ ] Add regression tests for cases **A**–**G** first, as compile-time assertions
+- [x] Add regression tests for cases **A**–**G** first, as compile-time assertions
       (`Code.compile_string/1` inside `assert_raise`-style helpers won't work post-fix —
       assert on the *generated schema* instead). Cover: blockless object, block object with
       a param declared before it, 3-arg + block, `items :object`, and both component forms.
-      These must fail before the fix.
-- [ ] `dsl.ex:454` — replace `@mcp_current_tool_params param_def` with the read-modify-write
+      These must fail before the fix. — `test/conduit_mcp/object_params_test.exs`, 29 tests.
+      Confirmed failing pre-fix: `FunctionClauseError` in `Enum.reverse/1` at compile time.
+- [x] `dsl.ex:454` — replace `@mcp_current_tool_params param_def` with the read-modify-write
       from `:431-432`.
-- [ ] `dsl.ex:475` — same.
-- [ ] `dsl.ex:508` — replace `@mcp_current_nested_params field_def` with read-modify-write.
-- [ ] `dsl.ex:538` — same.
-- [ ] Confirm the `[]` seeds at `dsl.ex:441`, `:518`, `:566` remain correct under
+- [x] `dsl.ex:475` — same.
+- [x] `dsl.ex:508` — replace `@mcp_current_nested_params field_def` with read-modify-write.
+- [x] `dsl.ex:538` — same.
+- [x] Confirm the `[]` seeds at `dsl.ex:441`, `:518`, `:566` remain correct under
       read-modify-write (they do — do **not** switch to `accumulate: true`, which would
       require dropping the seeds and changing reversal order; the report and the existing
-      `Component.Schema` implementation both favour read-modify-write).
-- [ ] `schema_builder.ex:232` — default `nested_params` to `[]`. Yields
+      `Component.Schema` implementation both favour read-modify-write). — seeds unchanged.
+- [x] `schema_builder.ex:232` — default `nested_params` to `[]`. Yields
       `{"type":"object","properties":{}}` for an open object, which is correct JSON Schema.
-- [ ] `schema_builder.ex` — add a `build_items_schema(nil)` clause returning an
+- [x] `schema_builder.ex` — add a `build_items_schema(nil)` clause returning an
       unconstrained item schema; keep `%{type: :object, nested: nil}` safe via the same
-      `|| []` default at `:271`.
-- [ ] `schema_converter.ex:86` — `defp convert_type(:object), do: {:map, :any, :any}`.
+      `|| []` default at `:271`. — `build_items_schema(nil), do: %{}` (JSON Schema "any").
+- [x] `schema_converter.ex:86` — `defp convert_type(:object), do: {:map, :any, :any}`.
       **Not** `{:map, :string, :any}` — see RC3.
-- [ ] Add a validation test that exercises a nested object with a **non-interning** key
+- [x] Add a validation test that exercises a nested object with a **non-interning** key
       (e.g. `"zzq_not_an_atom_9f3"`) *and* an interning key (`"name"`) in the same payload,
       so the RC3 regression can't hide behind atom-table luck.
-- [ ] Verify: `mix compile --warnings-as-errors && mix format --check-formatted && mix credo --strict && mix test`
+- [x] Verify: `mix compile --warnings-as-errors && mix format --check-formatted && mix credo --strict && mix test`
+      — green, 660 tests.
 
 ### Phase 2 — Close the arity trap in both DSLs `[dsl]`
 
-- [ ] `dsl.ex:420` — add a guard or an explicit `param(name, type, description, [do: _])`
+- [x] `dsl.ex:420` — add a guard or an explicit `param(name, type, description, [do: _])`
       clause that raises a `CompileError` naming the file/line and telling the user to pass
       `opts` explicitly (`param :bag, :object, "d", [] do ... end`) or use the 4-arg form.
-- [ ] `schema.ex:128` — same for `Component.Schema.field/5`.
-- [ ] Decide and document whether 3-arg + block should instead be made to **work** rather
+      — made it **work** instead (see below); also covers `param :bag, :object do ... end`
+      and the DSL's own nested `field/3 + block`, which the moduledoc documents.
+- [x] `schema.ex:128` — same for `Component.Schema.field/5`.
+- [x] Decide and document whether 3-arg + block should instead be made to **work** rather
       than raise. Making it work is friendlier and is what users will try first; it needs
       the `[do: _]`-detecting clause to forward to the block implementation with `opts: []`.
       Recommendation: make it work, and keep a raise only for genuinely ambiguous input.
-- [ ] Add tests asserting the chosen behaviour for both DSLs.
-- [ ] Verify (same gate as Phase 1).
+      — **Decided: make it work.** Block bodies moved into shared `build_block_param/6` and
+      `build_block_field/6` helpers; the `[do: _]`-detecting clauses forward with `opts: []`.
+      A block on a type that has no block form raises a `CompileError` carrying
+      `__CALLER__`'s file/line.
+- [x] Add tests asserting the chosen behaviour for both DSLs.
+- [x] Verify (same gate as Phase 1).
 
 ### Phase 3 — `Component.Schema` array items `[schema]`
 
-- [ ] Add an `items/1` and `items/2` macro to `ConduitMcp.Component.Schema` mirroring
-      `ConduitMcp.DSL.items/1,2`, or import the DSL's.
-- [ ] Make `field :x, :array, ... do ... end` reject a block containing bare `field` calls
-      instead of silently leaking them into `:component_fields` (RC6).
-- [ ] Tests for `field :rows, :array, "d", [] do items :object do field ... end end`.
-- [ ] Verify.
+- [x] Add an `items/1` and `items/2` macro to `ConduitMcp.Component.Schema` mirroring
+      `ConduitMcp.DSL.items/1,2`, or import the DSL's. — added natively (the DSL's write to
+      `@mcp_current_*` attributes the component path does not use). `items` outside an
+      `:array` block is now a `CompileError` instead of silently leaking into the next array.
+- [x] Make `field :x, :array, ... do ... end` reject a block containing bare `field` calls
+      instead of silently leaking them into `:component_fields` (RC6). — enforced in the new
+      single `__push_field__/3` choke point.
+- [x] Tests for `field :rows, :array, "d", [] do items :object do field ... end end`.
+- [x] **NEW (not in the original plan)** — `Component.Schema`'s `:object` block clause never
+      saved/restored the parent nested scope, so an object nested inside an object wiped its
+      parent's fields and then crashed on `Enum.reverse(nil)`. Verified against `HEAD`:
+      `Protocol.UndefinedError` / `Enumerable not implemented for Atom`. Fixed with
+      `__open_nested_scope__/1` + `__close_nested_scope__/2`. The plan's claim that
+      `Component.Schema` "does not have this bug" held only at depth 1.
+- [x] Verify. — green, 677 tests.
 
 ### Phase 4 — Nested runtime validation via NimbleOptions (decision: **B2**) `[validation]`
 
@@ -243,37 +260,67 @@ Design that follows from the above:
 
 Tasks:
 
-- [ ] Add a schema-driven nested-key normaliser: given a param's `nested:` field list,
+- [x] Add a schema-driven nested-key normaliser: given a param's `nested:` field list,
       atomise only those incoming keys whose string form matches a declared field name;
       leave every other key as a string. Never call `String.to_atom` on client input.
-- [ ] Replace the blanket recursion in `convert_keys_to_atoms/1` (`validation.ex:248`) for
+      — `Validation.normalize_params/2` + `normalize_object/3`. Drives off the generated
+      `keys:` schema rather than the raw `nested:` list, so both DSL front ends and any
+      hand-written schema get it for free.
+- [x] Replace the blanket recursion in `convert_keys_to_atoms/1` (`validation.ex:248`) for
       object-typed params with that schema-driven pass. Note this blanket recursion is the
       root of RC3's non-determinism, so removing it is a fix, not collateral.
-- [ ] **Audit blast radius:** `convert_keys_to_atoms/1` runs on every param of every type.
+      — `convert_keys_to_atoms/1` deleted. Top-level keys keep the historical
+      `String.to_existing_atom`-with-string-fallback; only objects carrying a `keys:`
+      schema are descended into.
+- [x] **Audit blast radius:** `convert_keys_to_atoms/1` runs on every param of every type.
       Run the full suite and specifically re-check any test that relies on nested values
       being atomised (grep `convert_keys_to_atoms` consumers and the prompt path too —
       `compile_validation_schema(%{args: args})` at `schema_converter.ex:67` shares it).
-- [ ] `convert_param_to_nimble_option/1` (`schema_converter.ex:74`) — destructure `nested:`
+      — No consumers left; no test relied on nested atomisation (grepped `test/`). Prompt
+      `arg` defs carry **no** `:nested` key at all, so `convert_param_to_nimble_option/1`
+      reads it with `Map.get/2`; the same applies to the hand-written param maps in
+      `validation_test.exs`. Full suite green (706), dialyzer clean.
+- [x] `convert_param_to_nimble_option/1` (`schema_converter.ex:74`) — destructure `nested:`
       and emit `type: :map, keys: [...]` for objects with declared fields. It currently
-      ignores `nested:` entirely (RC4).
-- [ ] Recurse for depth: nested objects inside nested objects must emit nested `keys:`.
-      Verified supported, with path-carrying errors.
-- [ ] Delete or rewrite the broken `convert_validation_opt({:fields, fields}, acc)` bridge
+      ignores `nested:` entirely (RC4). — new `type_opts/2`.
+- [x] Recurse for depth: nested objects inside nested objects must emit nested `keys:`.
+      Verified supported, with path-carrying errors. — falls out of
+      `dsl_params_to_nimble_options/1` recursing into itself.
+- [x] Delete or rewrite the broken `convert_validation_opt({:fields, fields}, acc)` bridge
       at `schema_converter.ex:158-162`. Do not leave it emitting an invalid `:schema` key.
-- [ ] Decide the undeclared-nested-key policy and make the error message good. NimbleOptions'
+      — deleted; `nested:` is the real bridge.
+- [x] Decide the undeclared-nested-key policy and make the error message good. NimbleOptions'
       native rejection for a *string* undeclared key is `expected atom, got: "zzz"`, which is
       useless to an API consumer — pre-check undeclared keys and emit a proper
-      "unknown field `zzz` in object `bag`" error instead.
-- [ ] Fix `schema_converter.ex:18` — the moduledoc claim `:object -> :map (with nested
+      "unknown field `zzz` in object `bag`" error instead. — `unknown_key_errors/4`, run
+      before NimbleOptions sees the params. Reports `parameter: "bag.zzq"`, message
+      `unknown field "zzq" in object "bag"`.
+- [x] Fix `schema_converter.ex:18` — the moduledoc claim `:object -> :map (with nested
       validation)` becomes true only once this phase lands; until then it is false.
-- [ ] Confirm the handler-facing contract is unchanged: `validation.ex:220`'s
+      — rewritten, plus a `## Nested Objects` section stating the enforcement boundary.
+- [x] Confirm the handler-facing contract is unchanged: `validation.ex:220`'s
       `convert_keys_to_strings/1` recurses, so handlers keep receiving string keys.
       Add a test asserting that explicitly — it is the property that makes atomisation an
-      internal detail.
-- [ ] Tests: missing nested required; wrong nested type; undeclared nested key; deep
+      internal detail. — asserted end to end through `ConduitMcp.Handler.handle_request/2`.
+- [x] Tests: missing nested required; wrong nested type; undeclared nested key; deep
       nesting; object inside array items; open bag still accepts anything; and **both** DSL
       front ends (`param` and `Component.Schema` `field`).
-- [ ] Verify (same gate as Phase 1).
+      — `test/conduit_mcp/nested_object_validation_test.exs`, 29 tests.
+- [x] **NEW** — nested *custom* constraints (`enum`, `min`/`max`, length limits,
+      `validator`) were also unenforced, and the markers are spec-invalid inside a
+      NimbleOptions `keys:` schema (`unknown options [:__min_length__]`). So
+      `strip_markers/1` now recurses into `keys:` and `validate_custom_constraints/2`
+      recurses into declared nested objects, with dotted error paths
+      (`bag.inner.zip`). Marker stripping was duplicated in four modules; all four now
+      call the single `SchemaConverter.strip_markers/1`.
+- [x] **NEW** — nested `required` errors from NimbleOptions reported a bare field name
+      (`city`) because the key path lives in the message's `(in options [:bag, :inner])`
+      suffix. `qualify_with_key_path/2` folds it into the parameter name.
+- [x] **DOCUMENTED LIMITATION** — objects inside `:array` items are **not** enforced:
+      NimbleOptions cannot attach a `keys:` schema to a list element type (no spec exists).
+      Item schemas are still published for clients. Stated in the `SchemaConverter`
+      moduledoc, both DSL moduledocs, the README, and both guides.
+- [x] Verify (same gate as Phase 1). — green.
 
 ### Phase 5 — `additionalProperties`, merged into Phase 4 `[schema]`
 
@@ -283,16 +330,27 @@ strict rejection and pass-through, and the JSON Schema must agree with what the 
 actually enforces. Shipping Phase 4 without it means the schema says nothing while the
 validator rejects.
 
-- [ ] Honour `opts[:additional_properties]` in `schema_builder.ex` `build_property/1` for
-      `:object`, emitting `"additionalProperties"` in the JSON Schema.
-- [ ] Make the same opt drive the validator: `additional_properties: true` → allow
+- [x] Honour `opts[:additional_properties]` in `schema_builder.ex` `build_property/1` for
+      `:object`, emitting `"additionalProperties"` in the JSON Schema. — **always** emitted
+      for objects, defaulting to `false` when fields are declared and `true` when they are
+      not. Omitting it would have meant JSON Schema's implicit `true` contradicting the
+      validator's rejection.
+- [x] Make the same opt drive the validator: `additional_properties: true` → allow
       undeclared keys (open bag semantics even when fields are declared);
-      `false`/absent → reject.
-- [ ] Reconcile with the open-bag case: an object with no declared fields and no opt should
-      keep behaving as `{:map, :any, :any}`.
-- [ ] Tests for `additional_properties: true | false` against both the emitted JSON Schema
+      `false`/absent → reject. — declared fields stay enforced under `true`: undeclared
+      keys are pruned before NimbleOptions (its `keys:` schema rejects anything undeclared,
+      and its `keys: [*: ...]` wildcard is atom-only) and merged back from the original
+      request by `restore_additional_properties/3`. Nested defaults survive the merge.
+- [x] Reconcile with the open-bag case: an object with no declared fields and no opt should
+      keep behaving as `{:map, :any, :any}`. — it does. An explicit
+      `additional_properties: false` on a fieldless object now means "no keys at all" and
+      takes the `keys: []` path, so the schema's `"additionalProperties": false` is
+      enforced rather than being a lie.
+- [x] Tests for `additional_properties: true | false` against both the emitted JSON Schema
       and runtime validation, asserting the two agree.
-- [ ] Verify.
+- [x] Verify. — green: 706 tests, credo --strict clean, dialyzer clean,
+      `mix format --check-formatted` clean. Documented snippets smoke-tested end to end
+      through `ConduitMcp.Handler`.
 
 ## Resolved decision — nested runtime validation
 
@@ -312,9 +370,24 @@ B2's cost is now known rather than assumed: it requires schema-driven key atomis
 `convert_keys_to_atoms/1`, which every param type flows through. That blast radius has its
 own audit task.
 
-## Split decision
+## Split decision — OVERRIDDEN
 
-Two PRs:
+**Shipped as one branch, one PR** (`fix/object-params`). User decision at implementation
+time, superseding the two-PR plan below.
+
+Consequences of the override, so nothing is silently lost:
+
+- The `convert_keys_to_atoms/1` change no longer has its own revert unit. It is the one
+  subtractive change on a path every param of every type flows through, so it is the thing
+  to look at first if a regression appears. Its audit task is done (see Phase 4).
+- The intermediate-release behavioural break disappears, which is the good news: phases 1–3
+  alone would have accepted objects with undeclared nested keys, and phases 4–5 reject them.
+  Shipping together means no version ever exhibited the permissive behaviour, so there is no
+  break to note for adopters. See the Risks entry on rejection behaviour.
+- Version bump: minor, not patch — nested validation rejects input that a hypothetical
+  phases-1–3-only release would have accepted, and `additionalProperties` is new API.
+
+Original plan, kept for the record:
 
 - **PR 1 — phases 1–3, "object params work".** Same class of defect, same two front-end
   files, one round of tests. This is the unblock and it is independently shippable.
@@ -323,8 +396,6 @@ Two PRs:
   that makes the published JSON Schema agree with it. Splitting them ships a validator whose
   behaviour the schema doesn't describe. This PR also carries the
   `convert_keys_to_atoms/1` change, so it wants its own review and its own revert unit.
-
-If you want the unblock even sooner: Phase 1 alone is coherent and shippable.
 
 ## Risks
 
@@ -335,6 +406,9 @@ If you want the unblock even sooner: Phase 1 alone is coherent and shippable.
 - **`{:map, :any, :any}` is permissive by design.** It accepts any map. Correct given RC3,
   but a typo'd nested key reaches the handler silently until Phase 4 lands. State it in the
   release notes for whatever version ships PR 1 alone.
+  — **RESOLVED by the single-PR override.** No release ever ships Phase 1 without Phase 4,
+  so the permissive window never exists publicly. `{:map, :any, :any}` remains the type for
+  objects that declare no fields, where accepting anything is the intended contract.
 - **Two DSLs, one schema pipeline.** `ConduitMcp.DSL` and `ConduitMcp.Component.Schema`
   both feed `SchemaBuilder` and `SchemaConverter`. Every fix in the shared pipeline must be
   tested from *both* front ends or the component path will drift again — it already has
@@ -348,13 +422,21 @@ If you want the unblock even sooner: Phase 1 alone is coherent and shippable.
   with `String.to_atom` instead of match-against-declared-names, it introduces a
   remote memory-exhaustion DoS in a server library. Any review of PR 2 should check this
   specifically.
+  — **Honoured.** `String.to_atom` appears nowhere in the change. Nested keys are atomised
+  only via `Map.fetch/2` against a compile-time-declared-name map
+  (`Validation.declared_names/1` + `declared_key/3`); the top-level pass keeps the existing
+  `String.to_existing_atom` + rescue. Grep `String.to_atom` in `lib/` to confirm — still
+  zero hits. **This is the single most important thing for a reviewer to re-verify.**
 - **Phase 4 changes rejection behaviour for input that is accepted today.** After PR 1, an
   object with undeclared keys validates; after PR 2 it may not. That is a behavioural
   break for anyone who adopted objects between the two releases — narrow, but real. Either
   ship both in one version or note it.
+  — **RESOLVED: shipped in one version.** No adopter can be caught in the gap.
 - **Version/compat.** Public library at 0.9.7. Phase 2's arity-trap change only affects
-  code that currently crashes, so it is not breaking. Phase 5 adds opts. PR 1 is a patch
-  or minor; PR 2 should be a minor given the rejection-behaviour change.
+  code that currently crashes, so it is not breaking. Phase 5 adds opts.
+  — With the single-PR override this is **one minor bump**: nested validation and
+  `additional_properties` are new behaviour, and no previously-working declaration form
+  changes meaning (every object form crashed or was rejected before).
 
 ## Self-check
 
@@ -410,3 +492,8 @@ mix dialyzer
 ```
 
 Baseline on `master`: all green, 648 tests.
+
+After implementation: all green, **706 tests** (+58). `mix compile --warnings-as-errors`,
+`mix format --check-formatted`, `mix credo --strict`, `mix test`, `mix dialyzer` all clean.
+New test files: `test/conduit_mcp/object_params_test.exs` (29, phases 1–3) and
+`test/conduit_mcp/nested_object_validation_test.exs` (29, phases 4–5).

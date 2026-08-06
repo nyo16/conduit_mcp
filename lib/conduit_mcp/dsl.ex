@@ -393,6 +393,48 @@ defmodule ConduitMcp.DSL do
   - `:max_length` - Maximum string length
   - `:validator` - Custom validation function `fn(value) -> boolean()`
 
+  ## Object Options
+
+  - `:additional_properties` - Whether keys the block did not declare are
+    accepted. Defaults to `false` when the object declares fields and `true`
+    when it does not. Also drives `"additionalProperties"` in the generated
+    JSON Schema, so the published schema always matches what is enforced.
+
+  ## Object and Array Parameters
+
+  Pass a block to declare structure. Nested fields are enforced at runtime to
+  any depth — required, types, and every constraint above — and undeclared keys
+  are rejected. `opts` may be omitted; `param :bag, :object do ... end` and
+  `param :bag, :object, "desc" do ... end` both work.
+
+      # Nested object, enforced
+      param :user, :object, "User data", required: true do
+        field :name, :string, "Full name", required: true
+        field :address, :object, "Address" do
+          field :city, :string, "City", required: true
+        end
+      end
+
+      # Open object — any keys, nothing enforced
+      param :metadata, :object, "Arbitrary metadata"
+
+      # Declared fields enforced, everything else passed through
+      param :bag, :object, "Bag", additional_properties: true do
+        field :name, :string, "Name", required: true
+      end
+
+      # Array item type
+      param :rows, :array, "Rows" do
+        items :object do
+          field :id, :integer, "Row id", required: true
+        end
+      end
+
+  Array item schemas are published for clients but not enforced server-side:
+  NimbleOptions cannot attach a nested schema to a list element type.
+
+  Handlers always receive string keys, at every depth.
+
   ## Examples
 
       # Basic validation
@@ -417,6 +459,19 @@ defmodule ConduitMcp.DSL do
   """
   defmacro param(name, type, description \\ nil, opts \\ [])
 
+  # Elixir appends a `do` block as a trailing `[do: ...]` keyword list, so
+  # `param :bag, :object do ... end` and `param :bag, :object, "desc" do ... end`
+  # both arrive as `param/4` with a list that satisfies `is_list(opts)`. Without
+  # these two clauses they bind to the blockless clause below, which evaluates
+  # the block into `:description`/`:opts` and silently drops the nested fields.
+  defmacro param(name, type, [{:do, nested_block}], []) do
+    build_block_param(name, type, nil, [], nested_block, __CALLER__)
+  end
+
+  defmacro param(name, type, description, [{:do, nested_block}]) do
+    build_block_param(name, type, description, [], nested_block, __CALLER__)
+  end
+
   defmacro param(name, type, description, opts) when is_list(opts) do
     quote do
       param_def = %{
@@ -436,7 +491,11 @@ defmodule ConduitMcp.DSL do
   @doc """
   Defines a parameter with nested fields (for objects) or items (for arrays).
   """
-  defmacro param(name, type, description, opts, do: nested_block) when type == :object do
+  defmacro param(name, type, description, opts, do: nested_block) do
+    build_block_param(name, type, description, opts, nested_block, __CALLER__)
+  end
+
+  defp build_block_param(name, :object, description, opts, nested_block, _caller) do
     quote do
       @mcp_current_nested_params []
 
@@ -451,13 +510,14 @@ defmodule ConduitMcp.DSL do
         items: nil
       }
 
-      @mcp_current_tool_params param_def
+      current_params = Module.get_attribute(__MODULE__, :mcp_current_tool_params) || []
+      Module.put_attribute(__MODULE__, :mcp_current_tool_params, [param_def | current_params])
 
       Module.delete_attribute(__MODULE__, :mcp_current_nested_params)
     end
   end
 
-  defmacro param(name, type, description, opts, do: nested_block) when type == :array do
+  defp build_block_param(name, :array, description, opts, nested_block, _caller) do
     quote do
       @mcp_current_array_items nil
 
@@ -472,10 +532,20 @@ defmodule ConduitMcp.DSL do
         items: @mcp_current_array_items
       }
 
-      @mcp_current_tool_params param_def
+      current_params = Module.get_attribute(__MODULE__, :mcp_current_tool_params) || []
+      Module.put_attribute(__MODULE__, :mcp_current_tool_params, [param_def | current_params])
 
       Module.delete_attribute(__MODULE__, :mcp_current_array_items)
     end
+  end
+
+  defp build_block_param(name, type, _description, _opts, _nested_block, caller) do
+    raise CompileError,
+      file: caller.file,
+      line: caller.line,
+      description:
+        "param #{Macro.to_string(name)}: the block form is only supported for " <>
+          ":object and :array params, got: #{Macro.to_string(type)}"
   end
 
   @doc """
@@ -494,6 +564,15 @@ defmodule ConduitMcp.DSL do
   """
   defmacro field(name, type, description \\ nil, opts \\ [])
 
+  # Same trailing-`[do: ...]` trap as `param/4` — see the comment there.
+  defmacro field(name, type, [{:do, nested_block}], []) do
+    build_block_field(name, type, nil, [], nested_block, __CALLER__)
+  end
+
+  defmacro field(name, type, description, [{:do, nested_block}]) do
+    build_block_field(name, type, description, [], nested_block, __CALLER__)
+  end
+
   defmacro field(name, type, description, opts) when is_list(opts) do
     quote do
       field_def = %{
@@ -505,11 +584,16 @@ defmodule ConduitMcp.DSL do
         items: nil
       }
 
-      @mcp_current_nested_params field_def
+      current_nested = Module.get_attribute(__MODULE__, :mcp_current_nested_params) || []
+      Module.put_attribute(__MODULE__, :mcp_current_nested_params, [field_def | current_nested])
     end
   end
 
-  defmacro field(name, type, description, opts, do: nested_block) when type == :object do
+  defmacro field(name, type, description, opts, do: nested_block) do
+    build_block_field(name, type, description, opts, nested_block, __CALLER__)
+  end
+
+  defp build_block_field(name, :object, description, opts, nested_block, _caller) do
     quote do
       # Save current nested params
       parent_nested = Module.get_attribute(__MODULE__, :mcp_current_nested_params) || []
@@ -535,8 +619,18 @@ defmodule ConduitMcp.DSL do
         items: nil
       }
 
-      @mcp_current_nested_params field_def
+      current_nested = Module.get_attribute(__MODULE__, :mcp_current_nested_params) || []
+      Module.put_attribute(__MODULE__, :mcp_current_nested_params, [field_def | current_nested])
     end
+  end
+
+  defp build_block_field(name, type, _description, _opts, _nested_block, caller) do
+    raise CompileError,
+      file: caller.file,
+      line: caller.line,
+      description:
+        "field #{Macro.to_string(name)}: the block form is only supported for " <>
+          ":object fields, got: #{Macro.to_string(type)}"
   end
 
   @doc """
