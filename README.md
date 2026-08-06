@@ -27,7 +27,7 @@ An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcont
 ```elixir
 def deps do
   [
-    {:conduit_mcp, "~> 0.9"}
+    {:conduit_mcp, "~> 0.10"}
   ]
 end
 ```

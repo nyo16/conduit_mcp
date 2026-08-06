@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-05
+
 ### Security
 
 - **JWT algorithm allow-list** — `ConduitMcp.Plugs.OAuth` now validates the
@@ -201,7 +203,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to `[:conduit_mcp, :tool, :execute]` whose metadata's `:status`
   field indicates `:ok` / `:error` and whose payload includes
   validation failures.
-- **`ConduitMcp.Validation.SchemaConverter.custom_constraint_markers/0`** —
+- **`custom_constraint_markers/0`** on `ConduitMcp.Validation.SchemaConverter` —
   replaced by `strip_markers/1`, which does the stripping itself and recurses
   into nested `keys:` schemas. Callers that fetched the marker list to do their
   own `Keyword.drop/2` should call `strip_markers/1` instead; four modules in
@@ -541,6 +543,9 @@ None - This release is fully backward compatible.
 - Basic authentication
 - Phoenix integration example
 
+[Unreleased]: https://github.com/nyo16/conduit_mcp/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/nyo16/conduit_mcp/compare/v0.9.7...v0.10.0
+[0.9.7]: https://github.com/nyo16/conduit_mcp/compare/v0.9.6...v0.9.7
 [0.8.5]: https://github.com/nyo16/conduit_mcp/compare/v0.8.0...v0.8.5
 [0.8.0]: https://github.com/nyo16/conduit_mcp/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/nyo16/conduit_mcp/compare/v0.6.5...v0.7.0
