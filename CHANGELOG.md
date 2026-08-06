@@ -11,6 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Patched two vulnerable transitive dependencies** flagged by `mix deps.audit`.
+  `mint` `1.7.1` -> `1.9.3` (CONTINUATION flood and unbounded PUSH_PROMISE stream
+  map growth, both high; plus request-line CRLF injection and a Content-Length
+  parsing issue) and `req` `0.5.17` -> `0.7.2` (unbounded archive/compression
+  extraction driven by response content-type, high; multipart header injection,
+  moderate). Both reach this library only through the optional JWKS key provider,
+  and the decompression one is genuinely reachable there — `ConduitMcp.OAuth.KeyProvider.JWKS`
+  caps the JWKS body at 1MB, but the cap applies after Req decompresses. The
+  declared constraint `{:req, "~> 0.5"}` already permitted the patched line, so
+  only `mix.lock` moved; the JWKS moduledoc now recommends `{:req, "~> 0.6"}`.
+  `finch`, `hpax` and `castore` moved as required transitives. `plug` and
+  `plug_crypto` were deliberately held at their locked versions — neither is
+  implicated, and unrelated bumps do not belong in a release lock.
 - **JWT algorithm allow-list** — `ConduitMcp.Plugs.OAuth` now validates the
   token header `alg` against an allow-list (new `:algorithms` option,
   default: RS/ES/PS families) *before* key lookup, and requires the resolved
