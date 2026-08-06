@@ -127,13 +127,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`items/1,2` in `ConduitMcp.Component.Schema`** — component-mode array
   fields had no way to declare an item type at all, and a bare `field` inside
   an `:array` block silently corrupted the parent field list. `items` is now
-  the only thing an `:array` block accepts.
+  the only thing an `:array` block accepts, at every nesting depth.
 - **3-arg (and 2-arg) block forms** — `param :bag, :object, "desc" do ... end`
   and `field :bag, :object do ... end` used to bind to the blockless clause
   (`[do: ...]` is a keyword list), silently discarding the block; the form the
   `field/4` docs themselves showed was broken. Both now work in both DSLs. A
   block on a type that has no block form raises a `CompileError` naming the
   file and line.
+- **Type coercion now follows nested objects.** A nested `:integer` field
+  accepts the same `"30"` the top level does; previously coercion stopped at
+  depth 0 while nested type *checking* did not, so the two disagreed.
+- **The two DSL front ends now accept the same programs.** `ConduitMcp.DSL`
+  silently swallowed a bare `field` inside an `:array` block, an `items` outside
+  one, and a `field` outside any object block, and raised a bare
+  `FunctionClauseError` for `items :string do ... end`. All four are now
+  `CompileError`s naming the file and line, matching `Component.Schema`. The
+  compile-time scope plumbing both DSLs share moved into one place.
 
 ### Fixed
 
@@ -144,6 +153,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mode: replace the single-map lookup with per-tool function clauses
   plus a catch-all. Servers that never declared OAuth scopes now
   compile cleanly under `--warnings-as-errors`.
+- **`min:`/`max:`/`validator:` were bypassable by sending a number as a string.**
+  Custom constraints are checked by this library rather than NimbleOptions, and
+  the checks ran *before* type coercion — so `check_min_value/3` skipped a binary
+  value, coercion then turned it into a number, and the markers had already been
+  stripped from the schema NimbleOptions sees. With `type_coercion: true` (the
+  default), `"5"` passed `min: 18` and the handler received `5`. `validator:`
+  was worse: the function was called with the uncoerced binary, and `"5" > 18` is
+  `true` in Erlang term order. Coercion now runs first, so every constraint sees
+  the value the handler will see. Note `enum:` now matches after coercion too —
+  `enum: [1, 2, 3]` accepts `"1"` for an `:integer` field, where it previously
+  rejected it.
 
 ### Changed
 
@@ -156,6 +176,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **OAuth scope rejection** on `tools/call` now returns a JSON-RPC
   error with the request's id (previously `nil`, breaking client
   correlation).
+- **Validation errors now always carry a `parameter`.** A type mismatch used to
+  return `parameter: nil` and NimbleOptions' raw prose, while a missing required
+  field returned the field name — so a client author had to special-case the
+  failure kind to locate the field. Every error now names its parameter, dotted
+  for nested fields (`bag.inner.city`). Type-error messages no longer carry
+  NimbleOptions' internal `(in options [:bag])` suffix, because the parameter
+  says it.
+- **Undeclared parameters are rejected with a proper error.** Previously left to
+  NimbleOptions, which reported no parameter name and — for a name that did not
+  already exist as an atom — raised out of validation entirely, so the same
+  mistake surfaced as either a validation error or an internal error depending
+  on the VM's atom table. Now always
+  `%{"parameter" => name, "message" => "unknown parameter \"name\""}`.
 
 ### Removed
 
@@ -168,6 +201,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to `[:conduit_mcp, :tool, :execute]` whose metadata's `:status`
   field indicates `:ok` / `:error` and whose payload includes
   validation failures.
+- **`ConduitMcp.Validation.SchemaConverter.custom_constraint_markers/0`** —
+  replaced by `strip_markers/1`, which does the stripping itself and recurses
+  into nested `keys:` schemas. Callers that fetched the marker list to do their
+  own `Keyword.drop/2` should call `strip_markers/1` instead; four modules in
+  this library did exactly that and now share the one implementation.
 
 ## [0.9.7] - 2026-06-18
 

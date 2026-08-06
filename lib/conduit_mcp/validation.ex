@@ -191,27 +191,34 @@ defmodule ConduitMcp.Validation do
 
   defp validate_with_schema({full_schema, precomputed_clean}, params, context) do
     config = validation_config()
-    # Atomise keys for NimbleOptions — schema-driven for nested objects
+
+    # Atomise keys for NimbleOptions — schema-driven for nested objects.
     atom_params = normalize_params(params, full_schema)
 
-    # First, handle custom validations that NimbleOptions doesn't support directly
-    case validate_custom_constraints(atom_params, full_schema) do
+    # Coerce *before* checking constraints. The custom checks are type-specific
+    # — `check_min_value/3` ignores a binary, and `check_custom_validator/3`
+    # would hand the user's function a binary — so running them on uncoerced
+    # input makes `min:`/`max:`/`validator:` bypassable by sending a number as a
+    # string: the check skips it, coercion then turns it into a number, and the
+    # clean schema has already had those markers stripped, so NimbleOptions does
+    # not check them either. They failed *open*.
+    coerced_params =
+      if Keyword.get(config, :type_coercion, true) do
+        apply_type_coercion(atom_params, full_schema)
+      else
+        atom_params
+      end
+
+    # Handle custom validations that NimbleOptions doesn't support directly
+    case validate_custom_constraints(coerced_params, full_schema) do
       {:error, errors} ->
         formatted_errors = format_validation_errors(errors)
         {:error, formatted_errors}
 
-      {:ok, preprocessed_params} ->
-        # Apply type coercion if enabled
-        coerced_params =
-          if Keyword.get(config, :type_coercion, true) do
-            apply_type_coercion(preprocessed_params, full_schema)
-          else
-            preprocessed_params
-          end
-
+      {:ok, checked_params} ->
         # Use pre-computed clean schema if available, otherwise strip at runtime
         clean_schema = precomputed_clean || SchemaConverter.strip_markers(full_schema)
-        keyword_params = Map.to_list(coerced_params)
+        keyword_params = Map.to_list(checked_params)
 
         case NimbleOptions.validate(keyword_params, clean_schema) do
           {:ok, validated_keyword_params} ->
@@ -392,7 +399,19 @@ defmodule ConduitMcp.Validation do
   # declared nested objects.
 
   defp validate_custom_constraints(params, schema) do
-    case collect_schema_errors(params, schema, nil) do
+    # Undeclared *top-level* keys are checked here rather than left to
+    # NimbleOptions for two reasons. Its message (`unknown options [:zzq]`)
+    # carries no machine-readable parameter, so a client got `parameter: nil` at
+    # depth 0 and a dotted path at every other depth. And an undeclared key that
+    # does not intern stays a binary, which makes `Map.to_list/1` a non-keyword
+    # list and raises out of `NimbleOptions.validate/2` — so the same mistake
+    # surfaced as a validation error or an internal error depending on whether
+    # the atom happened to exist. Same atom-table luck as RC3, one level up.
+    errors =
+      unknown_key_errors(nil, params, schema, false) ++
+        collect_schema_errors(params, schema, nil)
+
+    case errors do
       [] -> {:ok, params}
       errors -> {:error, errors}
     end
@@ -454,13 +473,27 @@ defmodule ConduitMcp.Validation do
     declared = declared_names(nested_schema)
 
     for {key, value} <- map, declared_key(declared, nested_schema, key) == :error do
+      name = key_to_string(key)
+
       %{
-        parameter: join_path(path, key),
+        parameter: join_path(path, name),
         value: value,
-        message: "unknown field #{inspect(to_string(key))} in object #{inspect(path)}"
+        message: unknown_key_message(name, path)
       }
     end
   end
+
+  defp unknown_key_message(name, nil), do: "unknown parameter #{inspect(name)}"
+
+  defp unknown_key_message(name, path),
+    do: "unknown field #{inspect(name)} in object #{inspect(path)}"
+
+  # `declared_key/3` tolerates any key term, so this must too. Reachable through
+  # the public `validate_tool_params/3`, though not over JSON-RPC, where object
+  # keys are always strings.
+  defp key_to_string(key) when is_binary(key), do: key
+  defp key_to_string(key) when is_atom(key), do: Atom.to_string(key)
+  defp key_to_string(key), do: inspect(key)
 
   defp check_enum(param_name, value, opts) do
     enum_values = Keyword.get(opts, :__enum_values__) || Keyword.get(opts, :enum)
@@ -610,9 +643,23 @@ defmodule ConduitMcp.Validation do
           {param_name, value}
 
         param_opts ->
-          {param_name, coerce_value(value, Keyword.get(param_opts, :type))}
+          {param_name, coerce_param(value, param_opts)}
       end
     end)
+  end
+
+  # A declared object's fields are validated for type, so they have to be
+  # coerced for type too — otherwise `%{"age" => "30"}` is accepted at the top
+  # level and the identical `%{"bag" => %{"age" => "30"}}` is rejected.
+  defp coerce_param(value, param_opts) when is_map(value) do
+    case Keyword.get(param_opts, :keys) do
+      nil -> coerce_value(value, Keyword.get(param_opts, :type))
+      nested_schema -> apply_type_coercion(value, nested_schema)
+    end
+  end
+
+  defp coerce_param(value, param_opts) do
+    coerce_value(value, Keyword.get(param_opts, :type))
   end
 
   defp coerce_value(value, :integer) when is_binary(value) do

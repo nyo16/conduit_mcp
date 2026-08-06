@@ -121,8 +121,10 @@ defmodule ConduitMcp.Validation.SchemaConverter do
   # NimbleOptions uses :float, not :number
   defp convert_type(:number), do: :float
   defp convert_type(:boolean), do: :boolean
-  # `:map` is shorthand for `{:map, :atom, :any}`, which rejects the
-  # string-keyed halves of a JSON object (see RC3 in the object-params plan).
+  # `:map` is shorthand for `{:map, :atom, :any}`, which rejects string keys —
+  # and a JSON object's keys are strings. `{:map, :string, :any}` is not the
+  # answer either: nested keys matching a declared field name are atomised
+  # before validation, so a real payload carries both key types.
   defp convert_type(:object), do: {:map, :any, :any}
   defp convert_type(:array), do: {:list, :any}
   defp convert_type({:array, item_type}), do: {:list, convert_type(item_type)}
@@ -222,7 +224,12 @@ defmodule ConduitMcp.Validation.SchemaConverter do
     NimbleOptions.validate([], clean_schema)
     :ok
   rescue
-    error ->
+    # A bad schema definition surfaces as a raise, not a return value — an
+    # empty-options run always reports the missing required options. Narrow to
+    # the classes NimbleOptions raises for that, so a bug in our own conversion
+    # (e.g. a FunctionClauseError in `strip_markers/1`) crashes loudly instead of
+    # being reported to the developer as "your schema is invalid".
+    error in [ArgumentError, NimbleOptions.ValidationError] ->
       {:error, Exception.message(error)}
   end
 
@@ -260,7 +267,10 @@ defmodule ConduitMcp.Validation.SchemaConverter do
     end)
   end
 
-  def strip_markers(_schema), do: []
+  # Components may have no schema at all. Anything else non-list is a bug in the
+  # caller, and silently yielding `[]` on the *runtime* path would mean handing a
+  # tool a schema that declares nothing.
+  def strip_markers(nil), do: []
 
   defp strip_param_markers(param_opts) do
     param_opts
@@ -296,18 +306,19 @@ defmodule ConduitMcp.Validation.SchemaConverter do
 
   # Private helper functions for error parsing
 
+  # NimbleOptions' message embeds the offending value verbatim via `inspect/1`,
+  # so a client-supplied string can contain anything this parser looks for.
+  # Every pattern below is therefore anchored to the message's own structure:
+  # the reason is always the prefix, and the key path is always the suffix.
+  # Matching anywhere in the message let a client forge a wholly fabricated
+  # error (and suppress the real one) by sending its text as a parameter value.
   defp parse_validation_error(message, original_params) do
-    # This is a simplified parser - in a full implementation,
-    # we'd parse NimbleOptions error messages more thoroughly
     cond do
-      String.contains?(message, "required") ->
+      String.starts_with?(message, "required :") ->
         parse_required_error(message, original_params)
 
-      String.contains?(message, "invalid value") ->
-        parse_invalid_value_error(message, original_params)
-
-      String.contains?(message, "expected") ->
-        parse_type_error(message, original_params)
+      String.starts_with?(message, "invalid value for :") ->
+        parse_invalid_value_error(message)
 
       true ->
         {:error, :unparseable}
@@ -315,9 +326,8 @@ defmodule ConduitMcp.Validation.SchemaConverter do
   end
 
   defp parse_required_error(message, _original_params) do
-    # Extract required field name from error message
-    # NimbleOptions format: "required :name option not found"
-    case Regex.run(~r/required :(\w+) option not found/, message) do
+    # NimbleOptions format: "required :name option not found, received options: [...]"
+    case Regex.run(~r/^required :(\w+) option not found/, message) do
       [_, field_name] ->
         {:ok,
          [
@@ -336,9 +346,11 @@ defmodule ConduitMcp.Validation.SchemaConverter do
   # For a nested schema NimbleOptions appends the enclosing key path, e.g.
   # `(in options [:bag, :inner])`. Fold it into the parameter name so a nested
   # failure names the field the client actually sent (`bag.inner.city`) rather
-  # than an ambiguous bare `city`.
+  # than an ambiguous bare `city`. Anchored to the end of the message: the
+  # genuine path is always last, so an unanchored match would prefer a forged
+  # one embedded in a client-supplied value.
   defp qualify_with_key_path(field_name, message) do
-    case Regex.run(~r/\(in options \[(.+?)\]\)/, message) do
+    case Regex.run(~r/\(in options \[([^\]]+)\]\)$/, message) do
       [_, path] ->
         path
         |> String.split(",")
@@ -350,78 +362,29 @@ defmodule ConduitMcp.Validation.SchemaConverter do
     end
   end
 
-  defp parse_invalid_value_error(message, original_params) do
-    # Extract field and value information
-    case Regex.run(~r/invalid value for (\w+):/, message) do
-      [_, field_name] ->
-        value = get_original_value(field_name, original_params)
-        constraint_message = extract_constraint_message(message)
+  # NimbleOptions format: "invalid value for :name option: expected string, got: 1"
+  # optionally followed by the key path. Anchored at the start for the same
+  # reason as above — the reason is structural, anything later in the message may
+  # be client-supplied.
+  defp parse_invalid_value_error(message) do
+    case Regex.run(~r/^invalid value for :(\w+) option: /, message) do
+      [prefix, field_name] ->
+        reason =
+          message
+          |> String.replace_prefix(prefix, "")
+          |> String.replace(~r/ \(in options \[[^\]]+\]\)$/, "")
 
         {:ok,
          [
            %{
-             parameter: field_name,
-             value: value,
-             message: constraint_message
+             parameter: qualify_with_key_path(field_name, message),
+             value: nil,
+             message: reason
            }
          ]}
 
       nil ->
         {:error, :no_field_found}
-    end
-  end
-
-  defp parse_type_error(message, original_params) do
-    # Extract type mismatch information
-    case Regex.run(~r/expected (\w+) for (\w+)/, message) do
-      [_, expected_type, field_name] ->
-        value = get_original_value(field_name, original_params)
-
-        {:ok,
-         [
-           %{
-             parameter: field_name,
-             value: value,
-             message: "must be of type #{expected_type}"
-           }
-         ]}
-
-      nil ->
-        {:error, :no_type_info}
-    end
-  end
-
-  defp get_original_value(field_name, original_params) when is_map(original_params) do
-    case original_params do
-      %{^field_name => value} -> value
-      _ -> get_atom_keyed_value(original_params, field_name)
-    end
-  end
-
-  defp get_original_value(_field_name, _original_params), do: nil
-
-  # Field names come from developer-defined schemas, so the atom should exist;
-  # never mint new atoms from request-derived strings.
-  defp get_atom_keyed_value(params, field_name) do
-    Map.get(params, String.to_existing_atom(field_name))
-  rescue
-    ArgumentError -> nil
-  end
-
-  defp extract_constraint_message(message) do
-    cond do
-      String.contains?(message, "must be") ->
-        # Extract "must be ..." part
-        case Regex.run(~r/must be (.+)$/, message) do
-          [_, constraint] -> constraint
-          nil -> "invalid value"
-        end
-
-      String.contains?(message, "expected") ->
-        "invalid value"
-
-      true ->
-        "validation failed"
     end
   end
 end

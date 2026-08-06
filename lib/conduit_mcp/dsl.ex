@@ -469,10 +469,13 @@ defmodule ConduitMcp.DSL do
   end
 
   defmacro param(name, type, description, [{:do, nested_block}]) do
-    build_block_param(name, type, description, [], nested_block, __CALLER__)
+    {description, opts} = split_description_opts(description)
+    build_block_param(name, type, description, opts, nested_block, __CALLER__)
   end
 
   defmacro param(name, type, description, opts) when is_list(opts) do
+    assert_no_block!(:param, name, description, opts, __CALLER__)
+
     quote do
       param_def = %{
         name: unquote(name),
@@ -497,7 +500,8 @@ defmodule ConduitMcp.DSL do
 
   defp build_block_param(name, :object, description, opts, nested_block, _caller) do
     quote do
-      @mcp_current_nested_params []
+      parent_nested =
+        ConduitMcp.DSL.FieldScope.open(__MODULE__, :mcp_current_nested_params)
 
       unquote(nested_block)
 
@@ -506,22 +510,35 @@ defmodule ConduitMcp.DSL do
         type: :object,
         description: unquote(description),
         opts: unquote(opts),
-        nested: Enum.reverse(@mcp_current_nested_params),
+        nested:
+          ConduitMcp.DSL.FieldScope.close(
+            __MODULE__,
+            :mcp_current_nested_params,
+            parent_nested
+          ),
         items: nil
       }
 
       current_params = Module.get_attribute(__MODULE__, :mcp_current_tool_params) || []
       Module.put_attribute(__MODULE__, :mcp_current_tool_params, [param_def | current_params])
-
-      Module.delete_attribute(__MODULE__, :mcp_current_nested_params)
     end
   end
 
   defp build_block_param(name, :array, description, opts, nested_block, _caller) do
     quote do
+      # Hide any enclosing field scope: an `:array` block collects an item type
+      # through `items`, so a bare `field` here has nowhere to land and must be
+      # rejected rather than silently absorbed.
+      parent_nested =
+        ConduitMcp.DSL.FieldScope.hide(__MODULE__, :mcp_current_nested_params)
+
       @mcp_current_array_items nil
 
       unquote(nested_block)
+
+      items = Module.get_attribute(__MODULE__, :mcp_current_array_items)
+      Module.delete_attribute(__MODULE__, :mcp_current_array_items)
+      ConduitMcp.DSL.FieldScope.restore(__MODULE__, :mcp_current_nested_params, parent_nested)
 
       param_def = %{
         name: unquote(name),
@@ -529,13 +546,11 @@ defmodule ConduitMcp.DSL do
         description: unquote(description),
         opts: unquote(opts),
         nested: nil,
-        items: @mcp_current_array_items
+        items: items
       }
 
       current_params = Module.get_attribute(__MODULE__, :mcp_current_tool_params) || []
       Module.put_attribute(__MODULE__, :mcp_current_tool_params, [param_def | current_params])
-
-      Module.delete_attribute(__MODULE__, :mcp_current_array_items)
     end
   end
 
@@ -547,6 +562,37 @@ defmodule ConduitMcp.DSL do
         "param #{Macro.to_string(name)}: the block form is only supported for " <>
           ":object and :array params, got: #{Macro.to_string(type)}"
   end
+
+  # `param :bag, :object, required: true do ... end` — description omitted.
+  # Elixir collapses the trailing keywords into the third argument, so without
+  # this the opts were silently dropped (the param became optional, and
+  # `additional_properties` was ignored) *and* the keyword list landed in
+  # `"description"`, which is not JSON-encodable — breaking `tools/list` for the
+  # whole server. A description is a string, so a keyword list here is opts.
+  defp split_description_opts([]), do: {nil, []}
+  defp split_description_opts([{key, _} | _] = opts) when is_atom(key), do: {nil, opts}
+  defp split_description_opts(description), do: {description, []}
+
+  # The clauses that route a trailing `[do: ...]` to the block form depend on
+  # argument positions that only the default-injecting header produces. Change a
+  # default and they quietly stop matching, and a block silently falls through to
+  # the blockless clause below — which evaluates it into `:description`/`:opts`,
+  # exactly the bug this module was fixed for. Fail loudly instead.
+  defp assert_no_block!(macro, name, description, opts, caller) do
+    if block?(description) or block?(opts) do
+      raise CompileError,
+        file: caller.file,
+        line: caller.line,
+        description:
+          "#{macro} #{Macro.to_string(name)}: a `do` block reached the blockless clause. " <>
+            "This is a bug in ConduitMcp's macro dispatch — please report it."
+    end
+
+    :ok
+  end
+
+  defp block?([{:do, _} | _]), do: true
+  defp block?(_), do: false
 
   @doc """
   Defines a nested field within an object parameter.
@@ -570,10 +616,13 @@ defmodule ConduitMcp.DSL do
   end
 
   defmacro field(name, type, description, [{:do, nested_block}]) do
-    build_block_field(name, type, description, [], nested_block, __CALLER__)
+    {description, opts} = split_description_opts(description)
+    build_block_field(name, type, description, opts, nested_block, __CALLER__)
   end
 
   defmacro field(name, type, description, opts) when is_list(opts) do
+    assert_no_block!(:field, name, description, opts, __CALLER__)
+
     quote do
       field_def = %{
         name: unquote(name),
@@ -584,8 +633,7 @@ defmodule ConduitMcp.DSL do
         items: nil
       }
 
-      current_nested = Module.get_attribute(__MODULE__, :mcp_current_nested_params) || []
-      Module.put_attribute(__MODULE__, :mcp_current_nested_params, [field_def | current_nested])
+      ConduitMcp.DSL.__push_nested_field__(__MODULE__, field_def, __ENV__)
     end
   end
 
@@ -595,32 +643,24 @@ defmodule ConduitMcp.DSL do
 
   defp build_block_field(name, :object, description, opts, nested_block, _caller) do
     quote do
-      # Save current nested params
-      parent_nested = Module.get_attribute(__MODULE__, :mcp_current_nested_params) || []
-
-      # Start new nested params for this object
-      Module.put_attribute(__MODULE__, :mcp_current_nested_params, [])
+      parent_nested =
+        ConduitMcp.DSL.FieldScope.open(__MODULE__, :mcp_current_nested_params)
 
       unquote(nested_block)
 
-      # Get the nested fields we just accumulated
-      nested_fields = Module.get_attribute(__MODULE__, :mcp_current_nested_params)
+      nested_fields =
+        ConduitMcp.DSL.FieldScope.close(__MODULE__, :mcp_current_nested_params, parent_nested)
 
-      # Restore parent nested params
-      Module.put_attribute(__MODULE__, :mcp_current_nested_params, parent_nested)
-
-      # Add this field with its nested fields
       field_def = %{
         name: unquote(name),
         type: :object,
         description: unquote(description),
         opts: unquote(opts),
-        nested: Enum.reverse(nested_fields),
+        nested: nested_fields,
         items: nil
       }
 
-      current_nested = Module.get_attribute(__MODULE__, :mcp_current_nested_params) || []
-      Module.put_attribute(__MODULE__, :mcp_current_nested_params, [field_def | current_nested])
+      ConduitMcp.DSL.__push_nested_field__(__MODULE__, field_def, __ENV__)
     end
   end
 
@@ -635,6 +675,10 @@ defmodule ConduitMcp.DSL do
 
   @doc """
   Defines the item type for an array parameter.
+
+  Item schemas are published to clients in the JSON Schema but are **not**
+  enforced server-side — NimbleOptions cannot attach a nested schema to a list
+  element type. Validate item contents in your handler.
 
   ## Examples
 
@@ -651,22 +695,94 @@ defmodule ConduitMcp.DSL do
   """
   defmacro items(type) when is_atom(type) do
     quote do
+      ConduitMcp.DSL.__assert_in_array_block__(__MODULE__, __ENV__)
       @mcp_current_array_items %{type: unquote(type), nested: nil}
     end
   end
 
-  defmacro items(type, do: nested_block) when type == :object do
+  defmacro items(type, do: nested_block), do: build_items(type, nested_block, __CALLER__)
+
+  defp build_items(:object, nested_block, _caller) do
     quote do
-      @mcp_current_nested_params []
+      ConduitMcp.DSL.__assert_in_array_block__(__MODULE__, __ENV__)
+
+      parent_nested =
+        ConduitMcp.DSL.FieldScope.open(__MODULE__, :mcp_current_nested_params)
 
       unquote(nested_block)
 
       @mcp_current_array_items %{
         type: :object,
-        nested: Enum.reverse(@mcp_current_nested_params)
+        nested:
+          ConduitMcp.DSL.FieldScope.close(
+            __MODULE__,
+            :mcp_current_nested_params,
+            parent_nested
+          )
       }
+    end
+  end
 
-      Module.delete_attribute(__MODULE__, :mcp_current_nested_params)
+  defp build_items(type, _nested_block, caller) do
+    raise CompileError,
+      file: caller.file,
+      line: caller.line,
+      description:
+        "items: the block form is only supported for :object items, " <>
+          "got: #{Macro.to_string(type)}"
+  end
+
+  @doc false
+  # Single choke point for every `field` declaration. `field` is only meaningful
+  # inside an `:object` block or an `items :object` block; anywhere else it used
+  # to be silently absorbed and dropped.
+  def __push_nested_field__(module, field_def, env) do
+    cond do
+      ConduitMcp.DSL.FieldScope.open?(module, :mcp_current_nested_params) ->
+        ConduitMcp.DSL.FieldScope.prepend(module, :mcp_current_nested_params, field_def)
+
+      ConduitMcp.DSL.FieldScope.open?(module, :mcp_current_array_items) ->
+        raise CompileError,
+          file: env.file,
+          line: env.line,
+          description:
+            "field #{inspect(field_def.name)}: an :array param block declares its item " <>
+              "type with `items`, not `field` — use `items :object do ... end`"
+
+      true ->
+        raise CompileError,
+          file: env.file,
+          line: env.line,
+          description:
+            "field #{inspect(field_def.name)}: `field` is only valid inside an :object " <>
+              "param block or an `items :object` block — did you mean `param`?"
+    end
+  end
+
+  @doc false
+  # An `:array` block hides any enclosing field scope, so "inside an array block"
+  # is precisely "array open and no field scope open". The looser check also
+  # accepted `items` nested inside `items :object do ... end`, where the inner
+  # declaration was overwritten and silently vanished.
+  def __assert_in_array_block__(module, env) do
+    cond do
+      not ConduitMcp.DSL.FieldScope.open?(module, :mcp_current_array_items) or
+          ConduitMcp.DSL.FieldScope.open?(module, :mcp_current_nested_params) ->
+        raise CompileError,
+          file: env.file,
+          line: env.line,
+          description: "items is only valid directly inside an :array param block"
+
+      Module.get_attribute(module, :mcp_current_array_items) != nil ->
+        raise CompileError,
+          file: env.file,
+          line: env.line,
+          description:
+            "items: an :array param block declares exactly one item type, " <>
+              "and one is already declared here"
+
+      true ->
+        :ok
     end
   end
 

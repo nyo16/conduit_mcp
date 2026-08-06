@@ -192,11 +192,18 @@ defmodule ConduitMcp.ObjectParamsTest do
   end
 
   describe "runtime validation of object params" do
-    # RC3: `convert_keys_to_atoms/1` recurses with `String.to_existing_atom`,
-    # so a nested object arrives with *mixed* key types depending on whether
-    # each key happens to be interned. Both must be accepted, or the bug is
-    # merely non-deterministic instead of fixed.
-    test "accepts a nested object mixing interning and non-interning keys" do
+    # An open bag emits no `keys:`, so no key on this path is atomised and both
+    # of these keys travel identical code. What it pins is that an open object
+    # accepts arbitrary keys and hands them to the handler as strings — i.e.
+    # that `convert_type(:object)` stays `{:map, :any, :any}` rather than
+    # reverting to `:map`, which is shorthand for `{:map, :atom, :any}` and
+    # would reject the string-keyed half of any real JSON object.
+    #
+    # The *mixed*-key case that RC3 was about needs an object with declared
+    # fields, where declared keys are atomised and undeclared ones are not; it
+    # lives in `ConduitMcp.NestedObjectValidationTest`, together with the
+    # assertion that validating client input mints no atom.
+    test "an open bag accepts arbitrary keys and yields them as strings" do
       params = %{
         "label" => "x",
         "bag" => %{"name" => "interns", "zzq_not_an_atom_9f3" => "does not intern"}
@@ -204,7 +211,6 @@ defmodule ConduitMcp.ObjectParamsTest do
 
       assert {:ok, validated} = Validation.validate_tool_params(ObjectServer, "open_bag", params)
 
-      # The handler-facing contract is string keys, all the way down.
       assert validated["bag"] == %{
                "name" => "interns",
                "zzq_not_an_atom_9f3" => "does not intern"
@@ -369,6 +375,36 @@ defmodule ConduitMcp.ObjectParamsTest do
     def execute(_params, _conn), do: text("ok")
   end
 
+  # An `:array` block nested inside an `:object` block. The bare-`field`
+  # rejection has to hold at every depth, not just at the top level of
+  # `schema do`, or RC6's silent corruption just moves one level down.
+  defmodule NestedRowsTool do
+    use ConduitMcp.Component, type: :tool, description: "Array block inside an object field"
+
+    schema do
+      field :bag, :object, "Bag" do
+        field(:label, :string, "Label")
+
+        field :rows, :array, "Rows" do
+          items :object do
+            field(:id, :integer, "Id", required: true)
+          end
+        end
+
+        field :tags, :array, "Tags" do
+          items(:string)
+        end
+
+        field(:trailing, :string, "Trailing")
+      end
+
+      field(:tail, :string, "Tail")
+    end
+
+    @impl true
+    def execute(_params, _conn), do: text("ok")
+  end
+
   # The component path reaches the validator through an Endpoint, which is what
   # generates `__validation_schema_for_tool__/1`.
   defmodule ComponentEndpoint do
@@ -428,21 +464,30 @@ defmodule ConduitMcp.ObjectParamsTest do
     end
 
     test "a block on a scalar param is a compile error naming the file and line" do
-      assert_raise CompileError, ~r/only supported for :object and :array params/, fn ->
-        Code.compile_string("""
-        defmodule ConduitMcp.ObjectParamsTest.BadScalarParam do
-          use ConduitMcp.Server
+      error =
+        assert_raise CompileError, ~r/only supported for :object and :array params/, fn ->
+          Code.compile_string(
+            """
+            defmodule ConduitMcp.ObjectParamsTest.BadScalarParam do
+              use ConduitMcp.Server
 
-          tool "bad", "Bad" do
-            param :x, :string, "Nope" do
-              field(:y, :string, "Y")
+              tool "bad", "Bad" do
+                param :x, :string, "Nope" do
+                  field(:y, :string, "Y")
+                end
+
+                handle(fn _conn, _params -> text("ok") end)
+              end
             end
-
-            handle(fn _conn, _params -> text("ok") end)
-          end
+            """,
+            "probe_source.exs"
+          )
         end
-        """)
-      end
+
+      # The whole point of threading `__CALLER__` is that the user is pointed at
+      # their own source, not at a macro inside this library.
+      assert error.file == "probe_source.exs"
+      assert error.line == 5
     end
 
     test "a block on a scalar nested field is a compile error" do
@@ -458,6 +503,80 @@ defmodule ConduitMcp.ObjectParamsTest do
               end
             end
 
+            handle(fn _conn, _params -> text("ok") end)
+          end
+        end
+        """)
+      end
+    end
+
+    # These three used to fail silently in `ConduitMcp.DSL` — the declaration was
+    # swallowed and the author's intent vanished from the generated schema —
+    # while `Component.Schema` rejected the same mistakes. Both front ends now
+    # accept the same programs and refuse the same ones.
+    test "a bare field inside an :array param block is a compile error" do
+      assert_raise CompileError, ~r/declares its item type with `items`/, fn ->
+        Code.compile_string("""
+        defmodule ConduitMcp.ObjectParamsTest.DslBareFieldInArray do
+          use ConduitMcp.Server
+
+          tool "bad", "Bad" do
+            param :rows, :array, "Rows" do
+              field(:id, :integer, "Id")
+            end
+
+            handle(fn _conn, _params -> text("ok") end)
+          end
+        end
+        """)
+      end
+    end
+
+    test "items outside an :array param block is a compile error" do
+      assert_raise CompileError,
+                   ~r/items is only valid directly inside an :array param block/,
+                   fn ->
+                     Code.compile_string("""
+                     defmodule ConduitMcp.ObjectParamsTest.DslStrayItems do
+                       use ConduitMcp.Server
+
+                       tool "bad", "Bad" do
+                         items(:string)
+                         handle(fn _conn, _params -> text("ok") end)
+                       end
+                     end
+                     """)
+                   end
+    end
+
+    test "items with a block on a scalar type is a compile error, not a FunctionClauseError" do
+      assert_raise CompileError, ~r/only supported for :object items/, fn ->
+        Code.compile_string("""
+        defmodule ConduitMcp.ObjectParamsTest.DslItemsScalarBlock do
+          use ConduitMcp.Server
+
+          tool "bad", "Bad" do
+            param :rows, :array, "Rows" do
+              items :string do
+                field(:x, :string, "X")
+              end
+            end
+
+            handle(fn _conn, _params -> text("ok") end)
+          end
+        end
+        """)
+      end
+    end
+
+    test "field outside any object block is a compile error" do
+      assert_raise CompileError, ~r/`field` is only valid inside an :object param block/, fn ->
+        Code.compile_string("""
+        defmodule ConduitMcp.ObjectParamsTest.DslStrayField do
+          use ConduitMcp.Server
+
+          tool "bad", "Bad" do
+            field(:oops, :string, "Not a param")
             handle(fn _conn, _params -> text("ok") end)
           end
         end
@@ -545,6 +664,50 @@ defmodule ConduitMcp.ObjectParamsTest do
       assert schema["required"] == ["label"]
     end
 
+    # Both of these used to be accepted and then silently discarded: the second
+    # `items` overwrote the first, and an `items` nested inside `items :object`
+    # was overwritten when the outer block closed.
+    test "a second items in one array block is a compile error" do
+      assert_raise CompileError, ~r/declares exactly one item type/, fn ->
+        Code.compile_string("""
+        defmodule ConduitMcp.ObjectParamsTest.DuplicateItems do
+          use ConduitMcp.Component, type: :tool, description: "Bad"
+
+          schema do
+            field :rows, :array, "Rows" do
+              items(:string)
+              items(:integer)
+            end
+          end
+
+          @impl true
+          def execute(_params, _conn), do: text("ok")
+        end
+        """)
+      end
+    end
+
+    test "items nested inside items :object is a compile error" do
+      assert_raise CompileError, ~r/only valid directly inside an :array field block/, fn ->
+        Code.compile_string("""
+        defmodule ConduitMcp.ObjectParamsTest.NestedItems do
+          use ConduitMcp.Component, type: :tool, description: "Bad"
+
+          schema do
+            field :rows, :array, "Rows" do
+              items :object do
+                items(:string)
+              end
+            end
+          end
+
+          @impl true
+          def execute(_params, _conn), do: text("ok")
+        end
+        """)
+      end
+    end
+
     test "a bare field inside an array block is a compile error" do
       assert_raise CompileError, ~r/declares its item type with `items`/, fn ->
         Code.compile_string("""
@@ -565,13 +728,53 @@ defmodule ConduitMcp.ObjectParamsTest do
     end
 
     test "items outside an array block is a compile error" do
-      assert_raise CompileError, ~r/items is only valid inside an :array field block/, fn ->
+      assert_raise CompileError,
+                   ~r/items is only valid directly inside an :array field block/,
+                   fn ->
+                     Code.compile_string("""
+                     defmodule ConduitMcp.ObjectParamsTest.StrayItems do
+                       use ConduitMcp.Component, type: :tool, description: "Bad"
+
+                       schema do
+                         items(:string)
+                       end
+
+                       @impl true
+                       def execute(_params, _conn), do: text("ok")
+                     end
+                     """)
+                   end
+    end
+
+    test "an array block nested inside an object block keeps every level intact" do
+      bag = NestedRowsTool.__component_schema__()["inputSchema"]["properties"]["bag"]
+      top = NestedRowsTool.__component_schema__()["inputSchema"]["properties"]
+
+      # The array's item fields must not leak up into the object, and the object
+      # must not leak up into the top-level field list.
+      assert Enum.sort(Map.keys(top)) == ["bag", "tail"]
+
+      assert Enum.sort(Map.keys(bag["properties"])) == ["label", "rows", "tags", "trailing"]
+
+      assert bag["properties"]["rows"]["items"]["required"] == ["id"]
+      assert Map.keys(bag["properties"]["rows"]["items"]["properties"]) == ["id"]
+      assert bag["properties"]["tags"]["items"] == %{"type" => "string"}
+    end
+
+    test "a bare field in an array block nested inside an object block is a compile error" do
+      assert_raise CompileError, ~r/declares its item type with `items`/, fn ->
         Code.compile_string("""
-        defmodule ConduitMcp.ObjectParamsTest.StrayItems do
+        defmodule ConduitMcp.ObjectParamsTest.BareFieldInNestedArray do
           use ConduitMcp.Component, type: :tool, description: "Bad"
 
           schema do
-            items(:string)
+            field :bag, :object, "Bag" do
+              field(:label, :string, "Label")
+
+              field :rows, :array, "Rows" do
+                field(:id, :integer, "Id")
+              end
+            end
           end
 
           @impl true

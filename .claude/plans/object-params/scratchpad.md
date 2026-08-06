@@ -209,3 +209,87 @@ had to stay clean.
 Prompt `arg` defs (`dsl.ex` `arg/4`) carry **no** `:nested` key at all, and
 `validation_test.exs` builds param maps by hand without one. Hence
 `convert_param_to_nimble_option/1` reads it with `Map.get/2`, never a destructure.
+
+## Review round (5 specialists, findings acted on)
+
+`/phx:review` after the first commit (`441aac9`). Reviews in
+`.claude/plans/object-params/reviews/`. Four of five agents initially died with
+`404 model: claude-sonnet-4-0` — those agent definitions pin an unavailable model; re-spawned
+on `reviewer`/`task`. Worth knowing before the next review in this repo.
+
+**Verdict on the plan's hard constraint:** atom-table exhaustion **UPHELD**. `lib/` has
+exactly three atom-producing calls, all `String.to_existing_atom` with a rescue; nested keys
+resolve only through `Map.fetch/2` against a compile-time name map. `String.to_atom`: zero hits.
+
+Six defects found and fixed. Every one was reproduced first — none was taken on the
+reviewer's word:
+
+1. **Client-forgeable validation errors.** `qualify_with_key_path/2` matched
+   `(in options [...])` anywhere and took the *first* hit, but NimbleOptions appends the real
+   key path *last* and embeds the offending value via `inspect/1`. Sending
+   `"required :password option not found (in options [:admin, :secrets])"` as a value produced
+   `%{"parameter" => "admin.secrets.password", "message" => "is required"}` and suppressed the
+   real error. Anchored every parser to the message's own structure (reason = prefix, path =
+   suffix) and deleted `parse_invalid_value_error/2` and `parse_type_error/2`, whose regexes
+   could never match genuine NimbleOptions output and therefore fired *only* on injected text.
+   Re-added an anchored `^invalid value for :(\w+) option: ` parser, which also gave type
+   errors a `parameter` for the first time.
+2. **RC6 one level down.** `__push_field__/3` tested the nested scope before the array scope,
+   so the bare-`field`-in-`:array`-block guard only fired at depth 0. An `:array` block inside
+   an `:object` block silently published the item field as a property of the parent. Fixed by
+   *hiding* the enclosing scope for the duration of an array block.
+3. **Nested type coercion missing.** Every other new pass recursed through `keys:`;
+   `apply_type_coercion/2` did not. `%{"age" => "30"}` was accepted at the top level and the
+   identical nested payload rejected — while the docs I had just written promised enforcement
+   "to any depth" plus coercion by default.
+4. **`min:`/`max:`/`validator:` failed open** — and fixing (3) is what exposed it. Constraints
+   are checked by this library, and the check ran *before* coercion: `check_min_value/3` skips a
+   binary, coercion then makes it a number, and the markers are already stripped from the
+   schema NimbleOptions sees. `"5"` passed `min: 18`. `validator:` was worse — the user's
+   function received the raw binary, and `"5" > 18` is `true` in Erlang term order. Coercion
+   now runs first. The top-level instance was pre-existing; the nested one I introduced in (3).
+5. **Keyword list in the description position.** `param :bag, :object, required: true do ... end`
+   is arity 4 with `[required: true]` in the *description* slot. The new block-routing clause
+   hard-coded `opts: []`, so the opts were dropped *and* the keyword list landed in
+   `"description"` — which is not JSON-encodable, so `tools/list` failed for the whole server.
+   `split_description_opts/1` now classifies it: a description is a string, so a keyword list
+   here is unambiguously opts.
+6. **Two silent `items` misuses.** A second `items` in one block overwrote the first, and an
+   `items` nested inside `items :object` was overwritten when the outer block closed. Both were
+   accepted and discarded. The guard is now "array open *and* no field scope open", plus a
+   duplicate check.
+
+Also fixed, all reviewer-flagged: the three **DSL** counterparts of RC6 (a bare `field` in an
+`:array` block, an `items` outside one, and a `field` outside any object block were all
+silently swallowed; `items :string do ... end` raised a bare `FunctionClauseError`) — the DSL
+is the *primary* front end and had none of the guards `Component.Schema` got. Top-level
+undeclared parameters now produce a structured error instead of `parameter: nil` plus, for a
+non-interning name, an `ArgumentError` out of `NimbleOptions.validate/2` — the same
+atom-table-luck non-determinism as RC3, one level up. `to_string/1` on an exotic unknown key.
+`strip_markers/1`'s catch-all narrowed to `nil` so a malformed schema fails loudly on the
+runtime path. `validate_schema/1`'s bare rescue narrowed to the classes NimbleOptions actually
+raises. The `items` docstrings — the docs a developer actually reads — now carry the
+array-item non-enforcement caveat.
+
+**The duplication was the root cause, so it is now gone.** Both front ends solved the same
+nesting problem with divergent copies, and both bugs (2) and the depth->=2 corruption lived in
+the divergence. `ConduitMcp.DSL.FieldScope` is the single implementation of open/hide/close/
+restore/prepend; each DSL keeps only its own choke point, because the targets and error
+wording differ. `nil` vs `[]` is discriminated by clause, never by `if` — `[]` is truthy.
+
+### Deliberately not done
+
+- **Deprecated `custom_constraint_markers/0` delegate.** A reviewer wanted one kept for a
+  minor. Declined: clean cutover, no shims. It is recorded under `### Removed` in the
+  CHANGELOG naming `strip_markers/1` as the replacement, which is the honest treatment for a
+  0.9.x public function whose only purpose was to let callers hand-roll the stripping that
+  `strip_markers/1` now does for them.
+- **Precomputing `declared_names/1` into a `__declared__` schema marker.** A real per-request
+  allocation (one map plus one binary per declared field, per object, twice per strict object).
+  Declined for now: it denormalises information already in `keys:`, so the two can drift, and
+  the win is unmeasured. If nested-object validation ever shows up in a profile, this is the
+  first thing to do — along with `join_path/2`, which allocates a binary per present field per
+  level on the *success* path.
+- **DSL nested array-of-objects capability.** `field :rows, :array do ... end` inside a DSL
+  object param raises a clear `CompileError` rather than working. That is a missing feature,
+  not a bug, and the error is honest. `Component.Schema` supports it.
