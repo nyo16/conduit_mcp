@@ -74,21 +74,23 @@ defmodule ConduitMcp.Transport.SSETest do
           conn(:get, "/sse")
           |> put_req_header("accept", "text/event-stream")
 
-        # This will block forever in the keep-alive loop, but we just want to verify
-        # it starts successfully without raising an error
+        # Hand off a deterministic "I'm about to block" signal so the assertion
+        # doesn't depend on the spawned task being scheduled within a timeout.
+        send(parent, {:started, :ok})
+
+        # This blocks forever in the keep-alive loop; we only want to prove it
+        # entered the loop instead of erroring out on a bad Accept header.
         result = SSE.call(conn, @opts)
         send(parent, {:conn_result, result})
       end)
 
-      # Give it time to start - if headers were wrong, it would error immediately (< 100ms)
-      # If it's still running after 200ms, it successfully entered the keep-alive loop
-      # Generous window: on a loaded CI runner the spawned task may take a
-      # while to schedule before it can prove it's parked in the loop.
-      receive do
-        {:conn_result, _} -> flunk("Connection should have entered infinite loop")
-      after
-        1000 -> assert true
-      end
+      # Positive handshake: the task ran and is at the call site.
+      assert_receive {:started, :ok}, 1000
+
+      # Negative check: a bad Accept header makes SSE.call return immediately, so
+      # a short window with no :conn_result proves it parked in the keep-alive
+      # loop. This window only bounds the "didn't immediately error" check.
+      refute_receive {:conn_result, _}, 200
     end
 
     test "rejects SSE connection without proper Accept header" do

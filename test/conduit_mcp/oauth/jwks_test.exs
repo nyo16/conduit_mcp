@@ -12,10 +12,17 @@ defmodule ConduitMcp.OAuth.KeyProvider.JWKSTest do
   setup do
     Req.default_options(plug: {Req.Test, __MODULE__})
 
+    # Global/shared mode so spawned tasks (the concurrency test below) resolve
+    # the same stub as the test process. Safe here: this module is async: false
+    # and is the only Req.Test user, so it won't leak into concurrent tests.
+    Req.Test.set_req_test_to_shared()
+
     if :ets.whereis(@table) != :undefined do
       :ets.delete_all_objects(@table)
     end
 
+    # delete_env (not Req.default_options([])) fully removes the global key so no
+    # empty-but-present default lingers for later sync modules.
     on_exit(fn -> Application.delete_env(:req, :default_options) end)
     :ok
   end
@@ -142,5 +149,24 @@ defmodule ConduitMcp.OAuth.KeyProvider.JWKSTest do
     stub_json(200, %{"keys" => fresh})
 
     assert {:ok, ^fresh} = JWKS.fetch_keys(jwks_uri: uri, cache_ttl: 1)
+  end
+
+  test "concurrent fetch_keys on one URI is race-safe (ETS cache-write/ensure_table)" do
+    uri = "https://auth.example.com/jwks-concurrent"
+    stub_json(200, %{"keys" => @keys})
+
+    # Many simultaneous first-fetches all miss the cache and race on
+    # ensure_table/0 (check-then-create) and :ets.insert for the same key.
+    results =
+      1..25
+      |> Task.async_stream(fn _ -> JWKS.fetch_keys(jwks_uri: uri) end,
+        max_concurrency: 25,
+        ordered: false
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.all?(results, &match?({:ok, @keys}, &1))
+    # All writers converged on exactly one cached row for the URI.
+    assert [{^uri, @keys, _cached_at}] = :ets.lookup(@table, uri)
   end
 end

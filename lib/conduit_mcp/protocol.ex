@@ -26,6 +26,8 @@ defmodule ConduitMcp.Protocol do
   - `internal_error/0`      → -32603
   - `server_error/0`        → -32000 (generic server-defined)
   - `resource_not_found/0`  → -32002
+  - `task_not_ready/0`      → -32004 (`tasks/result` before completion)
+  - `request_cancelled/0`   → -32800 (`notifications/cancelled`)
 
   Use these instead of hardcoded integers so error code constants stay
   in one place.
@@ -100,6 +102,8 @@ defmodule ConduitMcp.Protocol do
   defdelegate invalid_params, to: ConduitMcp.Errors
   defdelegate internal_error, to: ConduitMcp.Errors
   defdelegate resource_not_found, to: ConduitMcp.Errors
+  defdelegate task_not_ready, to: ConduitMcp.Errors
+  defdelegate request_cancelled, to: ConduitMcp.Errors
 
   @doc """
   Core MCP methods as defined in the specification.

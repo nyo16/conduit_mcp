@@ -550,8 +550,12 @@ defmodule ConduitMcp.EndpointTest do
       }
 
       # With validation enabled, missing required 'text' should produce an error.
-      # on_exit (not `after`) so global config is restored even on process kill.
-      on_exit(fn -> ConduitMcp.Validation.update_validation_config([]) end)
+      # Snapshot + restore the REAL prior config (not a hardcoded []) so this
+      # async: false test leaves global state pristine. ExUnit serializes sync
+      # modules after all async ones complete (ex_unit/runner.ex), so there is no
+      # cross-module race; on_exit guarantees restore even on a process kill.
+      prev = Application.get_env(:conduit_mcp, :validation, [])
+      on_exit(fn -> ConduitMcp.Validation.update_validation_config(prev) end)
 
       ConduitMcp.Validation.update_validation_config(
         runtime_validation: true,

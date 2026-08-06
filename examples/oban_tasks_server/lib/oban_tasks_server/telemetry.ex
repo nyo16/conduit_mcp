@@ -30,7 +30,11 @@ defmodule Examples.ObanTasks.Telemetry do
         %{job: %{args: %{"task_id" => task_id}} = job, reason: reason},
         _config
       ) do
-    if job.state in ~w(discarded retryable) and job.attempt >= job.max_attempts do
+    # At `[:oban, :job, :exception]` time the job is still mid-execution, so
+    # `job.state` is `"executing"` (the discarded/retryable transition happens
+    # *after* this event). Gate purely on the attempt count: mark "failed" only
+    # on the final attempt so earlier raises fall through and Oban can retry.
+    if job.attempt >= job.max_attempts do
       msg = format_reason(reason)
 
       Tasks.update(task_id, %{

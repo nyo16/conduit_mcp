@@ -5,6 +5,13 @@ defmodule ConduitMcp.HandlerTest do
   alias ConduitMcp.Protocol
   alias ConduitMcp.TestServer
 
+  # Helpers for the W2 owner-scoping tests below.
+  defp owner_conn(user), do: Plug.Conn.assign(%Plug.Conn{}, :current_user, user)
+
+  defp task_req(method, task_id) do
+    %{"jsonrpc" => "2.0", "id" => 1, "method" => method, "params" => %{"taskId" => task_id}}
+  end
+
   describe "handle_request/2 with valid requests" do
     test "handles initialize request with latest protocol version" do
       request = %{
@@ -1012,6 +1019,114 @@ defmodule ConduitMcp.HandlerTest do
       response = Handler.handle_request(request, TestServer)
       task_ids = Enum.map(response["result"]["tasks"], & &1["task_id"])
       assert task_ids == ["done_one"]
+    end
+  end
+
+  # W2 (BOLA/IDOR): tasks/* must be scoped to the caller's principal so one user
+  # can't read or cancel another's task, while staying back-compatible for the
+  # no-principal path. Lives in this module (the only consumer of the global
+  # :conduit_mcp_tasks table) so the table is never touched concurrently.
+  describe "tasks/* owner scoping (W2)" do
+    setup do
+      if :ets.whereis(:conduit_mcp_tasks) != :undefined do
+        :ets.delete_all_objects(:conduit_mcp_tasks)
+      end
+
+      :ok
+    end
+
+    test "owner/1 extracts current_user and is nil without a principal" do
+      assert ConduitMcp.Tasks.owner(owner_conn("alice")) == "alice"
+      assert ConduitMcp.Tasks.owner(%Plug.Conn{}) == nil
+      assert ConduitMcp.Tasks.owner(nil) == nil
+    end
+
+    test "facade get/2 hides another principal's task; nil/owner/unowned allowed" do
+      {:ok, _} = ConduitMcp.Tasks.create("os1", %{"tool" => "echo"}, "alice")
+      assert {:ok, %{"owner" => "alice"}} = ConduitMcp.Tasks.get("os1", "alice")
+      assert {:error, :not_found} = ConduitMcp.Tasks.get("os1", "bob")
+      # no principal → no scoping (back-compat)
+      assert {:ok, _} = ConduitMcp.Tasks.get("os1", nil)
+
+      {:ok, _} = ConduitMcp.Tasks.create("os1u", %{"tool" => "echo"})
+      # unowned task → visible to anyone
+      assert {:ok, _} = ConduitMcp.Tasks.get("os1u", "bob")
+    end
+
+    test "facade cancel/2 refuses a non-owner and leaves the task working" do
+      {:ok, _} = ConduitMcp.Tasks.create("os2", %{"tool" => "echo"}, "alice")
+      assert {:error, :not_found} = ConduitMcp.Tasks.cancel("os2", "bob")
+      assert {:ok, %{"status" => "working"}} = ConduitMcp.Tasks.get("os2", "alice")
+      assert {:ok, %{"status" => "cancelled"}} = ConduitMcp.Tasks.cancel("os2", "alice")
+    end
+
+    test "facade list/2 returns own + unowned, excludes others; nil sees all" do
+      {:ok, _} = ConduitMcp.Tasks.create("os3a", %{}, "alice")
+      {:ok, _} = ConduitMcp.Tasks.create("os3b", %{}, "bob")
+      {:ok, _} = ConduitMcp.Tasks.create("os3u", %{})
+
+      bob_ids = ConduitMcp.Tasks.list([], "bob") |> Enum.map(& &1["task_id"])
+      assert "os3b" in bob_ids
+      assert "os3u" in bob_ids
+      refute "os3a" in bob_ids
+
+      all_ids = ConduitMcp.Tasks.list([], nil) |> Enum.map(& &1["task_id"])
+      assert Enum.all?(~w(os3a os3b os3u), &(&1 in all_ids))
+    end
+
+    # NB: the `:task_owner_fun` config-override test lives in
+    # ConduitMcp.Tasks.OwnerExtractorTest (async: false) because it mutates the
+    # global application env — it must not run inside this async: true module.
+
+    test "handler tasks/get: non-owner gets not-found, owner succeeds" do
+      {:ok, _} = ConduitMcp.Tasks.create("oh1", %{"tool" => "echo"}, "alice")
+
+      bob = Handler.handle_request(task_req("tasks/get", "oh1"), TestServer, owner_conn("bob"))
+      assert bob["error"]["code"] == ConduitMcp.Errors.resource_not_found()
+
+      alice =
+        Handler.handle_request(task_req("tasks/get", "oh1"), TestServer, owner_conn("alice"))
+
+      assert alice["result"]["task"]["task_id"] == "oh1"
+    end
+
+    test "handler tasks/result: non-owner gets not-found, owner gets the result" do
+      {:ok, _} = ConduitMcp.Tasks.create("oh2", %{}, "alice")
+      ConduitMcp.Tasks.update("oh2", %{"status" => "completed", "result" => %{"ok" => true}})
+
+      bob = Handler.handle_request(task_req("tasks/result", "oh2"), TestServer, owner_conn("bob"))
+      assert bob["error"]["code"] == ConduitMcp.Errors.resource_not_found()
+
+      alice =
+        Handler.handle_request(task_req("tasks/result", "oh2"), TestServer, owner_conn("alice"))
+
+      assert alice["result"] == %{"ok" => true}
+    end
+
+    test "handler tasks/cancel: non-owner cannot cancel" do
+      {:ok, _} = ConduitMcp.Tasks.create("oh3", %{}, "alice")
+
+      bob = Handler.handle_request(task_req("tasks/cancel", "oh3"), TestServer, owner_conn("bob"))
+      assert bob["error"]["code"] == ConduitMcp.Errors.resource_not_found()
+      assert {:ok, %{"status" => "working"}} = ConduitMcp.Tasks.get("oh3", "alice")
+    end
+
+    test "handler tasks/list: excludes another principal's tasks" do
+      {:ok, _} = ConduitMcp.Tasks.create("oh4a", %{}, "alice")
+      {:ok, _} = ConduitMcp.Tasks.create("oh4b", %{}, "bob")
+
+      list_req = %{"jsonrpc" => "2.0", "id" => 1, "method" => "tasks/list", "params" => %{}}
+      resp = Handler.handle_request(list_req, TestServer, owner_conn("bob"))
+      ids = Enum.map(resp["result"]["tasks"], & &1["task_id"])
+      assert "oh4b" in ids
+      refute "oh4a" in ids
+    end
+
+    test "back-compat: 2-arg handle_request (no conn) is unscoped" do
+      {:ok, _} = ConduitMcp.Tasks.create("oh5", %{}, "alice")
+      # No conn → empty %Plug.Conn{} → owner nil → no scoping.
+      resp = Handler.handle_request(task_req("tasks/get", "oh5"), TestServer)
+      assert resp["result"]["task"]["task_id"] == "oh5"
     end
   end
 

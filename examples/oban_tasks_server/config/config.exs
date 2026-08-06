@@ -1,8 +1,13 @@
 import Config
 
 # Verbose logger so a failed JSON-RPC call shows the actual exception
-# instead of just "Error handling method". Useful when developing the
-# example; downstream apps should override.
+# instead of just "Error handling method". Useful when developing the example.
+#
+# SECURITY — override this downstream. `:crash_reason` and `:error` carry the
+# exception/stacktrace, which for an Oban job failure embeds the job args (here
+# the MCP tool params: script source, duration, etc.). That lands in your logs.
+# In production, drop these keys (or run a Logger filter that scrubs args) so
+# user-supplied task input isn't leaked to log sinks.
 config :logger, :default_formatter,
   format: "$time [$level] $message $metadata\n",
   metadata: [:error, :method, :request_id, :crash_reason]

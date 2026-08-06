@@ -68,6 +68,22 @@ defmodule ConduitMcp.OAuthScopeTest do
       assert response["result"]["content"]
     end
 
+    test "scoped tool fails closed on the 2-arg path (no conn, no oauth_scopes)" do
+      # handle_request/2 defaults conn to %Plug.Conn{}, whose assigns carry no
+      # :oauth_scopes; verify_scope/2 then treats token scopes as [] and a
+      # scoped tool is rejected. Pins the secure default for the no-auth path.
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 7,
+        "method" => "tools/call",
+        "params" => %{"name" => "read_data", "arguments" => %{"id" => "123"}}
+      }
+
+      response = Handler.handle_request(request, ScopedServer)
+      assert response["error"]["message"] =~ "Insufficient scope"
+      assert response["id"] == 7
+    end
+
     test "scoped tool works when scope is present" do
       conn =
         %Plug.Conn{}

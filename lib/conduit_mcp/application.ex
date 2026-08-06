@@ -1,7 +1,21 @@
 defmodule ConduitMcp.Application do
-  # See https://hexdocs.pm/elixir/Application.html
-  # for more information on OTP Applications
-  @moduledoc false
+  @moduledoc """
+  OTP application for ConduitMCP.
+
+  ConduitMCP is largely stateless — each HTTP request runs in its own Bandit
+  process — so the supervision tree is deliberately small. Its job is to own
+  the few long-lived ETS tables that must outlive short-lived request
+  processes:
+
+    * `ConduitMcp.Cancellation.Owner` — always started.
+    * `ConduitMcp.Tasks.EtsStore.Owner` — started only when the default
+      in-memory tasks store is in use (skipped for a custom `:tasks_store`).
+    * `ConduitMcp.OAuth.KeyProvider.JWKS.Owner` — started when the JWKS key
+      provider is compiled in (i.e. when `Req` is available).
+
+  It also seeds the validation config into `:persistent_term` for O(1) reads on
+  every request.
+  """
 
   use Application
 
@@ -27,7 +41,19 @@ defmodule ConduitMcp.Application do
         []
       end
 
-    children = base_children ++ tasks_children
+    # The JWKS key provider compiles only when Req is available. When it does,
+    # own its ETS cache from a supervised process so the cache is stable across
+    # the short-lived request processes that touch it on every authenticated
+    # call (without this, a concurrent request can hit an :ets ArgumentError
+    # when the creating request process exits mid-operation).
+    jwks_children =
+      if Code.ensure_loaded?(ConduitMcp.OAuth.KeyProvider.JWKS.Owner) do
+        [ConduitMcp.OAuth.KeyProvider.JWKS.Owner]
+      else
+        []
+      end
+
+    children = base_children ++ tasks_children ++ jwks_children
 
     # See https://hexdocs.pm/elixir/Supervisor.html
     # for other strategies and supported options

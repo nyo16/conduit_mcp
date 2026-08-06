@@ -17,7 +17,7 @@ defmodule ConduitMcp.Cancellation do
       def my_long_tool(conn, params) do
         ConduitMcp.Cancellation.cancelled?(conn)
         |> case do
-          true -> {:error, %{"code" => -32800, "message" => "Request cancelled"}}
+          true -> {:error, %{"code" => ConduitMcp.Errors.request_cancelled(), "message" => "Request cancelled"}}
           false -> continue_work(...)
         end
       end
@@ -42,7 +42,9 @@ defmodule ConduitMcp.Cancellation do
     are bounded by the rate of in-flight cancellations.
 
   Emits `[:conduit_mcp, :request, :cancelled]` telemetry on cancellation
-  with metadata `%{request_id: id, reason: reason}`.
+  with metadata `%{request_id: id, reason: reason}`, and
+  `[:conduit_mcp, :cancellation, :cleanup]` with measurement
+  `%{removed: count}` on each `cleanup/1` pass.
   """
 
   @table :conduit_mcp_cancellations
@@ -119,23 +121,33 @@ defmodule ConduitMcp.Cancellation do
   was already sent.
 
   Returns the number of entries removed.
+
+  Emits `[:conduit_mcp, :cancellation, :cleanup]` telemetry with measurement
+  `%{removed: count}` so eviction is observable (mirrors the session janitor).
   """
   def cleanup(ttl_ms) do
     ensure_table()
     now = System.system_time(:millisecond)
 
-    :ets.foldl(
-      fn {id, %{"cancelled_at" => at}}, acc ->
-        if now - at > ttl_ms do
-          :ets.delete(@table, id)
-          acc + 1
-        else
-          acc
-        end
-      end,
-      0,
-      @table
-    )
+    # Deleting the *current* element during `:ets.foldl` is guaranteed safe by
+    # ETS for set tables — do NOT "fix" this into collect-then-delete.
+    removed =
+      :ets.foldl(
+        fn {id, %{"cancelled_at" => at}}, acc ->
+          if now - at > ttl_ms do
+            :ets.delete(@table, id)
+            acc + 1
+          else
+            acc
+          end
+        end,
+        0,
+        @table
+      )
+
+    :telemetry.execute([:conduit_mcp, :cancellation, :cleanup], %{removed: removed}, %{})
+
+    removed
   end
 
   defp ensure_table do

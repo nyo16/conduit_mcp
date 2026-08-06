@@ -199,9 +199,13 @@ defmodule ConduitMcp.ValidationTest do
     end
 
     test "validation can be disabled via configuration" do
-      # on_exit (not `after`) so the global config is restored even if the
-      # test process is killed mid-run
-      on_exit(fn -> Validation.update_validation_config([]) end)
+      # Snapshot + restore the REAL prior config (not a hardcoded []) so this
+      # async: false test leaves global state pristine for any later sync module.
+      # ExUnit runs every async module to completion before running sync modules
+      # one at a time (see ex_unit/lib/ex_unit/runner.ex), so async: false alone
+      # already prevents a race; on_exit just guarantees restore even on a kill.
+      prev = Application.get_env(:conduit_mcp, :validation, [])
+      on_exit(fn -> Validation.update_validation_config(prev) end)
       Validation.update_validation_config(runtime_validation: false)
 
       params = %{"invalid" => "params"}

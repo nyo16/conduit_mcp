@@ -137,9 +137,11 @@ defmodule MyApp.McpTaskWorker do
 
   defp update_status(task_id, status), do: update_task(task_id, %{status: status})
 
+  # Returns {:ok, task} | {:error, changeset} | {:error, :not_found} so callers
+  # can react to a failed write instead of silently dropping it.
   defp update_task(task_id, updates) do
     case MyApp.Repo.get(MyApp.McpTask, task_id) do
-      nil -> :ok
+      nil -> {:error, :not_found}
       task -> MyApp.Repo.update(MyApp.McpTask.changeset(task, updates))
     end
   end
@@ -252,7 +254,9 @@ defmodule MyApp.MCPServer do
       task_id = ConduitMcp.Tasks.generate_id()
 
       {:ok, _} = MyApp.ObanTaskStore.create_with_job(task_id, %{
-        "handler" => "MyApp.DatasetAnalyzer",
+        # Must be a key registered in the worker's @handlers allowlist
+        # (see above) — never the raw module name from the client.
+        "handler" => "analysis",
         "dataset_id" => dataset_id
       })
 

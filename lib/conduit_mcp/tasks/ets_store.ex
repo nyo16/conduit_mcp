@@ -123,6 +123,8 @@ defmodule ConduitMcp.Tasks.EtsStore do
     now = System.system_time(:millisecond)
     terminal_statuses = ~w(completed failed cancelled)
 
+    # Deleting the *current* element during `:ets.foldl` is guaranteed safe by
+    # ETS for set tables — do NOT "fix" this into collect-then-delete.
     :ets.foldl(
       fn {task_id, task}, acc ->
         created_at = Map.get(task, "created_at", 0)

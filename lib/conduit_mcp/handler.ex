@@ -89,7 +89,7 @@ defmodule ConduitMcp.Handler do
       %{
         method: Map.get(request, "method"),
         server_module: server_module,
-        status: if(is_map(result) && Map.has_key?(result, "error"), do: :error, else: :ok)
+        status: if(match?(%{"error" => _}, result), do: :error, else: :ok)
       }
     )
 
@@ -153,16 +153,16 @@ defmodule ConduitMcp.Handler do
         handle_unsubscribe(id, params, server_module, conn)
 
       "tasks/get" ->
-        handle_tasks_get(id, params)
+        handle_tasks_get(id, params, conn)
 
       "tasks/cancel" ->
-        handle_tasks_cancel(id, params)
+        handle_tasks_cancel(id, params, conn)
 
       "tasks/result" ->
-        handle_tasks_result(id, params)
+        handle_tasks_result(id, params, conn)
 
       "tasks/list" ->
-        handle_tasks_list(id, params)
+        handle_tasks_list(id, params, conn)
 
       _ ->
         Protocol.error_response(
@@ -297,7 +297,7 @@ defmodule ConduitMcp.Handler do
       %{
         tool_name: tool_name,
         server_module: server_module,
-        status: if(is_map(result) and Map.has_key?(result, "error"), do: :error, else: :ok)
+        status: if(match?(%{"error" => _}, result), do: :error, else: :ok)
       }
     )
 
@@ -503,44 +503,58 @@ defmodule ConduitMcp.Handler do
     end
   end
 
-  defp handle_tasks_get(id, params) do
+  # The `tasks/*` routes are owner-scoped: the caller's principal is extracted
+  # from `conn` (via `ConduitMcp.Tasks.owner/1`) and passed to the owner-aware
+  # facade arities so a client can't read or cancel another principal's task.
+  # When there is no principal (unauthenticated, or the 2-arg
+  # `handle_request/2` path) scoping is a no-op — see `ConduitMcp.Tasks`.
+  defp handle_tasks_get(id, params, conn) do
     case Map.get(params, "taskId") do
       nil ->
         Protocol.error_response(id, Protocol.invalid_params(), "Missing taskId")
 
       task_id ->
-        case ConduitMcp.Tasks.get(task_id) do
+        case ConduitMcp.Tasks.get(task_id, ConduitMcp.Tasks.owner(conn)) do
           {:ok, task} -> Protocol.success_response(id, %{"task" => task})
           {:error, :not_found} -> task_not_found(id, task_id)
         end
     end
   end
 
-  defp handle_tasks_cancel(id, params) do
+  defp handle_tasks_cancel(id, params, conn) do
     case Map.get(params, "taskId") do
       nil ->
         Protocol.error_response(id, Protocol.invalid_params(), "Missing taskId")
 
       task_id ->
-        case ConduitMcp.Tasks.cancel(task_id) do
+        case ConduitMcp.Tasks.cancel(task_id, ConduitMcp.Tasks.owner(conn)) do
           {:ok, task} -> Protocol.success_response(id, %{"task" => task})
           {:error, :not_found} -> task_not_found(id, task_id)
         end
     end
   end
 
-  defp handle_tasks_result(id, params) do
+  defp handle_tasks_result(id, params, conn) do
     case Map.get(params, "taskId") do
       nil ->
         Protocol.error_response(id, Protocol.invalid_params(), "Missing taskId")
 
       task_id ->
-        case ConduitMcp.Tasks.get(task_id) do
+        case ConduitMcp.Tasks.get(task_id, ConduitMcp.Tasks.owner(conn)) do
           {:ok, task} ->
             case Map.get(task, "status") do
-              "completed" -> Protocol.success_response(id, Map.get(task, "result", %{}))
-              "failed" -> Protocol.success_response(id, %{"error" => Map.get(task, "error")})
-              other -> Protocol.error_response(id, -32004, "Task not finished (status: #{other})")
+              "completed" ->
+                Protocol.success_response(id, Map.get(task, "result", %{}))
+
+              "failed" ->
+                Protocol.success_response(id, %{"error" => Map.get(task, "error")})
+
+              other ->
+                Protocol.error_response(
+                  id,
+                  ConduitMcp.Errors.task_not_ready(),
+                  "Task not finished (status: #{other})"
+                )
             end
 
           {:error, :not_found} ->
@@ -549,9 +563,9 @@ defmodule ConduitMcp.Handler do
     end
   end
 
-  defp handle_tasks_list(id, params) do
+  defp handle_tasks_list(id, params, conn) do
     opts = if status = Map.get(params, "status"), do: [status: status], else: []
-    tasks = ConduitMcp.Tasks.list(opts)
+    tasks = ConduitMcp.Tasks.list(opts, ConduitMcp.Tasks.owner(conn))
     Protocol.success_response(id, %{"tasks" => tasks})
   end
 

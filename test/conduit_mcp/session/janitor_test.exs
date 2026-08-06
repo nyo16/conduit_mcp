@@ -88,15 +88,24 @@ defmodule ConduitMcp.Session.JanitorTest do
         self()
       )
 
+      # Large interval so the auto-scheduled tick can't fire during the test —
+      # we drive exactly one cleanup ourselves for a deterministic assertion
+      # (no reliance on a refute_receive timing window vs. the tick interval).
       {:ok, pid} =
         Janitor.start_link(
           store: NoCleanupStore,
           ttl: 1_000,
-          interval: 50,
+          interval: 60_000,
           name: :"janitor_test_#{System.unique_integer([:positive])}"
         )
 
-      refute_receive :unexpected_cleanup, 200
+      # Force one cleanup pass, then :sys.get_state blocks until the GenServer
+      # has processed it — so any cleanup telemetry would already be in our
+      # mailbox before the (non-blocking) refute_received check.
+      send(pid, :cleanup)
+      _ = :sys.get_state(pid)
+
+      refute_received :unexpected_cleanup
       assert Process.alive?(pid)
       GenServer.stop(pid)
     end
