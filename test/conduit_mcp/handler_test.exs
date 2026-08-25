@@ -5,12 +5,8 @@ defmodule ConduitMcp.HandlerTest do
   alias ConduitMcp.Protocol
   alias ConduitMcp.TestServer
 
-  # Helpers for the W2 owner-scoping tests below.
-  defp owner_conn(user), do: Plug.Conn.assign(%Plug.Conn{}, :current_user, user)
-
-  defp task_req(method, task_id) do
-    %{"jsonrpc" => "2.0", "id" => 1, "method" => method, "params" => %{"taskId" => task_id}}
-  end
+  # `tasks/*` tests live in ConduitMcp.HandlerTasksTest — they wipe the global
+  # `:conduit_mcp_tasks` table and must not run concurrently with this module.
 
   describe "handle_request/2 with valid requests" do
     test "handles initialize request with latest protocol version" do
@@ -200,7 +196,7 @@ defmodule ConduitMcp.HandlerTest do
 
       assert response["jsonrpc"] == "2.0"
       assert response["id"] == 6
-      assert response["error"]["code"] == -32601
+      assert response["error"]["code"] == ConduitMcp.Errors.invalid_params()
       assert response["error"]["message"] == "Tool not found"
     end
 
@@ -247,7 +243,7 @@ defmodule ConduitMcp.HandlerTest do
 
       assert response["jsonrpc"] == "2.0"
       assert response["id"] == 9
-      assert response["error"]["code"] == -32601
+      assert response["error"]["code"] == ConduitMcp.Errors.resource_not_found()
       assert response["error"]["message"] == "Resource not found"
     end
 
@@ -318,7 +314,7 @@ defmodule ConduitMcp.HandlerTest do
 
       assert response["jsonrpc"] == "2.0"
       assert response["id"] == 13
-      assert response["error"]["code"] == -32601
+      assert response["error"]["code"] == ConduitMcp.Errors.invalid_params()
       assert response["error"]["message"] == "Prompt not found"
     end
   end
@@ -346,20 +342,66 @@ defmodule ConduitMcp.HandlerTest do
       assert response == :ok
     end
 
-    test "notifications/cancelled records cancellation state" do
-      if :ets.whereis(:conduit_mcp_cancellations) != :undefined do
-        :ets.delete_all_objects(:conduit_mcp_cancellations)
-      end
+    test "notifications/cancelled records cancellation state scoped to the caller" do
+      # No table wipe: `:conduit_mcp_cancellations` is a run-global supervised
+      # table and this module is `async: true`, so clearing it here is the
+      # hazard T-L2 diagnosed for `:conduit_mcp_tasks`. A unique id per run
+      # gives the same isolation without touching another module's rows.
+      request_id = "cancel-#{System.unique_integer([:positive])}"
 
       notification = %{
         "jsonrpc" => "2.0",
         "method" => "notifications/cancelled",
-        "params" => %{"requestId" => "abc-123", "reason" => "user abort"}
+        "params" => %{"requestId" => request_id, "reason" => "user abort"}
       }
 
-      assert :ok = Handler.handle_request(notification, TestServer)
-      assert ConduitMcp.Cancellation.cancelled?("abc-123")
-      assert ConduitMcp.Cancellation.reason("abc-123") == "user abort"
+      session = "session-#{System.unique_integer([:positive])}"
+      caller = Plug.Conn.put_private(%Plug.Conn{}, :mcp_session_id, session <> "-a")
+      other = Plug.Conn.put_private(%Plug.Conn{}, :mcp_session_id, session <> "-b")
+
+      assert :ok = Handler.handle_request(notification, TestServer, caller)
+
+      scope = ConduitMcp.Cancellation.scope(caller)
+      assert ConduitMcp.Cancellation.cancelled?(request_id, scope)
+      assert ConduitMcp.Cancellation.reason(request_id, scope) == "user abort"
+
+      # The whole point of scoping: another client's identical id is untouched.
+      refute ConduitMcp.Cancellation.cancelled?(request_id, ConduitMcp.Cancellation.scope(other))
+    end
+
+    test "notifications/cancelled with a non-scalar requestId returns invalid_params" do
+      notification = %{
+        "jsonrpc" => "2.0",
+        "method" => "notifications/cancelled",
+        "params" => %{"requestId" => %{}}
+      }
+
+      response = Handler.handle_request(notification, TestServer)
+
+      # Previously `to_string(%{})` raised out of the un-rescued notification
+      # path and the transport returned a 500.
+      assert response["jsonrpc"] == "2.0"
+      assert response["id"] == nil
+      assert response["error"]["code"] == Protocol.invalid_params()
+      assert response["error"]["message"] =~ "string or integer requestId"
+    end
+
+    test "a malformed notifications/cancelled still emits [:conduit_mcp, :request, :stop]" do
+      ref =
+        ConduitMcp.TelemetryTestHelper.attach_event_handlers(self(), [
+          [:conduit_mcp, :request, :stop]
+        ])
+
+      notification = %{
+        "jsonrpc" => "2.0",
+        "method" => "notifications/cancelled",
+        "params" => %{"requestId" => %{}}
+      }
+
+      Handler.handle_request(notification, TestServer)
+
+      assert_receive {[:conduit_mcp, :request, :stop], ^ref, _measurements,
+                      %{method: "notifications/cancelled", status: :error}}
     end
   end
 
@@ -885,248 +927,6 @@ defmodule ConduitMcp.HandlerTest do
       assert response["jsonrpc"] == "2.0"
       assert response["id"] == 7
       assert response["result"]["unsubscribed"] == "test://resource1"
-    end
-  end
-
-  describe "tasks/* methods" do
-    setup do
-      if :ets.whereis(:conduit_mcp_tasks) != :undefined do
-        :ets.delete_all_objects(:conduit_mcp_tasks)
-      end
-
-      :ok
-    end
-
-    test "tasks/get returns task metadata for an existing task" do
-      {:ok, _} = ConduitMcp.Tasks.create("t1", %{"tool" => "echo"})
-
-      request = %{
-        "jsonrpc" => "2.0",
-        "id" => 1,
-        "method" => "tasks/get",
-        "params" => %{"taskId" => "t1"}
-      }
-
-      response = Handler.handle_request(request, TestServer)
-
-      assert response["result"]["task"]["task_id"] == "t1"
-      assert response["result"]["task"]["status"] == "working"
-    end
-
-    test "tasks/get returns -32002 for missing task" do
-      request = %{
-        "jsonrpc" => "2.0",
-        "id" => 1,
-        "method" => "tasks/get",
-        "params" => %{"taskId" => "missing"}
-      }
-
-      response = Handler.handle_request(request, TestServer)
-
-      assert response["error"]["code"] == ConduitMcp.Errors.resource_not_found()
-    end
-
-    test "tasks/get returns invalid_params when taskId missing" do
-      request = %{
-        "jsonrpc" => "2.0",
-        "id" => 1,
-        "method" => "tasks/get",
-        "params" => %{}
-      }
-
-      response = Handler.handle_request(request, TestServer)
-      assert response["error"]["code"] == ConduitMcp.Errors.invalid_params()
-    end
-
-    test "tasks/cancel transitions a working task to cancelled" do
-      {:ok, _} = ConduitMcp.Tasks.create("t2", %{"tool" => "echo"})
-
-      request = %{
-        "jsonrpc" => "2.0",
-        "id" => 1,
-        "method" => "tasks/cancel",
-        "params" => %{"taskId" => "t2"}
-      }
-
-      response = Handler.handle_request(request, TestServer)
-      assert response["result"]["task"]["status"] == "cancelled"
-    end
-
-    test "tasks/result returns the result for a completed task" do
-      {:ok, _} = ConduitMcp.Tasks.create("t3", %{"tool" => "echo"})
-
-      ConduitMcp.Tasks.update("t3", %{
-        "status" => "completed",
-        "result" => %{"content" => [%{"type" => "text", "text" => "done"}]}
-      })
-
-      request = %{
-        "jsonrpc" => "2.0",
-        "id" => 1,
-        "method" => "tasks/result",
-        "params" => %{"taskId" => "t3"}
-      }
-
-      response = Handler.handle_request(request, TestServer)
-
-      assert response["result"]["content"] == [%{"type" => "text", "text" => "done"}]
-    end
-
-    test "tasks/result errors when task is still working" do
-      {:ok, _} = ConduitMcp.Tasks.create("t4", %{"tool" => "echo"})
-
-      request = %{
-        "jsonrpc" => "2.0",
-        "id" => 1,
-        "method" => "tasks/result",
-        "params" => %{"taskId" => "t4"}
-      }
-
-      response = Handler.handle_request(request, TestServer)
-      assert response["error"]["code"] == -32004
-      assert response["error"]["message"] =~ "Task not finished"
-    end
-
-    test "tasks/list returns all tasks" do
-      {:ok, _} = ConduitMcp.Tasks.create("t5")
-      {:ok, _} = ConduitMcp.Tasks.create("t6")
-
-      request = %{
-        "jsonrpc" => "2.0",
-        "id" => 1,
-        "method" => "tasks/list",
-        "params" => %{}
-      }
-
-      response = Handler.handle_request(request, TestServer)
-      task_ids = Enum.map(response["result"]["tasks"], & &1["task_id"])
-      assert "t5" in task_ids
-      assert "t6" in task_ids
-    end
-
-    test "tasks/list filters by status" do
-      {:ok, _} = ConduitMcp.Tasks.create("working_one")
-      {:ok, _} = ConduitMcp.Tasks.create("done_one")
-      ConduitMcp.Tasks.update("done_one", %{"status" => "completed"})
-
-      request = %{
-        "jsonrpc" => "2.0",
-        "id" => 1,
-        "method" => "tasks/list",
-        "params" => %{"status" => "completed"}
-      }
-
-      response = Handler.handle_request(request, TestServer)
-      task_ids = Enum.map(response["result"]["tasks"], & &1["task_id"])
-      assert task_ids == ["done_one"]
-    end
-  end
-
-  # W2 (BOLA/IDOR): tasks/* must be scoped to the caller's principal so one user
-  # can't read or cancel another's task, while staying back-compatible for the
-  # no-principal path. Lives in this module (the only consumer of the global
-  # :conduit_mcp_tasks table) so the table is never touched concurrently.
-  describe "tasks/* owner scoping (W2)" do
-    setup do
-      if :ets.whereis(:conduit_mcp_tasks) != :undefined do
-        :ets.delete_all_objects(:conduit_mcp_tasks)
-      end
-
-      :ok
-    end
-
-    test "owner/1 extracts current_user and is nil without a principal" do
-      assert ConduitMcp.Tasks.owner(owner_conn("alice")) == "alice"
-      assert ConduitMcp.Tasks.owner(%Plug.Conn{}) == nil
-      assert ConduitMcp.Tasks.owner(nil) == nil
-    end
-
-    test "facade get/2 hides another principal's task; nil/owner/unowned allowed" do
-      {:ok, _} = ConduitMcp.Tasks.create("os1", %{"tool" => "echo"}, "alice")
-      assert {:ok, %{"owner" => "alice"}} = ConduitMcp.Tasks.get("os1", "alice")
-      assert {:error, :not_found} = ConduitMcp.Tasks.get("os1", "bob")
-      # no principal → no scoping (back-compat)
-      assert {:ok, _} = ConduitMcp.Tasks.get("os1", nil)
-
-      {:ok, _} = ConduitMcp.Tasks.create("os1u", %{"tool" => "echo"})
-      # unowned task → visible to anyone
-      assert {:ok, _} = ConduitMcp.Tasks.get("os1u", "bob")
-    end
-
-    test "facade cancel/2 refuses a non-owner and leaves the task working" do
-      {:ok, _} = ConduitMcp.Tasks.create("os2", %{"tool" => "echo"}, "alice")
-      assert {:error, :not_found} = ConduitMcp.Tasks.cancel("os2", "bob")
-      assert {:ok, %{"status" => "working"}} = ConduitMcp.Tasks.get("os2", "alice")
-      assert {:ok, %{"status" => "cancelled"}} = ConduitMcp.Tasks.cancel("os2", "alice")
-    end
-
-    test "facade list/2 returns own + unowned, excludes others; nil sees all" do
-      {:ok, _} = ConduitMcp.Tasks.create("os3a", %{}, "alice")
-      {:ok, _} = ConduitMcp.Tasks.create("os3b", %{}, "bob")
-      {:ok, _} = ConduitMcp.Tasks.create("os3u", %{})
-
-      bob_ids = ConduitMcp.Tasks.list([], "bob") |> Enum.map(& &1["task_id"])
-      assert "os3b" in bob_ids
-      assert "os3u" in bob_ids
-      refute "os3a" in bob_ids
-
-      all_ids = ConduitMcp.Tasks.list([], nil) |> Enum.map(& &1["task_id"])
-      assert Enum.all?(~w(os3a os3b os3u), &(&1 in all_ids))
-    end
-
-    # NB: the `:task_owner_fun` config-override test lives in
-    # ConduitMcp.Tasks.OwnerExtractorTest (async: false) because it mutates the
-    # global application env — it must not run inside this async: true module.
-
-    test "handler tasks/get: non-owner gets not-found, owner succeeds" do
-      {:ok, _} = ConduitMcp.Tasks.create("oh1", %{"tool" => "echo"}, "alice")
-
-      bob = Handler.handle_request(task_req("tasks/get", "oh1"), TestServer, owner_conn("bob"))
-      assert bob["error"]["code"] == ConduitMcp.Errors.resource_not_found()
-
-      alice =
-        Handler.handle_request(task_req("tasks/get", "oh1"), TestServer, owner_conn("alice"))
-
-      assert alice["result"]["task"]["task_id"] == "oh1"
-    end
-
-    test "handler tasks/result: non-owner gets not-found, owner gets the result" do
-      {:ok, _} = ConduitMcp.Tasks.create("oh2", %{}, "alice")
-      ConduitMcp.Tasks.update("oh2", %{"status" => "completed", "result" => %{"ok" => true}})
-
-      bob = Handler.handle_request(task_req("tasks/result", "oh2"), TestServer, owner_conn("bob"))
-      assert bob["error"]["code"] == ConduitMcp.Errors.resource_not_found()
-
-      alice =
-        Handler.handle_request(task_req("tasks/result", "oh2"), TestServer, owner_conn("alice"))
-
-      assert alice["result"] == %{"ok" => true}
-    end
-
-    test "handler tasks/cancel: non-owner cannot cancel" do
-      {:ok, _} = ConduitMcp.Tasks.create("oh3", %{}, "alice")
-
-      bob = Handler.handle_request(task_req("tasks/cancel", "oh3"), TestServer, owner_conn("bob"))
-      assert bob["error"]["code"] == ConduitMcp.Errors.resource_not_found()
-      assert {:ok, %{"status" => "working"}} = ConduitMcp.Tasks.get("oh3", "alice")
-    end
-
-    test "handler tasks/list: excludes another principal's tasks" do
-      {:ok, _} = ConduitMcp.Tasks.create("oh4a", %{}, "alice")
-      {:ok, _} = ConduitMcp.Tasks.create("oh4b", %{}, "bob")
-
-      list_req = %{"jsonrpc" => "2.0", "id" => 1, "method" => "tasks/list", "params" => %{}}
-      resp = Handler.handle_request(list_req, TestServer, owner_conn("bob"))
-      ids = Enum.map(resp["result"]["tasks"], & &1["task_id"])
-      assert "oh4b" in ids
-      refute "oh4a" in ids
-    end
-
-    test "back-compat: 2-arg handle_request (no conn) is unscoped" do
-      {:ok, _} = ConduitMcp.Tasks.create("oh5", %{}, "alice")
-      # No conn → empty %Plug.Conn{} → owner nil → no scoping.
-      resp = Handler.handle_request(task_req("tasks/get", "oh5"), TestServer)
-      assert resp["result"]["task"]["task_id"] == "oh5"
     end
   end
 

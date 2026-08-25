@@ -7,9 +7,15 @@
   format: "txt",
   out: "",
   threshold: "low",
-  # False positives for this library:
-  # - Traversal.FileModule: compile-time DSL macros read developer-defined view paths, not user input
-  # - DOS.StringToAtom: compile-time DSL converts developer-defined schema/URI template keys, not user input
-  ignore: ["DOS.StringToAtom", "Traversal.FileModule"],
+  # False positive, re-verified 2026-08-24:
+  # - Traversal.FileModule: the three flagged `File.read!` sites are
+  #   `File.read!(unquote(view_path))` in DSL-generated code, where view_path is
+  #   the compile-time literal from `view "priv/..."`. URI template params are
+  #   `[^/]+` and never reach a file sink.
+  #
+  # DOS.StringToAtom was suppressed here and is no longer detected: there is no
+  # `String.to_atom` in lib/, only two `String.to_existing_atom` sites. Removed
+  # rather than left to rot.
+  ignore: ["Traversal.FileModule"],
   ignore_files: ["test/"]
 ]

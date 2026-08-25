@@ -28,7 +28,16 @@ Requires Elixir ~> 1.18. No config directory exists; validation config is set vi
 
 ## Architecture
 
-MCP server modules are **stateless** — just compiled functions. Each HTTP request runs in its own Bandit process for maximum concurrency. No supervised processes — rate limiting uses a user-supplied Hammer module.
+MCP server modules are **stateless** — just compiled functions. Each HTTP request runs in its own Bandit process for maximum concurrency. Rate limiting uses a user-supplied Hammer module.
+
+The library itself does start a supervision tree (`ConduitMcp.Application`, `mod:` in `mix.exs`). It is deliberately small: it owns the long-lived ETS tables that must outlive short-lived request processes, plus the session janitor.
+
+- Always: `ConduitMcp.Cancellation.Owner`, `ConduitMcp.Session.EtsStore.Owner`, `ConduitMcp.Transport.SSE.Owner`, `ConduitMcp.Session.Janitor` (as `ConduitMcp.Session.Janitor.Default`; disable with `config :conduit_mcp, :session_janitor, false`), and a second `ConduitMcp.Session.Janitor` sweeping the cancellation table (as `ConduitMcp.Cancellation.Janitor`; disable with `config :conduit_mcp, :cancellation_janitor, false`).
+- Conditionally: `ConduitMcp.Tasks.EtsStore.Owner` (default tasks store only), `ConduitMcp.OAuth.KeyProvider.JWKS.Owner` (only when `Req` is compiled in).
+
+Both janitor keys accept `true`, `false`, or a keyword list of `ConduitMcp.Session.Janitor` options; anything else raises at boot naming the key.
+
+Every owner runs `ConduitMcp.EtsOwner`: a process that creates a `:public` table and then idles, retrying every second if the name was already taken. Reads and writes go straight to ETS from the calling process — **do not turn an owner into a `handle_call` gateway.**
 
 ### Request Flow
 

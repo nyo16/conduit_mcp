@@ -108,7 +108,7 @@ defmodule ConduitMcp.DSL do
       @mcp_current_tool_params []
       @mcp_current_tool_handler nil
       @mcp_current_tool_annotations nil
-      @mcp_current_tool_scope nil
+      @mcp_current_scope nil
       @mcp_current_tool_meta nil
       @mcp_current_tool_title nil
       @mcp_current_tool_icons nil
@@ -124,7 +124,7 @@ defmodule ConduitMcp.DSL do
         params: Enum.reverse(@mcp_current_tool_params),
         handler: @mcp_current_tool_handler,
         annotations: @mcp_current_tool_annotations,
-        scope: @mcp_current_tool_scope,
+        scope: @mcp_current_scope,
         meta: @mcp_current_tool_meta,
         title: @mcp_current_tool_title,
         icons: @mcp_current_tool_icons,
@@ -138,7 +138,7 @@ defmodule ConduitMcp.DSL do
       Module.delete_attribute(__MODULE__, :mcp_current_tool_params)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_handler)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_annotations)
-      Module.delete_attribute(__MODULE__, :mcp_current_tool_scope)
+      Module.delete_attribute(__MODULE__, :mcp_current_scope)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_meta)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_title)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_icons)
@@ -200,12 +200,17 @@ defmodule ConduitMcp.DSL do
   end
 
   @doc """
-  Sets a required OAuth scope for a tool.
+  Sets a required OAuth scope for a tool, resource, or prompt.
 
-  When OAuth authentication is enabled, the handler will check that the
-  token contains the required scope before executing the tool.
+  `ConduitMcp.Handler` checks the declared scope against
+  `ConduitMcp.Principal.scopes/1` before dispatching. A request with no
+  principal has no scopes, so a scoped declaration **fails closed**.
 
-  ## Example
+  Must be called inside a `tool`, `app`, `resource` or `prompt` block; calling
+  it anywhere else raises at compile time rather than silently enforcing
+  nothing.
+
+  ## Examples
 
       tool "delete_user", "Deletes a user" do
         scope "users:write"
@@ -213,8 +218,20 @@ defmodule ConduitMcp.DSL do
         handle fn _conn, %{"id" => id} -> ... end
       end
 
-  Multiple scopes can be required by calling scope multiple times or
-  passing a space-separated string:
+      resource "vault://{id}" do
+        scope "vault:read"
+        read fn _conn, params, _opts -> ... end
+      end
+
+      prompt "code_review", "Reviews code" do
+        scope "review:run"
+        get fn _conn, args -> ... end
+      end
+
+  A scope declared on a URI template covers every URI that template serves.
+
+  Multiple scopes are required by passing a space-separated string; **all**
+  of them must be present:
 
       tool "admin_action", "Admin only" do
         scope "admin users:write"
@@ -223,7 +240,8 @@ defmodule ConduitMcp.DSL do
   """
   defmacro scope(scope_string) do
     quote do
-      @mcp_current_tool_scope unquote(scope_string)
+      ConduitMcp.DSL.__assert_in_declaration__(__MODULE__, :scope)
+      @mcp_current_scope unquote(scope_string)
     end
   end
 
@@ -854,6 +872,7 @@ defmodule ConduitMcp.DSL do
       @mcp_current_prompt_args []
       @mcp_current_prompt_handler nil
       @mcp_current_prompt_completions []
+      @mcp_current_scope nil
 
       unquote(block)
 
@@ -862,7 +881,8 @@ defmodule ConduitMcp.DSL do
         description: @mcp_current_prompt_description,
         args: Enum.reverse(@mcp_current_prompt_args),
         handler: @mcp_current_prompt_handler,
-        completions: @mcp_current_prompt_completions
+        completions: @mcp_current_prompt_completions,
+        scope: @mcp_current_scope
       }
 
       Module.delete_attribute(__MODULE__, :mcp_current_prompt_name)
@@ -870,6 +890,7 @@ defmodule ConduitMcp.DSL do
       Module.delete_attribute(__MODULE__, :mcp_current_prompt_args)
       Module.delete_attribute(__MODULE__, :mcp_current_prompt_handler)
       Module.delete_attribute(__MODULE__, :mcp_current_prompt_completions)
+      Module.delete_attribute(__MODULE__, :mcp_current_scope)
     end
   end
 
@@ -980,6 +1001,7 @@ defmodule ConduitMcp.DSL do
       @mcp_current_resource_mime_type nil
       @mcp_current_resource_handler nil
       @mcp_current_resource_completions []
+      @mcp_current_scope nil
 
       unquote(block)
 
@@ -988,7 +1010,8 @@ defmodule ConduitMcp.DSL do
         description: @mcp_current_resource_description,
         mime_type: @mcp_current_resource_mime_type,
         handler: @mcp_current_resource_handler,
-        completions: @mcp_current_resource_completions
+        completions: @mcp_current_resource_completions,
+        scope: @mcp_current_scope
       }
 
       Module.delete_attribute(__MODULE__, :mcp_current_resource_uri)
@@ -996,6 +1019,7 @@ defmodule ConduitMcp.DSL do
       Module.delete_attribute(__MODULE__, :mcp_current_resource_mime_type)
       Module.delete_attribute(__MODULE__, :mcp_current_resource_handler)
       Module.delete_attribute(__MODULE__, :mcp_current_resource_completions)
+      Module.delete_attribute(__MODULE__, :mcp_current_scope)
     end
   end
 
@@ -1114,7 +1138,7 @@ defmodule ConduitMcp.DSL do
       @mcp_current_tool_params []
       @mcp_current_tool_handler nil
       @mcp_current_tool_annotations nil
-      @mcp_current_tool_scope nil
+      @mcp_current_scope nil
       @mcp_current_tool_meta nil
       @mcp_current_app_view nil
 
@@ -1144,18 +1168,22 @@ defmodule ConduitMcp.DSL do
         params: Enum.reverse(@mcp_current_tool_params),
         handler: @mcp_current_tool_handler,
         annotations: @mcp_current_tool_annotations,
-        scope: @mcp_current_tool_scope,
+        scope: @mcp_current_scope,
         meta: @mcp_current_tool_meta
       }
 
-      # Store the resource for the UI HTML — use :app_view handler type
-      # which generate_resource_clauses will expand into File.read! at compile time
+      # Store the resource for the UI HTML — use :app_view handler type which
+      # generate_resource_clauses expands into File.read! at compile time.
+      # The UI resource inherits the app tool's scope: the HTML is part of the
+      # same capability, so serving it unscoped would leak the surface the
+      # scope exists to protect.
       @mcp_resources %{
         uri: app_resource_uri,
         description: "UI for #{unquote(name)}",
         mime_type: "text/html;profile=mcp-app",
         handler: {:app_view, app_view_path},
-        completions: []
+        completions: [],
+        scope: @mcp_current_scope
       }
 
       # Clean up
@@ -1164,7 +1192,7 @@ defmodule ConduitMcp.DSL do
       Module.delete_attribute(__MODULE__, :mcp_current_tool_params)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_handler)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_annotations)
-      Module.delete_attribute(__MODULE__, :mcp_current_tool_scope)
+      Module.delete_attribute(__MODULE__, :mcp_current_scope)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_meta)
       Module.delete_attribute(__MODULE__, :mcp_current_app_view)
     end
@@ -1220,7 +1248,23 @@ defmodule ConduitMcp.DSL do
     prompt_clauses = generate_prompt_clauses(prompts)
     resource_clauses = generate_resource_clauses(resources)
 
-    scope_map = build_scope_map(reversed_tools)
+    tool_scopes = build_scope_map(reversed_tools, &to_string(&1.name))
+    prompt_scopes = build_scope_map(reversed_prompts, &to_string(&1.name))
+    # Handler-less resources are dropped: `generate_resource_clauses/1` filters
+    # them out too (`:1583`), so including one here would put a template in
+    # `__scope_for_resource__/1`'s ordered scan with no matching dispatch
+    # clause. If it overlapped a later scoped-and-handled template, the scan
+    # would stop at the handler-less one and enforce *its* scope while
+    # `handle_read_resource/2` ran the other's handler — precisely the
+    # order mismatch the comment on `build_scope_map/2` says this ordering
+    # prevents. It fails closed, but it enforces the wrong scope.
+    resource_scopes =
+      resources
+      |> Enum.reverse()
+      |> Enum.filter(&(&1.handler != nil))
+      |> build_scope_map(& &1.uri)
+
+    templated_resource_clause? = templated_resource_clause?(resources)
     templated_uris = Enum.map(templated_resources, & &1.uri)
 
     quote do
@@ -1248,13 +1292,13 @@ defmodule ConduitMcp.DSL do
       # Inject validation schema lookup functions
       unquote(validation_lookup_functions)
 
-      # Scope lookup for OAuth enforcement. Emit one clause per scoped
-      # tool plus a catch-all so Elixir 1.20's type checker does not flag
-      # `Map.get(%{}, _)` on a compile-time empty map when no scopes are
+      # Scope lookups for OAuth enforcement — tools, prompts and resources.
+      # Each family ends in a `nil` catch-all so Elixir's type checker does
+      # not flag a lookup against a compile-time empty map when no scopes are
       # declared.
-      unquote(ConduitMcp.DSL.__generate_scope_clauses__(scope_map))
-
-      def __scope_for_tool__(_tool_name), do: nil
+      unquote(
+        ConduitMcp.DSL.__generate_scope_clauses__(tool_scopes, prompt_scopes, resource_scopes)
+      )
 
       # Always generate handle_list_tools (empty list if no tools)
       def handle_list_tools(_conn) do
@@ -1264,13 +1308,15 @@ defmodule ConduitMcp.DSL do
       # Inject generated tool handler clauses
       unquote(tool_clauses)
 
-      # Catch-all for unknown tools
+      # Catch-all for unknown tools. `-32602` per the MCP specification
+      # ("Unknown tool: invalid_tool_name"); the same code and message shape
+      # is produced by `ConduitMcp.Handler` and by Endpoint mode.
       if unquote(length(tools)) > 0 do
         def handle_call_tool(_conn, tool_name, _params) do
           {:error,
            %{
-             "code" => ConduitMcp.Errors.method_not_found(),
-             "message" => "Tool not found: #{tool_name}"
+             "code" => ConduitMcp.Errors.invalid_params(),
+             "message" => "Unknown tool: #{ConduitMcp.Reflect.text(tool_name)}"
            }}
         end
       end
@@ -1288,8 +1334,8 @@ defmodule ConduitMcp.DSL do
         def handle_get_prompt(_conn, prompt_name, _args) do
           {:error,
            %{
-             "code" => ConduitMcp.Errors.method_not_found(),
-             "message" => "Prompt not found: #{prompt_name}"
+             "code" => ConduitMcp.Errors.invalid_params(),
+             "message" => "Unknown prompt: #{ConduitMcp.Reflect.text(prompt_name)}"
            }}
         end
       end
@@ -1306,13 +1352,17 @@ defmodule ConduitMcp.DSL do
       # Inject generated resource handler clauses
       unquote(resource_clauses)
 
-      # Catch-all for unknown resources (only if no resources with handlers were generated)
-      if unquote(length(resources)) > 0 and unquote(Enum.empty?(resource_clauses)) do
+      # Catch-all for unknown resources. Only needed when no templated-resource
+      # clause was generated — that clause matches any URI and already returns
+      # not-found when no template matches. Without this, a server whose
+      # resources are all static raised FunctionClauseError on an unknown URI
+      # and the client saw "Internal server error".
+      if unquote(length(resources)) > 0 and unquote(not templated_resource_clause?) do
         def handle_read_resource(_conn, uri) do
           {:error,
            %{
-             "code" => ConduitMcp.Errors.method_not_found(),
-             "message" => "Resource not found: #{uri}"
+             "code" => ConduitMcp.Errors.resource_not_found(),
+             "message" => "Resource not found: #{ConduitMcp.Reflect.text(uri)}"
            }}
         end
       end
@@ -1333,25 +1383,142 @@ defmodule ConduitMcp.DSL do
     {templated, resource_schemas, template_schemas}
   end
 
-  defp build_scope_map(reversed_tools) do
-    Enum.reduce(reversed_tools, %{}, fn tool, acc ->
-      case Map.get(tool, :scope) do
-        nil -> acc
-        scope -> Map.put(acc, to_string(tool.name), scope)
+  # True when a templated-resource dispatch clause was generated. That clause
+  # matches any URI, so it doubles as the not-found catch-all; emitting another
+  # one after it would be a redundant clause.
+  defp templated_resource_clause?(resources) do
+    resources
+    |> Enum.filter(fn %{handler: handler} -> handler != nil end)
+    |> Enum.any?(fn %{uri: uri} -> String.contains?(uri, "{") end)
+  end
+
+  # Order matters: the emitted `__scope_for_resource__/1` templated scan must
+  # walk templates in the same order `handle_read_resource/2` dispatches them,
+  # or two overlapping templates enforce one scope and run the other's handler.
+  # `Enum.reduce` with a prepend silently reversed the list it was handed.
+  defp build_scope_map(entries, name_fun) do
+    entries
+    |> Enum.flat_map(fn entry ->
+      case Map.get(entry, :scope) do
+        nil -> []
+        scope -> [{name_fun.(entry), __validate_scope__!(scope, name_fun.(entry))}]
       end
     end)
+    # De-duplicated because two entries with the same name would emit two
+    # identical clause heads, and the second is dead code the reader has to
+    # reason about. It is *not* a build fix: clauses injected via `unquote`
+    # carry no line metadata, so the compiler emits no "this clause cannot
+    # match" diagnostic for them (verified), and first-declaration-wins already
+    # held. Keeping the emitted code minimal and the intent explicit is the
+    # whole benefit. First declaration wins, matching dispatch order.
+    |> Enum.uniq_by(&elem(&1, 0))
   end
 
   @doc false
-  # Emit one `__scope_for_tool__(name)` clause per scoped tool. Called
-  # from the `@before_compile` generated quote block; public so it can
-  # be invoked across compilation boundaries.
-  def __generate_scope_clauses__(scope_map) do
-    Enum.map(scope_map, fn {name, scope} ->
-      quote do
-        def __scope_for_tool__(unquote(name)), do: unquote(Macro.escape(scope))
+  # An empty or non-binary scope splits to `[]`, and `Enum.all?([], _)` is
+  # true — an authorization control present in the source and absent at
+  # runtime. Validated here rather than in the `scope/1` macro because the
+  # macro only sees AST; by `@before_compile` the value is known.
+  #
+  # Shared with `ConduitMcp.Component`, so the two authoring modes cannot
+  # disagree about whether `scope ""` is legal.
+  def __validate_scope__!(scope, subject) when is_binary(scope) do
+    if String.split(scope, " ", trim: true) == [] do
+      raise CompileError,
+        description:
+          "#{inspect(subject)}: :scope must name at least one scope; got #{inspect(scope)}"
+    end
+
+    scope
+  end
+
+  def __validate_scope__!(scope, subject) do
+    raise CompileError,
+      description:
+        "#{inspect(subject)}: :scope must be a space-separated string; got #{inspect(scope)}"
+  end
+
+  @doc false
+  # Emits the scope lookups every authorization hook in `ConduitMcp.Handler`
+  # consults: `__scope_for_tool__/1`, `__scope_for_prompt__/1` and
+  # `__scope_for_resource__/1`, each with a `nil` catch-all.
+  #
+  # `resource_scopes` entries are `{uri_or_template, scope}`. Templated URIs
+  # are matched with the same pre-compiled regex machinery the resource
+  # dispatch uses, so a scope declared on `"user://{id}"` covers every URI
+  # that clause would serve.
+  #
+  # Shared by `ConduitMcp.DSL` and `ConduitMcp.Endpoint` so a scope cannot be
+  # enforced in one authoring mode and silently ignored in the other.
+  def __generate_scope_clauses__(tool_scopes, prompt_scopes, resource_scopes) do
+    {static_resources, templated_resources} =
+      Enum.split_with(resource_scopes, fn {uri, _scope} -> not String.contains?(uri, "{") end)
+
+    tool_clauses =
+      Enum.map(tool_scopes, fn {name, scope} ->
+        quote do: def(__scope_for_tool__(unquote(name)), do: unquote(scope))
+      end)
+
+    prompt_clauses =
+      Enum.map(prompt_scopes, fn {name, scope} ->
+        quote do: def(__scope_for_prompt__(unquote(name)), do: unquote(scope))
+      end)
+
+    static_clauses =
+      Enum.map(static_resources, fn {uri, scope} ->
+        quote do: def(__scope_for_resource__(unquote(uri)), do: unquote(scope))
+      end)
+
+    resource_fallback = generate_resource_scope_fallback(templated_resources)
+
+    quote do
+      unquote(tool_clauses)
+      def __scope_for_tool__(_tool_name), do: nil
+
+      unquote(prompt_clauses)
+      def __scope_for_prompt__(_prompt_name), do: nil
+
+      unquote(static_clauses)
+      unquote(resource_fallback)
+    end
+  end
+
+  # With no scoped templates the fallback is a plain `nil`. With them, the
+  # scan *is* the fallback — it returns nil when no template matches, so a
+  # separate catch-all would be a redundant clause.
+  defp generate_resource_scope_fallback([]) do
+    quote do: def(__scope_for_resource__(_uri), do: nil)
+  end
+
+  defp generate_resource_scope_fallback(templated) do
+    quote do
+      def __scope_for_resource__(uri) do
+        Enum.find_value(unquote(Macro.escape(templated)), fn {template, scope} ->
+          {param_names, regex} = ConduitMcp.DSL.template_regex(__MODULE__, template)
+
+          case ConduitMcp.DSL.extract_uri_params_compiled(uri, param_names, regex) do
+            {:ok, _params} -> scope
+            :no_match -> nil
+          end
+        end)
       end
-    end)
+    end
+  end
+
+  @doc false
+  # `scope/1` used to write `@mcp_current_tool_scope` unconditionally, with no
+  # assertion it was inside a declaration — so `scope "admin"` at the top of a
+  # module compiled clean and enforced nothing. A silently ignored
+  # authorization control is worse than an unsupported one.
+  def __assert_in_declaration__(module, macro) do
+    unless Module.has_attribute?(module, :mcp_current_scope) do
+      raise CompileError,
+        description:
+          "#{inspect(module)}: #{macro}/1 must be called inside a tool, resource, " <>
+            "or prompt block"
+    end
+
+    :ok
   end
 
   defp log_schema_validation_warnings(reversed_tools, reversed_prompts) do
@@ -1499,8 +1666,8 @@ defmodule ConduitMcp.DSL do
             nil ->
               {:error,
                %{
-                 "code" => ConduitMcp.Errors.method_not_found(),
-                 "message" => "Resource not found: #{uri}"
+                 "code" => ConduitMcp.Errors.resource_not_found(),
+                 "message" => "Resource not found: #{ConduitMcp.Reflect.text(uri)}"
                }}
 
             result ->

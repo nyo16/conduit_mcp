@@ -9,10 +9,17 @@ defmodule ConduitMcp.Server do
 
   Server modules are stateless — just pure compiled functions:
 
-  - No GenServer, no Agent, no process overhead
-  - No supervision tree required
+  - No GenServer, no Agent, no process overhead in *your* module
+  - Nothing for you to add to your supervision tree for the server itself
   - Callbacks receive the `Plug.Conn` for request context
   - Each HTTP request runs in parallel (limited only by Bandit's process pool)
+
+  The library does run a small supervision tree of its own
+  (`ConduitMcp.Application`) to own the long-lived ETS tables that must
+  outlive request processes — cancellation flags, sessions, tasks, and the
+  JWKS cache — plus the session janitor. It starts automatically with the
+  `:conduit_mcp` application; see `ConduitMcp.Application` for what runs and
+  how to configure it.
 
   ## Example (Using DSL - Recommended)
 
@@ -241,27 +248,41 @@ defmodule ConduitMcp.Server do
           {:ok, %{"tools" => []}}
         end
 
-        def handle_call_tool(_conn, _name, _params) do
+        # Codes match `ConduitMcp.Handler`, Endpoint mode and DSL mode, so an
+        # identical MCP request gets an identical error whichever mode the
+        # server was written in. `-32602` for an unknown tool/prompt and
+        # `-32002` for a missing resource are what the MCP specification
+        # prescribes.
+        def handle_call_tool(_conn, name, _params) do
           {:error,
-           %{"code" => ConduitMcp.Errors.method_not_found(), "message" => "Tool not found"}}
+           %{
+             "code" => ConduitMcp.Errors.invalid_params(),
+             "message" => "Unknown tool: #{ConduitMcp.Reflect.text(name)}"
+           }}
         end
 
         def handle_list_resources(_conn) do
           {:ok, %{"resources" => []}}
         end
 
-        def handle_read_resource(_conn, _uri) do
+        def handle_read_resource(_conn, uri) do
           {:error,
-           %{"code" => ConduitMcp.Errors.method_not_found(), "message" => "Resource not found"}}
+           %{
+             "code" => ConduitMcp.Errors.resource_not_found(),
+             "message" => "Resource not found: #{ConduitMcp.Reflect.text(uri)}"
+           }}
         end
 
         def handle_list_prompts(_conn) do
           {:ok, %{"prompts" => []}}
         end
 
-        def handle_get_prompt(_conn, _name, _args) do
+        def handle_get_prompt(_conn, name, _args) do
           {:error,
-           %{"code" => ConduitMcp.Errors.method_not_found(), "message" => "Prompt not found"}}
+           %{
+             "code" => ConduitMcp.Errors.invalid_params(),
+             "message" => "Unknown prompt: #{ConduitMcp.Reflect.text(name)}"
+           }}
         end
 
         defoverridable handle_list_tools: 1,

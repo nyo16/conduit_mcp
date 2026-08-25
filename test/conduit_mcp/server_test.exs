@@ -41,7 +41,7 @@ defmodule ConduitMcp.ServerTest do
     test "returns error for unknown tool" do
       conn = %Plug.Conn{}
       {:error, error} = TestServer.handle_call_tool(conn, "unknown", %{})
-      assert error["code"] == -32601
+      assert error["code"] == ConduitMcp.Errors.invalid_params()
       assert error["message"] == "Tool not found"
     end
   end
@@ -77,7 +77,7 @@ defmodule ConduitMcp.ServerTest do
     test "returns error for unknown resource" do
       conn = %Plug.Conn{}
       {:error, error} = TestServer.handle_read_resource(conn, "test://unknown")
-      assert error["code"] == -32601
+      assert error["code"] == ConduitMcp.Errors.resource_not_found()
       assert error["message"] == "Resource not found"
     end
   end
@@ -122,7 +122,7 @@ defmodule ConduitMcp.ServerTest do
     test "returns error for unknown prompt" do
       conn = %Plug.Conn{}
       {:error, error} = TestServer.handle_get_prompt(conn, "unknown", %{})
-      assert error["code"] == -32601
+      assert error["code"] == ConduitMcp.Errors.invalid_params()
       assert error["message"] == "Prompt not found"
     end
   end
@@ -154,6 +154,36 @@ defmodule ConduitMcp.ServerTest do
 
       {:ok, prompts_result} = MinimalServer.handle_list_prompts(conn)
       assert prompts_result["prompts"] == []
+    end
+
+    # RC9's acceptance is identical codes across DSL, Endpoint and manual mode.
+    # `ConduitMcp.TestServer` overrides every not-found callback with its own
+    # literal, so the library defaults in `ConduitMcp.Server`'s `__using__`
+    # were never reached by any test - reverting them would have left the suite
+    # green. This server overrides nothing but `handle_list_tools/1`.
+    defmodule DefaultsOnlyServer do
+      use ConduitMcp.Server, dsl: false
+
+      @impl true
+      def handle_list_tools(_conn) do
+        {:ok, %{"tools" => []}}
+      end
+    end
+
+    test "manual mode's default not-found codes match DSL and Endpoint mode" do
+      conn = %Plug.Conn{}
+
+      assert {:error, tool} = DefaultsOnlyServer.handle_call_tool(conn, "nope", %{})
+      assert tool["code"] == ConduitMcp.Errors.invalid_params()
+      assert tool["message"] == "Unknown tool: nope"
+
+      assert {:error, resource} = DefaultsOnlyServer.handle_read_resource(conn, "test://nope")
+      assert resource["code"] == ConduitMcp.Errors.resource_not_found()
+      assert resource["message"] == "Resource not found: test://nope"
+
+      assert {:error, prompt} = DefaultsOnlyServer.handle_get_prompt(conn, "nope", %{})
+      assert prompt["code"] == ConduitMcp.Errors.invalid_params()
+      assert prompt["message"] == "Unknown prompt: nope"
     end
   end
 end

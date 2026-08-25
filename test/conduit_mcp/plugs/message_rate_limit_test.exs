@@ -86,7 +86,13 @@ defmodule ConduitMcp.Plugs.MessageRateLimitTest do
   end
 
   describe "call/2 with notification" do
-    test "passes through for JSON-RPC notifications (no id field)" do
+    defp notification_conn(method) do
+      conn(:post, "/", JSON.encode!(%{"jsonrpc" => "2.0", "method" => method}))
+      |> put_req_header("content-type", "application/json")
+      |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
+    end
+
+    test "passes through for ordinary JSON-RPC notifications (no id field)" do
       key = "test-notification-#{System.unique_integer([:positive])}"
 
       opts =
@@ -97,18 +103,29 @@ defmodule ConduitMcp.Plugs.MessageRateLimitTest do
           key_func: fn _conn -> key end
         )
 
-      conn =
-        conn(
-          :post,
-          "/",
-          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "notifications/cancelled"})
+      refute MessageRateLimit.call(notification_conn("notifications/initialized"), opts).halted
+      refute MessageRateLimit.call(notification_conn("notifications/initialized"), opts).halted
+    end
+
+    test "counts notifications/cancelled, which mutates server state" do
+      # It writes a row to the cancellation table and is reachable
+      # unauthenticated, so exempting it made the limiter useless against the
+      # one notification worth flooding.
+      key = "test-cancelled-#{System.unique_integer([:positive])}"
+
+      opts =
+        MessageRateLimit.init(
+          backend: @backend,
+          limit: 1,
+          scale: 60_000,
+          key_func: fn _conn -> key end
         )
-        |> put_req_header("content-type", "application/json")
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
 
-      result = MessageRateLimit.call(conn, opts)
+      refute MessageRateLimit.call(notification_conn("notifications/cancelled"), opts).halted
 
-      refute result.halted
+      denied = MessageRateLimit.call(notification_conn("notifications/cancelled"), opts)
+      assert denied.halted
+      assert denied.status == 429
     end
   end
 
@@ -419,76 +436,50 @@ defmodule ConduitMcp.Plugs.MessageRateLimitTest do
   end
 
   describe "default_key_func" do
-    test "uses current_user id when available" do
-      key = "test-default-key-user-id-#{System.unique_integer([:positive])}"
-
-      # We test the default key function by not providing a custom one
-      # and checking that different users get different keys
-      opts =
-        MessageRateLimit.init(
-          backend: @backend,
-          limit: 1,
-          scale: 60_000
-        )
-
-      conn =
-        conn(
-          :post,
-          "/",
-          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
-        )
-        |> put_req_header("content-type", "application/json")
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
-        |> assign(:current_user, %{id: key})
-
-      # Should use "msg:user:<key>" as the key - just verify it doesn't crash
-      result = MessageRateLimit.call(conn, opts)
-      refute result.halted
+    defp message_conn(remote_ip) do
+      conn(
+        :post,
+        "/",
+        JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
+      )
+      |> put_req_header("content-type", "application/json")
+      |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
+      |> Map.put(:remote_ip, remote_ip)
     end
 
-    test "uses current_user string when available" do
-      opts =
-        MessageRateLimit.init(
-          backend: @backend,
-          limit: 1,
-          scale: 60_000
-        )
-
-      user_string = "user-string-#{System.unique_integer([:positive])}"
-
-      conn =
-        conn(
-          :post,
-          "/",
-          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
-        )
-        |> put_req_header("content-type", "application/json")
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
-        |> assign(:current_user, user_string)
-
-      result = MessageRateLimit.call(conn, opts)
-      refute result.halted
+    defp principal_conn(remote_ip, id) do
+      message_conn(remote_ip) |> ConduitMcp.Principal.put(%{id: id, strategy: :oauth})
     end
 
-    test "falls back to IP when no current_user" do
-      opts =
-        MessageRateLimit.init(
-          backend: @backend,
-          limit: 1,
-          scale: 60_000
-        )
+    test "each authenticated principal gets its own bucket" do
+      opts = MessageRateLimit.init(backend: @backend, limit: 1, scale: 60_000)
+      suffix = System.unique_integer([:positive])
 
-      conn =
-        conn(
-          :post,
-          "/",
-          JSON.encode!(%{"jsonrpc" => "2.0", "method" => "tools/call", "id" => 1})
-        )
-        |> put_req_header("content-type", "application/json")
-        |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
+      # Same source IP for both — the point is that a shared proxy address
+      # must not collapse two subjects into one bucket.
+      ip = {10, 0, 0, 1}
 
-      result = MessageRateLimit.call(conn, opts)
-      refute result.halted
+      refute MessageRateLimit.call(principal_conn(ip, "alice-#{suffix}"), opts).halted
+      refute MessageRateLimit.call(principal_conn(ip, "bob-#{suffix}"), opts).halted
+
+      # Alice's own second request exhausts *her* bucket, proving the key is
+      # the principal and not something shared with Bob.
+      assert MessageRateLimit.call(principal_conn(ip, "alice-#{suffix}"), opts).halted
+      assert MessageRateLimit.call(principal_conn(ip, "bob-#{suffix}"), opts).halted
+    end
+
+    test "falls back to the client IP when unauthenticated" do
+      opts = MessageRateLimit.init(backend: @backend, limit: 1, scale: 60_000)
+      ip = {203, 0, 113, rem(System.unique_integer([:positive]), 200)}
+
+      refute MessageRateLimit.call(message_conn(ip), opts).halted
+      assert MessageRateLimit.call(message_conn(ip), opts).halted
+    end
+
+    test "a malformed remote_ip does not raise" do
+      opts = MessageRateLimit.init(backend: @backend, limit: 10, scale: 60_000)
+
+      refute MessageRateLimit.call(message_conn({1, 2, 3}), opts).halted
     end
   end
 end

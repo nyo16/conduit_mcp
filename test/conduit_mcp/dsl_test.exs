@@ -217,8 +217,10 @@ defmodule ConduitMcp.DSLTest do
       conn = %Plug.Conn{}
       {:error, error} = DSLTestServer.handle_call_tool(conn, "unknown", %{})
 
-      assert error["code"] == -32601
-      assert error["message"] =~ "Tool not found"
+      # -32602 per the MCP spec ("Unknown tool: invalid_tool_name"), and
+      # identical in manual and Endpoint mode.
+      assert error["code"] == ConduitMcp.Errors.invalid_params()
+      assert error["message"] == "Unknown tool: unknown"
     end
 
     test "tool with enum validates allowed values" do
@@ -384,8 +386,8 @@ defmodule ConduitMcp.DSLTest do
 
       {:error, error} = DSLTestServer.handle_get_prompt(conn, "nonexistent", %{})
 
-      assert error["code"] == -32601
-      assert error["message"] =~ "Prompt not found"
+      assert error["code"] == ConduitMcp.Errors.invalid_params()
+      assert error["message"] == "Unknown prompt: nonexistent"
     end
   end
 
@@ -476,7 +478,7 @@ defmodule ConduitMcp.DSLTest do
       # Test with URI that doesn't match any template
       {:error, error} = DSLTestServer.handle_read_resource(conn, "unknown://resource")
 
-      assert error["code"] == -32601
+      assert error["code"] == ConduitMcp.Errors.resource_not_found()
       assert error["message"] =~ "Resource not found"
     end
   end

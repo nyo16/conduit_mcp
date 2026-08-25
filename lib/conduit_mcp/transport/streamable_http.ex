@@ -5,13 +5,26 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   Provides a single POST endpoint for bidirectional communication.
   This is the modern replacement for SSE transport.
 
+  Everything this transport shares with `ConduitMcp.Transport.SSE` — the plug
+  pipeline, CORS headers, auth, rate limiting, the JSON-RPC POST dispatch,
+  `GET /health`, the RFC 9728 metadata endpoint and the catch-alls — lives in
+  `ConduitMcp.Transport.Shared`.
+
+  ## Differences from `ConduitMcp.Transport.SSE`
+
+  - **Sessions are Streamable-HTTP-only, by design.** `Mcp-Session-Id` is
+    defined by the Streamable HTTP transport in the MCP specification; the
+    legacy SSE transport has no session concept, so `:session` is accepted
+    here and nowhere else.
+
   ## Options
 
   - `:server_module` (required) — the MCP server module to route requests to
   - `:server_name` — advertised server name in the `initialize` response (falls
     back to the module's `__endpoint_config__/0` if defined)
   - `:server_version` — advertised server version (same fallback behavior)
-  - `:auth` — authentication plug configuration. See `ConduitMcp.Plugs.Auth`.
+  - `:auth` — authentication plug configuration. See `ConduitMcp.Plugs.Auth`
+    and `ConduitMcp.Plugs.OAuth`. Resolved once, in `init/1`.
   - `:rate_limit` — HTTP-level rate limit configuration. See `ConduitMcp.Plugs.RateLimit`.
   - `:message_rate_limit` — per-message rate limit configuration. See
     `ConduitMcp.Plugs.MessageRateLimit`.
@@ -19,15 +32,20 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     handling. See `ConduitMcp.Session`. Add `require_session: true` to reject
     non-`initialize` POSTs that omit the `Mcp-Session-Id` header (HTTP 400),
     per the MCP specification's session requirements.
-  - `:allowed_origins` — list of allowed `Origin` header values (also accepts
-    `"*"` and regex). See `ConduitMcp.Plugs.OriginValidation`. Unset means no
-    Origin validation (a startup warning is logged): requests without an
-    `Origin` header always pass because non-browser MCP clients don't send
-    one, but browser-originated requests can then reach loopback servers via
-    DNS rebinding — set an allowlist for any server a browser could reach.
-  - `:cors_origin` — CORS allow-origin header (default: `"*"`)
-  - `:cors_methods` — CORS allow-methods header (default: `"GET, POST, OPTIONS"`)
-  - `:cors_headers` — CORS allow-headers header (default: `"content-type, authorization"`)
+  - `:allowed_origins` — allowlist for the `Origin` header. Accepts a list of
+    strings, a bare string, a `Regex`, or `"*"`.
+    **Unset fails closed**: any request carrying an `Origin` is rejected with
+    403, because a warning does not stop a browser from reaching a loopback
+    server. Requests *without* an `Origin` always pass — native MCP clients
+    are not browsers and don't send one. Pass `allowed_origins: "*"` to allow
+    all origins explicitly. See `ConduitMcp.Plugs.OriginValidation`.
+  - `:cors_origin` — value for `access-control-allow-origin`. **Unset means no
+    CORS headers are emitted at all**, so a page on another origin cannot read
+    the response. Set it (e.g. `"https://myapp.example"`, or `"*"`) to opt in.
+  - `:cors_methods` — CORS allow-methods header (default: `"GET, POST, OPTIONS"`;
+    only emitted when `:cors_origin` is set)
+  - `:cors_headers` — CORS allow-headers header (default:
+    `"content-type, authorization"`; only emitted when `:cors_origin` is set)
 
   When used via `ConduitMcp.Endpoint`, the `:auth`, `:rate_limit`, and
   `:message_rate_limit` options are auto-extracted from the endpoint config
@@ -67,80 +85,16 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
        port: 4001}
   """
 
-  use Plug.Router
-  require Logger
+  use ConduitMcp.Transport.Shared, extra_plugs: [:validate_session]
 
-  alias ConduitMcp.Handler
   alias ConduitMcp.Session
 
-  plug(Plug.Logger)
-  plug(ConduitMcp.Plugs.SecurityHeaders)
-  plug(ConduitMcp.Plugs.OriginValidation)
-  plug(:add_cors_headers)
-  plug(:match)
-  plug(Plug.Parsers, parsers: [:json], json_decoder: JSON, length: 1_000_000)
-  plug(:maybe_authenticate)
-  plug(:maybe_rate_limit)
-  plug(:maybe_message_rate_limit)
-  plug(:validate_session)
-  plug(:dispatch)
-
-  defp add_cors_headers(conn, _opts) do
-    # Get CORS settings from private (set in call/2)
-    cors_origin = conn.private[:cors_origin] || "*"
-    cors_methods = conn.private[:cors_methods] || "GET, POST, OPTIONS"
-    cors_headers = conn.private[:cors_headers] || "content-type, authorization"
-
-    conn
-    |> put_resp_header("access-control-allow-origin", cors_origin)
-    |> put_resp_header("access-control-allow-methods", cors_methods)
-    |> put_resp_header("access-control-allow-headers", cors_headers)
+  # Overrides the default from `use ConduitMcp.Transport.Shared`.
+  def __transport_private__(opts) do
+    %{session_config: Keyword.get(opts, :session)}
   end
 
-  defp maybe_authenticate(conn, _opts) do
-    case conn.private[:auth_config] do
-      nil ->
-        conn
-
-      auth_opts ->
-        strategy = Keyword.get(auth_opts, :strategy)
-
-        if strategy == :oauth and Code.ensure_loaded?(ConduitMcp.Plugs.OAuth) do
-          # apply/3 keeps the optional OAuth plug (compiled only when Joken is
-          # present) from producing undefined-module compile warnings
-          # credo:disable-for-lines:4 Credo.Check.Refactor.Apply
-          apply(ConduitMcp.Plugs.OAuth, :call, [
-            conn,
-            apply(ConduitMcp.Plugs.OAuth, :init, [auth_opts])
-          ])
-        else
-          ConduitMcp.Plugs.Auth.call(conn, ConduitMcp.Plugs.Auth.init(auth_opts))
-        end
-    end
-  end
-
-  defp maybe_rate_limit(conn, _opts) do
-    case conn.private[:rate_limit_config] do
-      nil ->
-        conn
-
-      rate_limit_opts ->
-        ConduitMcp.Plugs.RateLimit.call(conn, ConduitMcp.Plugs.RateLimit.init(rate_limit_opts))
-    end
-  end
-
-  defp maybe_message_rate_limit(conn, _opts) do
-    case conn.private[:message_rate_limit_config] do
-      nil ->
-        conn
-
-      message_rate_limit_opts ->
-        ConduitMcp.Plugs.MessageRateLimit.call(
-          conn,
-          ConduitMcp.Plugs.MessageRateLimit.init(message_rate_limit_opts)
-        )
-    end
-  end
+  # --- transport-specific plugs ----------------------------------------
 
   defp validate_session(conn, _opts) do
     session_config = conn.private[:session_config]
@@ -173,15 +127,12 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
       if Keyword.get(session_config, :require_session, false) and
            not initialize_request?(conn) do
         conn
-        |> put_resp_content_type("application/json")
-        |> send_resp(
+        |> Shared.send_json(
           400,
-          JSON.encode!(
-            ConduitMcp.Protocol.error_response(
-              nil,
-              ConduitMcp.Protocol.invalid_request(),
-              "Mcp-Session-Id header required. Send an initialize request to obtain one."
-            )
+          ConduitMcp.Protocol.error_response(
+            nil,
+            ConduitMcp.Protocol.invalid_request(),
+            "Mcp-Session-Id header required. Send an initialize request to obtain one."
           )
         )
         |> halt()
@@ -198,15 +149,12 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
 
         {:error, :not_found} ->
           conn
-          |> put_resp_content_type("application/json")
-          |> send_resp(
+          |> Shared.send_json(
             404,
-            JSON.encode!(
-              ConduitMcp.Protocol.error_response(
-                nil,
-                ConduitMcp.Protocol.invalid_request(),
-                "Session not found. Send an initialize request to create a new session."
-              )
+            ConduitMcp.Protocol.error_response(
+              nil,
+              ConduitMcp.Protocol.invalid_request(),
+              "Session not found. Send an initialize request to create a new session."
             )
           )
           |> halt()
@@ -214,190 +162,45 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     end
   end
 
-  def init(opts) do
-    server_module = Keyword.get(opts, :server_module)
-
-    if is_nil(server_module) do
-      raise ArgumentError, "server_module is required"
-    end
-
-    warn_if_origins_unset(opts, __MODULE__)
-
-    opts
-  end
-
-  @doc false
-  # Shared by both transports. Warns once per boot (init/1) when no Origin
-  # policy was chosen at all; pass `allowed_origins: "*"` to opt out explicitly.
-  def warn_if_origins_unset(opts, transport) do
-    unless Keyword.has_key?(opts, :allowed_origins) do
-      Logger.warning(
-        "#{inspect(transport)}: no :allowed_origins configured — Origin headers are " <>
-          "not validated, which leaves browser-reachable servers open to DNS-rebinding " <>
-          "attacks. Set allowed_origins: [\"https://yourapp.example\"] per the MCP " <>
-          "specification, or allowed_origins: \"*\" to opt out explicitly."
-      )
-    end
-
-    :ok
-  end
-
-  def call(conn, opts) do
-    server_module = Keyword.get(opts, :server_module)
-
-    # Extract endpoint config as defaults (explicit transport opts always win)
-    endpoint_config =
-      if server_module && function_exported?(server_module, :__endpoint_config__, 0),
-        do: server_module.__endpoint_config__(),
-        else: []
-
-    cors_origin = Keyword.get(opts, :cors_origin, "*")
-    cors_methods = Keyword.get(opts, :cors_methods, "GET, POST, OPTIONS")
-    cors_headers = Keyword.get(opts, :cors_headers, "content-type, authorization")
-    auth_config = Keyword.get(opts, :auth) || Keyword.get(endpoint_config, :auth)
-
-    rate_limit_config =
-      Keyword.get(opts, :rate_limit) || Keyword.get(endpoint_config, :rate_limit)
-
-    message_rate_limit_config =
-      Keyword.get(opts, :message_rate_limit) ||
-        Keyword.get(endpoint_config, :message_rate_limit)
-
-    server_name = Keyword.get(opts, :server_name) || Keyword.get(endpoint_config, :name)
-    server_version = Keyword.get(opts, :server_version) || Keyword.get(endpoint_config, :version)
-    session_config = Keyword.get(opts, :session)
-    allowed_origins = Keyword.get(opts, :allowed_origins)
-
-    private = %{
-      server_module: server_module,
-      allowed_origins: allowed_origins,
-      cors_origin: cors_origin,
-      cors_methods: cors_methods,
-      cors_headers: cors_headers,
-      auth_config: auth_config,
-      rate_limit_config: rate_limit_config,
-      message_rate_limit_config: message_rate_limit_config,
-      server_name: server_name,
-      server_version: server_version,
-      session_config: session_config
-    }
-
-    %{conn | private: Map.merge(conn.private, private)}
-    |> super(opts)
-  end
-
-  # CORS preflight
-  options _ do
-    send_resp(conn, 200, "")
-  end
+  # --- routes -----------------------------------------------------------
 
   # GET endpoint for health check / info
   get "/" do
-    conn
-    |> put_resp_content_type("application/json")
-    |> send_resp(
-      200,
-      JSON.encode!(%{
-        "transport" => "streamable-http",
-        "version" => ConduitMcp.Protocol.protocol_version(),
-        "status" => "ready"
-      })
-    )
+    Shared.send_json(conn, 200, %{
+      "transport" => "streamable-http",
+      "version" => ConduitMcp.Protocol.protocol_version(),
+      "status" => "ready"
+    })
   end
 
   # Main endpoint for bidirectional streaming
   post "/" do
-    server_module = conn.private[:server_module]
-    session_config = conn.private[:session_config]
-
-    case conn.body_params do
-      params when is_map(params) ->
-        Logger.debug("Received request", method: params["method"], id: params["id"])
-
-        response = Handler.handle_request(params, server_module, conn)
-
-        case response do
-          :ok ->
-            # It was a notification, no response needed
-            send_resp(conn, 204, "")
-
-          response_map when is_map(response_map) ->
-            conn = add_mcp_protocol_version_header(conn)
-
-            conn =
-              if initialize_response?(response_map) and session_config != false do
-                create_session_for_initialize(conn, response_map, session_config)
-              else
-                conn
-              end
-
-            conn
-            |> put_resp_content_type("application/json")
-            |> send_resp(200, JSON.encode!(response_map))
-        end
-
-      _ ->
-        error_response =
-          ConduitMcp.Protocol.error_response(
-            nil,
-            ConduitMcp.Protocol.invalid_request(),
-            "Request body must be valid JSON"
-          )
-
-        conn
-        |> put_resp_content_type("application/json")
-        |> send_resp(400, JSON.encode!(error_response))
-    end
+    Shared.dispatch_post(conn, &create_session_for_initialize/2)
   end
 
-  # Health check endpoint
-  get "/health" do
-    conn
-    |> put_resp_content_type("application/json")
-    |> send_resp(200, JSON.encode!(%{status: "ok"}))
-  end
+  Shared.shared_routes()
 
-  # OAuth Protected Resource Metadata (RFC 9728)
-  get "/.well-known/oauth-protected-resource" do
-    case conn.private[:auth_config] do
-      auth_config when is_list(auth_config) and auth_config != [] ->
-        strategy = Keyword.get(auth_config, :strategy)
-
-        if strategy == :oauth do
-          metadata = ConduitMcp.OAuth.ResourceMetadata.build(auth_config)
-
-          conn
-          |> put_resp_content_type("application/json")
-          |> send_resp(200, JSON.encode!(metadata))
-        else
-          send_resp(conn, 404, "Not found")
-        end
-
-      _ ->
-        send_resp(conn, 404, "Not found")
-    end
-  end
-
-  # Catch all
-  match _ do
-    send_resp(conn, 404, "Not found")
-  end
-
-  defp add_mcp_protocol_version_header(conn) do
-    put_resp_header(conn, "mcp-protocol-version", ConduitMcp.Protocol.protocol_version())
-  end
+  # --- session creation on initialize -----------------------------------
 
   defp initialize_request?(%Plug.Conn{body_params: %{"method" => "initialize"}}), do: true
   defp initialize_request?(_conn), do: false
 
-  defp initialize_response?(response_map) do
-    case response_map do
-      %{"result" => %{"protocolVersion" => _, "serverInfo" => _}} -> true
-      _ -> false
+  defp initialize_response?(%{"result" => %{"protocolVersion" => _, "serverInfo" => _}}),
+    do: true
+
+  defp initialize_response?(_response_map), do: false
+
+  defp create_session_for_initialize(conn, response_map) do
+    session_config = conn.private[:session_config]
+
+    if initialize_response?(response_map) and session_config != false do
+      create_session(conn, response_map, session_config)
+    else
+      {:ok, conn}
     end
   end
 
-  defp create_session_for_initialize(conn, response_map, session_config) do
+  defp create_session(conn, response_map, session_config) do
     store =
       case session_config do
         config when is_list(config) -> Keyword.get(config, :store, Session.EtsStore)
@@ -407,12 +210,26 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     session_id = Session.generate_id()
     protocol_version = get_in(response_map, ["result", "protocolVersion"])
 
-    Session.create(
-      session_id,
-      %{"protocol_version" => protocol_version},
-      store
-    )
+    case Session.create(session_id, %{"protocol_version" => protocol_version}, store) do
+      :ok ->
+        {:ok, put_resp_header(conn, "mcp-session-id", session_id)}
 
-    put_resp_header(conn, "mcp-session-id", session_id)
+      {:error, reason} ->
+        # Fail closed. Returning a session-less initialize response would hand
+        # the client a half-working connection: the negotiated session simply
+        # would not exist on any follow-up request.
+        Logger.error("session creation rejected by #{inspect(store)}: #{inspect(reason)}")
+
+        {:error,
+         Shared.send_json(
+           conn,
+           503,
+           ConduitMcp.Protocol.error_response(
+             conn.body_params["id"],
+             ConduitMcp.Protocol.internal_error(),
+             "Session store unavailable; the server cannot accept new sessions right now."
+           )
+         )}
+    end
   end
 end

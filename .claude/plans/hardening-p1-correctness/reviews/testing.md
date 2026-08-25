@@ -1,0 +1,31 @@
+# Test quality review — P1 hardening (round 2)
+
+**Verdict:** incorrect · confidence 0.86
+
+The production changes are sound, but two of the patch's own regression tests do not defend the fixes they were written for. (1) oauth_scope_test.exs:314-347 asserts no "this clause" diagnostic and first-declaration-wins for duplicate scoped components — I verified with three mix run probes that generated duplicate clause heads emit no diagnostic at all and already give first-wins, so deleting Enum.uniq_by/2 from both dsl.ex:1397 and endpoint.ex:468 leaves the suite green. (2) handler_tasks_test.exs:390-403, named "tasks/list clamps the response to the server maximum", creates 10 tasks and asks for 10_000; min(10_000, 100) and an unclamped 10_000 both return the same 10 rows, so handler.ex:778-786 can be reverted undetected. Two lower-severity issues: a stated-as-absolute async invariant already violated by security_test.exs, and TestServer encoding the pre-RC9 -32601. No blockers; shared-state hygiene and the janitor/SSE race reworks all check out.
+
+## Findings
+
+### P1 — Make the duplicate-scope test actually detect a missing Enum.uniq_by/2
+
+`test/conduit_mcp/oauth_scope_test.exs:338-347` (confidence 0.9)
+
+oauth_scope_test.exs:314-347 is the regression test for round 1's Enum.uniq_by/2 additions at dsl.ex:1397 and endpoint.ex:468. Both of its assertions — `refute Enum.any?(diagnostics, &(&1.message =~ "this clause"))` at :341 and `mod.__scope_for_tool__("dup") == "first:scope"` at :346 — hold whether or not the uniq_by calls exist. Verified with three probes against the compiled project in one run: hand-written duplicate clauses DO warn (control), but feeding an un-deduped list into ConduitMcp.DSL.__generate_scope_clauses__/3 yields `diagnostics: []` with `__scope_for_tool__("dup") == "s1"` and `__scope_for_resource__("r://a") == "x"`, both when compiled via Code.compile_quoted/2 and when unquoted inside a __before_compile__ macro (the exact shape of dsl.ex:1286-1288). endpoint.ex:468 is additionally unreached by any test: only five test files reference ConduitMcp.Endpoint and none declares a collision, though one is reachable — validate_no_name_conflicts!/3 (endpoint.ex:297-305) dedupes on __component_name__() while endpoint.ex:112 keys resource scopes on :uri, and component.ex:212 only requires :uri be present, so two resource components with different names and the same :uri compile through (I compiled one). Fix: assert the generated shape (one __scope_for_tool__("dup") clause, not two) rather than a diagnostic the compiler never emits, and add the Endpoint-mode case.
+
+### P1 — Assert the tasks/list clamp instead of the fixture row count
+
+`test/conduit_mcp/handler_tasks_test.exs:390-403` (confidence 0.95)
+
+The test creates 10 tasks, requests `"limit" => 10_000`, and asserts `length(resp["result"]["tasks"]) == 10`. The server maximum is 100 (handler.ex:754, @default_tasks_list_limit) and the clamp is `min(limit, max_tasks_list_limit())` at handler.ex:778-780 with the absent/non-positive fallback at handler.ex:782. With only 10 rows in the table, min(10_000, 100) = 100 and an unclamped 10_000 return the identical 10 rows, so the assertion is satisfied by the fixture size, not the clamp. The inline comment "A client asking for more than the server maximum gets the maximum" is false as written: it gets 10, which is below the maximum. Replacing handler.ex:778-780 with `defp tasks_list_limit(limit) when is_integer(limit) and limit > 0, do: limit` leaves the suite green — `:tasks_list_max_limit` appears in no test file, and the other tasks/list tests (handler_tasks_test.exs:125, :142, :366) use fixtures far under 100. This clamp is the only bound on tasks/list response size against a table whose own cap is 10_000 rows (tasks/ets_store.ex:28). Fix: the module is already async: false, so snapshot/restore :tasks_list_max_limit in setup/on_exit, set it to 3, create 10 tasks, and assert 10_000 yields 3 while a client-supplied limit of 2 still yields 2.
+
+### P3 — Narrow the :conduit_mcp_tasks async invariant to writers
+
+`test/conduit_mcp/handler_tasks_test.exs:6-14` (confidence 0.8)
+
+The module header states "Every module that touches `:conduit_mcp_tasks` MUST be `async: false`" and enumerates four modules at :6-8. test/conduit_mcp/security_test.exs:1 is `async: true` and reaches that table through Handler.handle_request/2 for `"method" => "tasks/get"` (security_test.exs:209-222), and it is not listed. It is currently harmless — the lookup is a read for an id that cannot exist, and ExUnit runs every async module to completion before any sync module — but the comment is the only thing encoding this invariant, and it is already false as stated. A reader who trusts it concludes the table is quiesced during the async phase and adds a write to an async: true module on the same reasoning. Fix: say what is load-bearing (writers must be async: false; security_test.exs reads a guaranteed-absent id), or move that one case into handler_tasks_test.exs.
+
+### P3 — Update TestServer's stale -32601 not-found codes to the library defaults
+
+`test/support/test_server.ex:86-88` (confidence 0.85)
+
+RC9's acceptance is identical not-found codes across DSL, Endpoint and manual mode. ConduitMcp.TestServer overrides handle_read_resource/2 with its own -32601 literal and server_test.exs:78-82 asserts it. TestServer is the server behind handler_test.exs, security_test.exs, streamable_http_test.exs and sse_test.exs, so every request-level resources/read miss in the suite observes -32601. -32002 is asserted only via FullEndpoint.handle_read_resource/2 (endpoint_test.exs:257-261), DefaultsOnlyServer.handle_read_resource/2 called directly (server_test.exs:180-182), and one Endpoint-mode integration case (endpoint_integration_test.exs:221) — the manual-mode default never crosses Handler.handle_request/2 in any test. This is not itself a revert hole (server_test.exs:181 pins Errors.resource_not_found() and protocol_test.exs:54 pins that to -32002); it is that the fixture disagrees with the library it stands in for. test_server.ex:67 and :112 carry the same stale -32601 for tools and prompts where the library now returns -32602. Fix: use ConduitMcp.Errors.resource_not_found()/invalid_params() in the fixture and update server_test.exs:44, :80 and :125.

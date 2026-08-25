@@ -33,8 +33,21 @@ defmodule ConduitMcp.Validation do
   @doc """
   Validates tool parameters using the compiled NimbleOptions schema.
 
-  Returns `{:ok, validated_params}` with potentially coerced types,
-  or `{:error, validation_errors}` with detailed error information.
+  Returns one of:
+
+    * `{:ok, validated_params}` — valid, with types coerced and defaults
+      applied. Also returned verbatim when the server declares no validation
+      schema, or when runtime validation is disabled.
+    * `{:error, validation_errors}` — a **list** of error maps. Pass it to
+      `format_validation_errors/1`.
+    * `{:error, :tool_not_found}` — a bare **atom**: the server has validation
+      schemas but none for this tool. Propagated rather than folded into the
+      error list so the handler can answer "Unknown tool" instead of burying it
+      in a "Parameter validation failed" payload's `data.errors`.
+
+  The atom form is why `format_validation_errors/1` accepts a non-list: a
+  caller pattern-matching `{:error, errs} -> format_validation_errors(errs)`
+  must not get a `FunctionClauseError` for a tool name typo.
 
   ## Examples
 
@@ -44,23 +57,23 @@ defmodule ConduitMcp.Validation do
       iex> ConduitMcp.Validation.validate_tool_params(MyServer, "calc", %{"age" => "-5"})
       {:error, [%{parameter: "age", value: -5, message: "must be greater than or equal to 0"}]}
 
+      iex> ConduitMcp.Validation.validate_tool_params(MyServer, "nope", %{})
+      {:error, :tool_not_found}
+
   """
+  @spec validate_tool_params(module(), String.t(), map()) ::
+          {:ok, map()} | {:error, [map()] | :tool_not_found}
   def validate_tool_params(server_module, tool_name, params) when is_map(params) do
     if validation_enabled?() do
       case get_tool_validation_schema(server_module, tool_name) do
         {:ok, schema} ->
           validate_with_schema(schema, params, tool_name)
 
+        # Propagated verbatim so the handler can answer with a single clear
+        # "Unknown tool" error instead of burying it inside a
+        # "Parameter validation failed" payload's `data.errors`.
         {:error, :tool_not_found} ->
-          error = [
-            %{
-              parameter: nil,
-              value: nil,
-              message: "Tool '#{tool_name}' not found"
-            }
-          ]
-
-          {:error, format_validation_errors(error)}
+          {:error, :tool_not_found}
 
         {:error, :no_validation_schema} ->
           # Server doesn't have validation schemas - skip validation
@@ -86,8 +99,11 @@ defmodule ConduitMcp.Validation do
   @doc """
   Validates prompt arguments using the compiled NimbleOptions schema.
 
-  Similar to `validate_tool_params/3` but for prompt arguments.
+  Same return contract as `validate_tool_params/3`, with
+  `{:error, :prompt_not_found}` in place of `{:error, :tool_not_found}`.
   """
+  @spec validate_prompt_args(module(), String.t(), map()) ::
+          {:ok, map()} | {:error, [map()] | :prompt_not_found}
   def validate_prompt_args(server_module, prompt_name, args) when is_map(args) do
     if validation_enabled?() do
       case get_prompt_validation_schema(server_module, prompt_name) do
@@ -95,14 +111,7 @@ defmodule ConduitMcp.Validation do
           validate_with_schema(schema, args, prompt_name)
 
         {:error, :prompt_not_found} ->
-          {:error,
-           [
-             %{
-               parameter: nil,
-               value: nil,
-               message: "Prompt '#{prompt_name}' not found"
-             }
-           ]}
+          {:error, :prompt_not_found}
 
         {:error, :no_validation_schema} ->
           # Server doesn't have validation schemas - skip validation
@@ -130,15 +139,31 @@ defmodule ConduitMcp.Validation do
   Takes NimbleOptions validation errors and converts them to a format
   suitable for MCP error responses.
 
+  Also accepts the bare `:tool_not_found` / `:prompt_not_found` atoms that
+  `validate_tool_params/3` and `validate_prompt_args/3` can return, so the
+  documented `case ... do {:error, errs} -> format_validation_errors(errs)`
+  cannot raise `FunctionClauseError` on a name typo.
+
   ## Examples
 
       iex> errors = [%{parameter: "age", value: -5, message: "must be >= 0"}]
       iex> ConduitMcp.Validation.format_validation_errors(errors)
       [%{"parameter" => "age", "value" => -5, "message" => "must be >= 0"}]
 
+      iex> ConduitMcp.Validation.format_validation_errors(:tool_not_found)
+      [%{"parameter" => nil, "value" => nil, "message" => "Unknown tool"}]
+
   """
+  @spec format_validation_errors([map()] | :tool_not_found | :prompt_not_found) :: [map()]
   def format_validation_errors(errors) when is_list(errors) do
     Enum.map(errors, &format_single_error/1)
+  end
+
+  def format_validation_errors(:tool_not_found), do: [not_found_error("Unknown tool")]
+  def format_validation_errors(:prompt_not_found), do: [not_found_error("Unknown prompt")]
+
+  defp not_found_error(message) do
+    %{"parameter" => nil, "value" => nil, "message" => message}
   end
 
   # Private functions
