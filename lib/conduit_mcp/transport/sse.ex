@@ -2,23 +2,58 @@ defmodule ConduitMcp.Transport.SSE do
   @moduledoc """
   Server-Sent Events (SSE) transport layer for MCP.
 
+  > #### Legacy transport {: .warning}
+  >
+  > SSE is the pre-2025-03-26 MCP transport. New servers should use
+  > `ConduitMcp.Transport.StreamableHTTP`, which carries the same features
+  > over a single endpoint and is the one the specification develops. This
+  > transport is maintained for existing clients.
+
   Provides two endpoints:
   - GET /sse - Server-Sent Events stream for server-to-client messages
   - POST /message - HTTP endpoint for client-to-server messages
 
+  Everything this transport shares with `ConduitMcp.Transport.StreamableHTTP`
+  — the plug pipeline, CORS headers, auth (including `strategy: :oauth`), rate
+  limiting, the JSON-RPC POST dispatch, `GET /health`, the RFC 9728 metadata
+  endpoint and the catch-alls — lives in `ConduitMcp.Transport.Shared`.
+
+  ## Differences from `ConduitMcp.Transport.StreamableHTTP`
+
+  - **No sessions.** `Mcp-Session-Id` is defined by the Streamable HTTP
+    transport in the MCP specification; SSE predates it and has no session
+    concept, so `:session` is not an option here.
+  - **A long-lived GET stream.** `GET /sse` holds one process, socket and
+    `Plug.Conn` for the life of the connection, bounded by
+    `:max_connections` and `:max_connection_lifetime`.
+
   ## Options
 
   - `:server_module` (required) - The MCP server module to route requests to
-  - `:cors_origin` - CORS allow-origin header (default: "*")
-  - `:cors_methods` - CORS allow-methods header (default: "GET, POST, OPTIONS")
-  - `:cors_headers` - CORS allow-headers header (default: "content-type, authorization")
-  - `:auth` - Authentication plug configuration (optional)
+  - `:cors_origin` — value for `access-control-allow-origin`. **Unset means no
+    CORS headers are emitted at all**, so a page on another origin cannot read
+    the response. Set it (e.g. `"https://myapp.example"`, or `"*"`) to opt in.
+  - `:cors_methods` - CORS allow-methods header (default: "GET, POST, OPTIONS";
+    only emitted when `:cors_origin` is set)
+  - `:cors_headers` - CORS allow-headers header (default:
+    "content-type, authorization"; only emitted when `:cors_origin` is set)
+  - `:auth` - Authentication plug configuration (optional). Supports every
+    strategy `ConduitMcp.Plugs.Auth` does, plus `:oauth`.
   - `:base_url` - Public base URL advertised in the SSE `endpoint` event
     (e.g. `"https://mcp.example.com"`). Defaults to deriving it from the
     request's `Host` header (sanitized). Set this when running behind a proxy.
-  - `:allowed_origins` - list of allowed `Origin` header values. Unset means
-    no Origin validation (a startup warning is logged) — see
-    `ConduitMcp.Plugs.OriginValidation`.
+  - `:allowed_origins` - allowlist for the `Origin` header. Accepts a list of
+    strings, a bare string, a `Regex`, or `"*"`. **Unset fails closed**: any
+    request carrying an `Origin` is rejected with 403. Requests without an
+    `Origin` always pass. See `ConduitMcp.Plugs.OriginValidation`.
+  - `:keep_alive_interval` - milliseconds between SSE keepalive comments
+    (default: 15 000).
+  - `:max_connection_lifetime` - milliseconds after which an SSE stream is
+    closed (default: 1 hour). A stream pins a process, a socket and a
+    `Plug.Conn`; without a lifetime a client that opens connections and never
+    reads accumulates both indefinitely.
+  - `:max_connections` - maximum concurrent SSE streams. Further connections
+    get HTTP 503 (default: 1 000).
 
   ## Example
 
@@ -40,206 +75,73 @@ defmodule ConduitMcp.Transport.SSE do
        port: 4001}
   """
 
-  use Plug.Router
-  require Logger
+  use ConduitMcp.Transport.Shared
 
-  alias ConduitMcp.Handler
+  @default_keep_alive_interval 15_000
+  @default_max_connection_lifetime :timer.hours(1)
+  @default_max_connections 1_000
 
-  plug(Plug.Logger)
-  plug(ConduitMcp.Plugs.SecurityHeaders)
-  plug(ConduitMcp.Plugs.OriginValidation)
-  plug(:add_cors_headers)
-  plug(:match)
-  plug(Plug.Parsers, parsers: [:json], json_decoder: JSON, length: 1_000_000)
-  plug(:maybe_authenticate)
-  plug(:maybe_rate_limit)
-  plug(:maybe_message_rate_limit)
-  plug(:dispatch)
+  @connections_table :conduit_mcp_sse_connections
 
-  defp add_cors_headers(conn, _opts) do
-    # Get CORS settings from private (set in call/2)
-    cors_origin = conn.private[:cors_origin] || "*"
-    cors_methods = conn.private[:cors_methods] || "GET, POST, OPTIONS"
-    cors_headers = conn.private[:cors_headers] || "content-type, authorization"
-
-    conn
-    |> put_resp_header("access-control-allow-origin", cors_origin)
-    |> put_resp_header("access-control-allow-methods", cors_methods)
-    |> put_resp_header("access-control-allow-headers", cors_headers)
-  end
-
-  defp maybe_authenticate(conn, _opts) do
-    case conn.private[:auth_config] do
-      nil ->
-        # No auth configured
-        conn
-
-      auth_opts ->
-        # Apply auth plug
-        ConduitMcp.Plugs.Auth.call(conn, ConduitMcp.Plugs.Auth.init(auth_opts))
-    end
-  end
-
-  defp maybe_rate_limit(conn, _opts) do
-    case conn.private[:rate_limit_config] do
-      nil ->
-        conn
-
-      rate_limit_opts ->
-        ConduitMcp.Plugs.RateLimit.call(conn, ConduitMcp.Plugs.RateLimit.init(rate_limit_opts))
-    end
-  end
-
-  defp maybe_message_rate_limit(conn, _opts) do
-    case conn.private[:message_rate_limit_config] do
-      nil ->
-        conn
-
-      message_rate_limit_opts ->
-        ConduitMcp.Plugs.MessageRateLimit.call(
-          conn,
-          ConduitMcp.Plugs.MessageRateLimit.init(message_rate_limit_opts)
-        )
-    end
-  end
-
-  def init(opts) do
-    server_module = Keyword.get(opts, :server_module)
-
-    if is_nil(server_module) do
-      raise ArgumentError, "server_module is required"
-    end
-
-    ConduitMcp.Transport.StreamableHTTP.warn_if_origins_unset(opts, __MODULE__)
-
-    opts
-  end
-
-  def call(conn, opts) do
-    server_module = Keyword.get(opts, :server_module)
-
-    # Extract endpoint config as defaults (explicit transport opts always win)
-    endpoint_config =
-      if server_module && function_exported?(server_module, :__endpoint_config__, 0),
-        do: server_module.__endpoint_config__(),
-        else: []
-
-    cors_origin = Keyword.get(opts, :cors_origin, "*")
-    cors_methods = Keyword.get(opts, :cors_methods, "GET, POST, OPTIONS")
-    cors_headers = Keyword.get(opts, :cors_headers, "content-type, authorization")
-    auth_config = Keyword.get(opts, :auth) || Keyword.get(endpoint_config, :auth)
-
-    rate_limit_config =
-      Keyword.get(opts, :rate_limit) || Keyword.get(endpoint_config, :rate_limit)
-
-    message_rate_limit_config =
-      Keyword.get(opts, :message_rate_limit) ||
-        Keyword.get(endpoint_config, :message_rate_limit)
-
-    server_name = Keyword.get(opts, :server_name) || Keyword.get(endpoint_config, :name)
-    server_version = Keyword.get(opts, :server_version) || Keyword.get(endpoint_config, :version)
-    allowed_origins = Keyword.get(opts, :allowed_origins)
-    base_url = Keyword.get(opts, :base_url)
-
-    private = %{
-      server_module: server_module,
-      allowed_origins: allowed_origins,
-      sse_base_url: base_url,
-      cors_origin: cors_origin,
-      cors_methods: cors_methods,
-      cors_headers: cors_headers,
-      auth_config: auth_config,
-      rate_limit_config: rate_limit_config,
-      message_rate_limit_config: message_rate_limit_config,
-      server_name: server_name,
-      server_version: server_version
+  # Overrides the default from `use ConduitMcp.Transport.Shared`.
+  def __transport_private__(opts) do
+    %{
+      sse_base_url: Keyword.get(opts, :base_url),
+      keep_alive_interval: Keyword.get(opts, :keep_alive_interval, @default_keep_alive_interval),
+      max_connection_lifetime:
+        Keyword.get(opts, :max_connection_lifetime, @default_max_connection_lifetime),
+      max_connections: Keyword.get(opts, :max_connections, @default_max_connections)
     }
-
-    %{conn | private: Map.merge(conn.private, private)}
-    |> super(opts)
   end
 
-  # CORS preflight
-  options _ do
-    send_resp(conn, 200, "")
-  end
+  # --- routes -----------------------------------------------------------
 
   # SSE endpoint for server-to-client streaming
   get "/sse" do
-    # Validate Accept header
     accept_header = get_req_header(conn, "accept") |> List.first()
 
-    if accept_header && String.contains?(accept_header, "text/event-stream") do
-      Logger.info("New SSE connection established")
+    cond do
+      is_nil(accept_header) or not String.contains?(accept_header, "text/event-stream") ->
+        Logger.warning("SSE connection rejected: invalid Accept header")
 
-      conn
-      |> put_resp_content_type("text/event-stream")
-      |> put_resp_header("cache-control", "no-cache")
-      |> put_resp_header("connection", "keep-alive")
-      |> put_resp_header("x-accel-buffering", "no")
-      |> send_chunked(200)
-      |> send_sse_endpoint_info()
-    else
-      Logger.warning("SSE connection rejected: invalid Accept header")
-
-      conn
-      |> put_resp_content_type("application/json")
-      |> send_resp(
-        406,
-        JSON.encode!(%{
+        Shared.send_json(conn, 406, %{
           error: "Not Acceptable",
           message: "Accept header must include 'text/event-stream'"
         })
-      )
+
+      not acquire_connection_slot(conn) ->
+        Logger.warning("SSE connection rejected: at :max_connections")
+
+        Shared.send_json(conn, 503, %{
+          error: "Service Unavailable",
+          message: "Too many concurrent SSE connections"
+        })
+
+      true ->
+        Logger.info("New SSE connection established")
+
+        try do
+          conn
+          |> put_resp_content_type("text/event-stream")
+          |> put_resp_header("cache-control", "no-cache")
+          |> put_resp_header("connection", "keep-alive")
+          |> put_resp_header("x-accel-buffering", "no")
+          |> send_chunked(200)
+          |> send_sse_endpoint_info()
+        after
+          release_connection_slot()
+        end
     end
   end
 
   # Message endpoint for client-to-server requests
   post "/message" do
-    server_module = conn.private[:server_module]
-
-    case conn.body_params do
-      params when is_map(params) ->
-        Logger.debug("Received request", method: params["method"], id: params["id"])
-
-        response = Handler.handle_request(params, server_module, conn)
-
-        case response do
-          :ok ->
-            # It was a notification, no response needed
-            send_resp(conn, 204, "")
-
-          response_map when is_map(response_map) ->
-            conn
-            |> put_resp_content_type("application/json")
-            |> send_resp(200, JSON.encode!(response_map))
-        end
-
-      _ ->
-        error_response =
-          ConduitMcp.Protocol.error_response(
-            nil,
-            ConduitMcp.Protocol.invalid_request(),
-            "Request body must be valid JSON"
-          )
-
-        conn
-        |> put_resp_content_type("application/json")
-        |> send_resp(400, JSON.encode!(error_response))
-    end
+    Shared.dispatch_post(conn)
   end
 
-  # Health check endpoint
-  get "/health" do
-    conn
-    |> put_resp_content_type("application/json")
-    |> send_resp(200, JSON.encode!(%{status: "ok"}))
-  end
+  Shared.shared_routes()
 
-  # Catch all
-  match _ do
-    send_resp(conn, 404, "Not found")
-  end
+  # --- SSE stream -------------------------------------------------------
 
   defp send_sse_endpoint_info(conn) do
     endpoint_url = "#{message_base_url(conn)}/message"
@@ -281,24 +183,182 @@ defmodule ConduitMcp.Transport.SSE do
   defp sanitize_host(nil), do: "localhost:4001"
   defp sanitize_host(host), do: String.replace(host, ~r/[\r\n\s\/]/, "")
 
-  @keep_alive_interval 15_000
-
+  # The old loop matched only `{:plug_conn, :sent}` with an `after` timeout.
+  # Every other message — monitor `:DOWN`s, `:system` messages, a stray
+  # `send/2` — was never matched and never removed, and because the clause has
+  # a non-matching pattern *plus* an `after`, every tick rescanned the whole
+  # accumulated mailbox: a monotonic leak with O(n) per-tick rescan over a
+  # multi-day connection. The catch-all below is what drains it.
   defp keep_alive_loop(conn) do
+    interval = conn.private[:keep_alive_interval] || @default_keep_alive_interval
+
+    deadline =
+      System.monotonic_time(:millisecond) +
+        (conn.private[:max_connection_lifetime] || @default_max_connection_lifetime)
+
+    keep_alive_loop(conn, interval, deadline)
+  end
+
+  defp keep_alive_loop(conn, interval, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      Logger.info("SSE connection closed: reached :max_connection_lifetime")
+      conn
+    else
+      # The deadline is checked here, at the top, not inside the `after`.
+      # Every clause below recurses into a fresh `receive`, which restarts the
+      # `after` timer — so a message arriving more often than `interval` used to
+      # starve both the keepalive *and* the lifetime check, pinning the process
+      # past its configured ceiling forever.
+      await_keepalive(conn, interval, deadline, min(interval, remaining))
+    end
+  end
+
+  defp await_keepalive(conn, interval, deadline, timeout) do
     # receive/after rather than :timer.sleep so the process stays responsive
     # to messages (e.g. adapter bookkeeping) between keepalives.
     receive do
       {:plug_conn, :sent} ->
-        keep_alive_loop(conn)
-    after
-      @keep_alive_interval ->
-        case chunk(conn, ": keepalive\n\n") do
-          {:ok, conn} ->
-            keep_alive_loop(conn)
+        keep_alive_loop(conn, interval, deadline)
 
-          {:error, _reason} ->
-            # Client disconnected
-            conn
-        end
+      # `{:bandit, _}` is NOT drained. Under HTTP/2 the Plug runs inside
+      # `Bandit.HTTP2.StreamProcess`, and the connection process delivers
+      # `{:send_window_update, delta}` and `{:rst_stream, code}` to *this*
+      # mailbox for `chunk/2` to read back with a selective receive. Draining
+      # them would silently discard flow-control credit (eventually a
+      # FLOW_CONTROL_ERROR) and ignore h2 stream cancellation - an
+      # `EventSource.close()` sends RST_STREAM, not a TCP close, so the slot
+      # would be held for the whole `:max_connection_lifetime`.
+      msg when not (is_tuple(msg) and tuple_size(msg) > 0 and elem(msg, 0) == :bandit) ->
+        # Drain anything else so the mailbox cannot grow without bound.
+        keep_alive_loop(conn, interval, deadline)
+    after
+      timeout ->
+        send_keepalive(conn, interval, deadline)
+    end
+  end
+
+  defp send_keepalive(conn, interval, deadline) do
+    case chunk(conn, ": keepalive\n\n") do
+      {:ok, conn} ->
+        keep_alive_loop(conn, interval, deadline)
+
+      {:error, _reason} ->
+        # Client disconnected
+        conn
+    end
+  end
+
+  # --- connection accounting --------------------------------------------
+
+  # Each SSE stream pins a process, a socket and a Plug.Conn for its whole
+  # life, so the count has to be bounded somewhere. `:ets.update_counter/4`
+  # makes the check-and-increment atomic, which a read-then-write pair would
+  # not be under concurrency.
+  #
+  # The table is owned by the supervised `Owner` below, not by whichever stream
+  # first touched it. Without that, closing the *creating* connection destroyed
+  # the table and reset `:active` to 0 while every other stream was still live,
+  # so `:max_connections` could be walked past indefinitely — the same defect
+  # RC2 fixed for the session table.
+  defp acquire_connection_slot(conn) do
+    max = conn.private[:max_connections] || @default_max_connections
+    ensure_connections_table()
+
+    case update_active(1) do
+      # Counter unreadable. A resource cap must read that as "no" - returning a
+      # number here meant `0 > max` was false and the slot was granted, so
+      # every failure mode of the counter silently disabled the cap. That is
+      # reachable whenever the Owner has degraded and the table belongs to a
+      # stream process that has since exited.
+      :unavailable ->
+        false
+
+      active when active > max ->
+        update_active(-1)
+        false
+
+      _active ->
+        true
+    end
+  end
+
+  defp release_connection_slot do
+    ensure_connections_table()
+    # `{2, -1, 0, 0}` clamps at zero: a slot leaked by an untrappable exit
+    # (`Process.exit(pid, :kill)`) must not drive the counter negative.
+    :ets.update_counter(@connections_table, :active, {2, -1, 0, 0}, {:active, 0})
+    :ok
+  rescue
+    # The table vanished between the check and the update. Nothing to release.
+    ArgumentError -> :ok
+  end
+
+  defp update_active(delta) do
+    :ets.update_counter(@connections_table, :active, {2, delta}, {:active, 0})
+  rescue
+    # A racing `:ets.new` in ensure_connections_table/0, or the table being
+    # recreated underneath us. Distinguishable from a real count so the caller
+    # can fail closed rather than read it as "no slots taken".
+    ArgumentError -> :unavailable
+  end
+
+  @doc false
+  def active_connections do
+    ensure_connections_table()
+
+    case :ets.lookup(@connections_table, :active) do
+      [{:active, count}] -> count
+      [] -> 0
+    end
+  rescue
+    ArgumentError -> 0
+  end
+
+  @doc false
+  def connections_table_opts do
+    [:named_table, :public, :set, write_concurrency: :auto]
+  end
+
+  # Fallback for embedding contexts where the `:conduit_mcp` application is not
+  # started. Normally a no-op: `Owner` creates the table at boot.
+  defp ensure_connections_table do
+    if :ets.whereis(@connections_table) == :undefined do
+      :ets.new(@connections_table, connections_table_opts())
+    end
+
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defmodule Owner do
+    @moduledoc """
+    Long-lived process that owns the `:conduit_mcp_sse_connections` ETS table,
+    which holds the concurrent-stream counter behind
+    `ConduitMcp.Transport.SSE`'s `:max_connections`.
+
+    Started under `ConduitMcp.Supervisor` by `ConduitMcp.Application`. Without a
+    supervised owner the table belonged to whichever SSE stream created it, and
+    closing that one connection destroyed the counter for every other live
+    stream — letting a client walk straight past `:max_connections`.
+    """
+
+    # Not a GenServer itself: the process is a `ConduitMcp.EtsOwner`
+    # registered under this module's name. This module is the child spec.
+    def child_spec(opts) do
+      %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}}
+    end
+
+    alias ConduitMcp.Transport.SSE
+
+    def start_link(_opts) do
+      ConduitMcp.EtsOwner.start_link(
+        __MODULE__,
+        :conduit_mcp_sse_connections,
+        SSE.connections_table_opts()
+      )
     end
   end
 end

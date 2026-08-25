@@ -1,10 +1,68 @@
 defmodule ConduitMcp.ValidationTest do
   # async: false — mutates the global validation config (update_validation_config/1)
   use ExUnit.Case, async: false
+  use ExUnitProperties
 
   alias ConduitMcp.Validation
   alias ConduitMcp.Validation.SchemaConverter
   alias ConduitMcp.Validation.Validators
+
+  # A schema-bearing server for the idempotence property. `coerce_tool` is the
+  # smallest shape that makes the pipeline *change* its input: a boolean that
+  # arrives as a string, and a field with a default the caller omits.
+  defmodule IdempotenceServer do
+    @moduledoc false
+
+    def __validation_schema_for_tool__("coerce_tool") do
+      [
+        flag: [type: :boolean, required: true],
+        name: [type: :string, __min_length__: 3, __max_length__: 8],
+        mode: [type: :string, default: "fast"]
+      ]
+    end
+
+    def __validation_schema_for_tool__(_name), do: nil
+  end
+
+  describe "validation idempotence" do
+    setup do
+      previous = Application.get_env(:conduit_mcp, :validation, [])
+      on_exit(fn -> Validation.update_validation_config(previous) end)
+      Validation.update_validation_config(runtime_validation: true, type_coercion: true)
+      :ok
+    end
+
+    property "validating validated params changes nothing" do
+      # Previously driven against `ConduitMcp.TestServer`, which is manual mode
+      # with no `__validation_schema_for_tool__/1`: `validate_tool_params/3`
+      # returned its input untouched, so the property asserted `params ==
+      # params` through the identity function and could not fail. Idempotence
+      # can only break where the pipeline *changes* params - type coercion and
+      # default injection - so the generators feed both.
+      check all(
+              flag <- one_of([constant("true"), constant("false"), boolean()]),
+              name <- string(:alphanumeric, min_length: 3, max_length: 8)
+            ) do
+        assert {:ok, once} =
+                 Validation.validate_tool_params(
+                   IdempotenceServer,
+                   "coerce_tool",
+                   %{"flag" => flag, "name" => name}
+                 )
+
+        # The coercion actually happened, so the second pass is not a no-op.
+        assert is_boolean(once["flag"])
+        # The default was injected, so re-validating sees a field the caller
+        # never sent.
+        assert once["mode"] == "fast"
+
+        assert {:ok, twice} =
+                 Validation.validate_tool_params(IdempotenceServer, "coerce_tool", once)
+
+        assert once == twice
+      end
+    end
+  end
 
   describe "ConduitMcp.Validation" do
     # Create a mock server module with validation schemas
@@ -32,6 +90,14 @@ defmodule ConduitMcp.ValidationTest do
         ]
       end
 
+      def __validation_schema_for_tool__("length_tool") do
+        [name: [type: :string, __min_length__: 3, __max_length__: 8]]
+      end
+
+      def __validation_schema_for_tool__("bool_tool") do
+        [flag: [type: :boolean]]
+      end
+
       def __validation_schema_for_tool__(_tool_name), do: nil
 
       def __validation_schema_for_prompt__("test_prompt") do
@@ -39,6 +105,10 @@ defmodule ConduitMcp.ValidationTest do
           message: [type: :string, required: true],
           format: [type: :string, __enum_values__: ["text", "html"], default: "text"]
         ]
+      end
+
+      def __validation_schema_for_prompt__("length_prompt") do
+        [note: [type: :string, __max_length__: 5]]
       end
 
       def __validation_schema_for_prompt__(_prompt_name), do: nil
@@ -135,14 +205,19 @@ defmodule ConduitMcp.ValidationTest do
       # NimbleOptions should handle type coercion
     end
 
-    test "validate_tool_params/3 with unknown tool" do
+    test "validate_tool_params/3 signals an unknown tool distinctly" do
       params = %{"any" => "param"}
 
-      assert {:error, errors} =
+      # Not a validation-error list: the handler needs to tell "you named a
+      # tool that doesn't exist" apart from "your parameters are wrong", so it
+      # can answer with one clear message instead of burying it in data.errors.
+      assert {:error, :tool_not_found} =
                Validation.validate_tool_params(TestValidationServer, "unknown_tool", params)
+    end
 
-      assert length(errors) == 1
-      assert List.first(errors)["message"] =~ "not found"
+    test "validate_prompt_args/3 signals an unknown prompt distinctly" do
+      assert {:error, :prompt_not_found} =
+               Validation.validate_prompt_args(TestValidationServer, "unknown_prompt", %{})
     end
 
     test "validate_tool_params/3 with server without validation schemas" do
@@ -214,6 +289,174 @@ defmodule ConduitMcp.ValidationTest do
                Validation.validate_tool_params(TestValidationServer, "simple_tool", params)
 
       assert validated_params == params
+    end
+  end
+
+  # T-M2: rejection branches that were asymmetrically covered — the kind of
+  # gap that hides a sign error, since the mirror-image branch was tested.
+  describe "validation rejection branches" do
+    @server ConduitMcp.ValidationTest.TestValidationServer
+
+    setup do
+      previous = Application.get_env(:conduit_mcp, :validation, [])
+      on_exit(fn -> Validation.update_validation_config(previous) end)
+      :ok
+    end
+
+    defp update_validation_config(config), do: Validation.update_validation_config(config)
+
+    test "non-map params are rejected" do
+      for params <- ["not a map", 42, nil, ["a"], {:tuple}] do
+        assert {:error, [%{message: message}]} =
+                 Validation.validate_tool_params(@server, "simple_tool", params)
+
+        assert message == "Parameters must be a map"
+      end
+    end
+
+    test "non-map prompt arguments are rejected" do
+      assert {:error, [%{message: "Arguments must be a map"}]} =
+               Validation.validate_prompt_args(@server, "test_prompt", "nope")
+    end
+
+    test "max_length is enforced, not only min_length" do
+      update_validation_config(runtime_validation: true, type_coercion: true)
+
+      assert {:ok, _} =
+               Validation.validate_tool_params(@server, "length_tool", %{
+                 "name" => "abcd"
+               })
+
+      assert {:error, errors} =
+               Validation.validate_tool_params(@server, "length_tool", %{
+                 "name" => "abcdefghi"
+               })
+
+      assert Enum.any?(errors, &(&1["message"] =~ "no more than 8 characters"))
+
+      # And the covered direction still holds.
+      assert {:error, errors} =
+               Validation.validate_tool_params(@server, "length_tool", %{
+                 "name" => "ab"
+               })
+
+      assert Enum.any?(errors, &(&1["message"] =~ "at least 3 characters"))
+    end
+
+    test "max_length is enforced on prompt arguments too" do
+      update_validation_config(runtime_validation: true, type_coercion: true)
+
+      assert {:error, errors} =
+               Validation.validate_prompt_args(@server, "length_prompt", %{
+                 "note" => "far too long"
+               })
+
+      assert Enum.any?(errors, &(&1["message"] =~ "no more than 5 characters"))
+    end
+
+    test "a non-numeric value does not silently pass a min/max constraint" do
+      update_validation_config(runtime_validation: true, type_coercion: true)
+
+      # "abc" cannot be coerced to an integer, so the range check has nothing
+      # numeric to compare. It must still be rejected — on type — rather than
+      # slipping through the range guard's catch-all.
+      assert {:error, errors} =
+               Validation.validate_tool_params(@server, "simple_tool", %{
+                 "name" => "Alice",
+                 "age" => "abc"
+               })
+
+      # Not `refute errors == []`: the `assert {:error, errors}` above already
+      # establishes rejection, and a bare non-empty check passes if the
+      # unrelated "name" field is what failed. The claim is that `age` was
+      # rejected *on type*, so that is what is asserted.
+      assert Enum.any?(
+               errors,
+               &(&1["parameter"] == "age" and &1["message"] =~ "expected integer")
+             )
+    end
+
+    test "boolean coercion handles every documented spelling" do
+      update_validation_config(runtime_validation: true, type_coercion: true)
+
+      for {input, expected} <- [
+            {"true", true},
+            {"TRUE", true},
+            {"false", false},
+            {"FALSE", false},
+            {"1", true},
+            {"0", false}
+          ] do
+        assert {:ok, validated} =
+                 Validation.validate_tool_params(@server, "bool_tool", %{
+                   "flag" => input
+                 })
+
+        assert validated["flag"] == expected,
+               "expected #{inspect(input)} to coerce to #{inspect(expected)}"
+      end
+    end
+
+    test "a non-coercible boolean string is rejected rather than coerced to true" do
+      update_validation_config(runtime_validation: true, type_coercion: true)
+
+      assert {:error, errors} =
+               Validation.validate_tool_params(@server, "bool_tool", %{
+                 "flag" => "yes"
+               })
+
+      # `"yes"` must be refused by the boolean type check, not accepted by some
+      # other branch and not rejected for an unrelated reason.
+      assert Enum.any?(
+               errors,
+               &(&1["parameter"] == "flag" and &1["message"] =~ "expected boolean")
+             )
+    end
+  end
+
+  describe "the not-found return contract" do
+    # A local fixture: `TestValidationServer` is defined inside another
+    # `describe` block, so its alias is not in scope here and the bare name
+    # would resolve to a non-existent `Elixir.TestValidationServer`.
+    defmodule NotFoundServer do
+      @moduledoc false
+      def __validation_schema_for_tool__("known"), do: [name: [type: :string]]
+      def __validation_schema_for_tool__(_name), do: nil
+      def __validation_schema_for_prompt__("known"), do: [x: [type: :string]]
+      def __validation_schema_for_prompt__(_name), do: nil
+    end
+
+    setup do
+      previous = Application.get_env(:conduit_mcp, :validation, [])
+      on_exit(fn -> Validation.update_validation_config(previous) end)
+      Validation.update_validation_config(runtime_validation: true)
+      :ok
+    end
+
+    test "format_validation_errors/1 accepts what the validators actually return" do
+      # Both validators propagate a bare atom where the second element used to
+      # be a list of error maps, and `format_validation_errors/1` was guarded
+      # `when is_list(errors)` — so the documented
+      # `case ... do {:error, errs} -> format_validation_errors(errs)` raised
+      # FunctionClauseError on a tool name typo.
+      server = NotFoundServer
+
+      assert {:error, :tool_not_found} =
+               Validation.validate_tool_params(server, "no_such_tool", %{})
+
+      assert {:error, :prompt_not_found} =
+               Validation.validate_prompt_args(server, "no_such_prompt", %{})
+
+      for reason <- [:tool_not_found, :prompt_not_found] do
+        assert [%{"message" => message}] = Validation.format_validation_errors(reason)
+        assert message =~ "Unknown"
+      end
+
+      # The list form is unchanged.
+      assert {:error, errors} =
+               Validation.validate_tool_params(server, "known", %{"name" => 42})
+
+      assert [%{"parameter" => "name"} | _] = Validation.format_validation_errors(errors)
     end
   end
 
@@ -297,6 +540,60 @@ defmodule ConduitMcp.ValidationTest do
       ]
 
       assert :ok = SchemaConverter.validate_schema(valid_schema)
+    end
+
+    test "validate_schema/1 returns the error for an invalid schema" do
+      # The documented purpose of this function ("catch schema generation
+      # errors") had no test at all — only its :ok path did.
+      assert {:error, message} = SchemaConverter.validate_schema(name: [type: :not_a_type])
+      assert is_binary(message)
+      assert message =~ "type"
+    end
+
+    test "compile_validation_schema/1 handles both tool params and prompt args" do
+      params = [%{name: :text, type: :string, opts: [required: true]}]
+      assert [text: opts] = SchemaConverter.compile_validation_schema(%{params: params})
+      assert Keyword.get(opts, :type) == :string
+      assert Keyword.get(opts, :required) == true
+
+      args = [%{name: :code, type: :string, opts: []}]
+      assert [code: arg_opts] = SchemaConverter.compile_validation_schema(%{args: args})
+      assert Keyword.get(arg_opts, :type) == :string
+    end
+
+    test "a typo'd validation option fails the build instead of dropping the constraint" do
+      # `min_lenght: 3` used to log a warning and validate nothing.
+      assert_raise ArgumentError, ~r/unknown validation option :min_lenght/, fn ->
+        SchemaConverter.dsl_params_to_nimble_options([
+          %{name: :name, type: :string, opts: [min_lenght: 3]}
+        ])
+      end
+    end
+
+    test "the unknown-option error suggests the intended option" do
+      error =
+        assert_raise ArgumentError, fn ->
+          SchemaConverter.dsl_params_to_nimble_options([
+            %{name: :name, type: :string, opts: [max_lenght: 3]}
+          ])
+        end
+
+      assert Exception.message(error) =~ "Did you mean :max_length?"
+    end
+
+    test "a typo'd option raises at compile time, not at request time" do
+      assert_raise ArgumentError, ~r/unknown validation option :requird/, fn ->
+        Code.compile_string("""
+        defmodule TypoTool#{System.unique_integer([:positive])} do
+          use ConduitMcp.Server
+
+          tool "t", "d" do
+            param(:name, :string, "Name", requird: true)
+            handle(fn _conn, _params -> text("ok") end)
+          end
+        end
+        """)
+      end
     end
   end
 

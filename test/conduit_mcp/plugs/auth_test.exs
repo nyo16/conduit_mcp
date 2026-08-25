@@ -432,4 +432,146 @@ defmodule ConduitMcp.Plugs.AuthTest do
       assert body["message"] == "Authentication failed"
     end
   end
+
+  # T-L3: the only branches this module never entered.
+  describe "lowercase bearer scheme" do
+    test ":bearer_token accepts a lowercase scheme" do
+      # HTTP/2 clients may lowercase header *values* as well as names.
+      opts = Auth.init(strategy: :bearer_token, token: "s3cret")
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "bearer s3cret")
+        |> Auth.call(opts)
+
+      refute result.halted
+      assert ConduitMcp.Principal.get(result).strategy == :bearer_token
+    end
+
+    test ":function accepts a lowercase scheme" do
+      opts = Auth.init(strategy: :function, verify: fn "tok" -> {:ok, %{id: "u1"}} end)
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "bearer tok")
+        |> Auth.call(opts)
+
+      refute result.halted
+      assert ConduitMcp.Principal.id(result) == "u1"
+    end
+  end
+
+  describe "missing credential headers" do
+    test ":bearer_token with no Authorization header returns 401" do
+      result = Auth.call(conn(:get, "/"), Auth.init(strategy: :bearer_token, token: "s"))
+
+      assert result.halted
+      assert result.status == 401
+      assert JSON.decode!(result.resp_body)["message"] =~ "Authorization header"
+    end
+
+    test ":api_key with no key header names the header it wanted" do
+      opts = Auth.init(strategy: :api_key, api_key: "k", header: "x-custom-key")
+
+      result = Auth.call(conn(:get, "/"), opts)
+
+      assert result.halted
+      assert result.status == 401
+      assert JSON.decode!(result.resp_body)["message"] == "Missing x-custom-key header"
+    end
+
+    test ":function with no Authorization header returns 401" do
+      opts = Auth.init(strategy: :function, verify: fn _ -> {:ok, %{}} end)
+
+      result = Auth.call(conn(:get, "/"), opts)
+
+      assert result.halted
+      assert result.status == 401
+    end
+  end
+
+  describe "deprecated :custom strategy" do
+    test "delegates to :function and warns" do
+      opts = Auth.init(strategy: :custom, verify: fn "tok" -> {:ok, %{id: "u2"}} end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          result =
+            conn(:get, "/")
+            |> put_req_header("authorization", "Bearer tok")
+            |> Auth.call(opts)
+
+          send(self(), {:result, result})
+        end)
+
+      assert_received {:result, result}
+      refute result.halted
+      assert ConduitMcp.Principal.id(result) == "u2"
+      assert log =~ ":custom is deprecated"
+    end
+
+    test "rejects a bad credential just like :function" do
+      opts = Auth.init(strategy: :custom, verify: fn _ -> {:error, :nope} end)
+
+      result =
+        ExUnit.CaptureLog.capture_log(fn ->
+          conn(:get, "/")
+          |> put_req_header("authorization", "Bearer wrong")
+          |> Auth.call(opts)
+          |> then(&send(self(), {:result, &1}))
+        end)
+        |> then(fn _log ->
+          receive do
+            {:result, result} -> result
+          end
+        end)
+
+      assert result.halted
+      assert result.status == 401
+    end
+  end
+
+  describe "unknown strategy" do
+    test "fails closed with a server configuration error" do
+      opts = Auth.init(strategy: :nonsense)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          result =
+            conn(:get, "/")
+            |> put_req_header("authorization", "Bearer whatever")
+            |> Auth.call(opts)
+
+          send(self(), {:result, result})
+        end)
+
+      assert_received {:result, result}
+      assert result.halted
+      assert result.status == 401
+      assert JSON.decode!(result.resp_body)["message"] == "Server configuration error"
+      assert log =~ "Invalid auth strategy"
+    end
+  end
+
+  describe "invalid verify return" do
+    test "a verify function returning something else fails closed" do
+      opts = Auth.init(strategy: :function, verify: fn _ -> :yes_please end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          result =
+            conn(:get, "/")
+            |> put_req_header("authorization", "Bearer tok")
+            |> Auth.call(opts)
+
+          send(self(), {:result, result})
+        end)
+
+      assert_received {:result, result}
+      assert result.halted
+      assert result.status == 401
+      assert JSON.decode!(result.resp_body)["message"] == "Server configuration error"
+      assert log =~ "Invalid verify function return"
+    end
+  end
 end

@@ -54,10 +54,24 @@ defmodule ConduitMcp.ProtocolTest do
     test "resource_not_found returns -32002" do
       assert Protocol.resource_not_found() == -32002
     end
+
+    test "server_error returns -32000" do
+      # The moduledoc advertised it while the defdelegate block omitted it, so
+      # this call used to raise UndefinedFunctionError.
+      assert Protocol.server_error() == -32000
+    end
+
+    test "task_not_ready returns -32004" do
+      assert Protocol.task_not_ready() == -32004
+    end
+
+    test "request_cancelled returns -32800" do
+      assert Protocol.request_cancelled() == -32800
+    end
   end
 
   describe "methods/0" do
-    test "returns all supported MCP methods" do
+    test "returns all supported MCP methods, including the six it used to miss" do
       methods = Protocol.methods()
 
       assert methods["initialize"] == :initialize
@@ -73,6 +87,68 @@ defmodule ConduitMcp.ProtocolTest do
       assert methods["logging/setLevel"] == :set_log_level
       assert methods["resources/subscribe"] == :subscribe_resource
       assert methods["resources/unsubscribe"] == :unsubscribe_resource
+
+      # Previously absent from methods/0 while being routed by the handler.
+      assert methods["resources/templates/list"] == :list_resource_templates
+      assert methods["tasks/get"] == :get_task
+      assert methods["tasks/cancel"] == :cancel_task
+      assert methods["tasks/result"] == :task_result
+      assert methods["tasks/list"] == :list_tasks
+      assert methods["notifications/cancelled"] == :cancelled
+    end
+
+    test "every listed method is actually routed by the handler" do
+      # methods/0 and the dispatcher are the same map, so this pins the other
+      # direction: a method in the table with no route clause.
+      notifications = ["notifications/initialized", "notifications/cancelled"]
+
+      for {method, _name} <- Protocol.methods(), method not in notifications do
+        request = %{"jsonrpc" => "2.0", "id" => 1, "method" => method, "params" => %{}}
+        response = ConduitMcp.Handler.handle_request(request, ConduitMcp.TestServer)
+
+        # A server callback may legitimately answer "not found"; what must not
+        # happen is the *router* rejecting a method it publishes.
+        message = get_in(response, ["error", "message"]) || ""
+
+        refute message =~ "Method not found",
+               "#{method} is listed in methods/0 but the handler does not route it"
+      end
+    end
+
+    test "no published method reaches the rescue's internal_error" do
+      # `route/5` has no catch-all, so a table entry with no clause raises
+      # FunctionClauseError, which the rescue converts into -32603. That makes
+      # a missing clause a runtime discovery reported to the client as a server
+      # bug. This is the assertion that turns it into a test failure.
+      notifications = ["notifications/initialized", "notifications/cancelled"]
+
+      for {method, _name} <- Protocol.methods(), method not in notifications do
+        request = %{"jsonrpc" => "2.0", "id" => 1, "method" => method, "params" => %{}}
+        response = ConduitMcp.Handler.handle_request(request, ConduitMcp.TestServer)
+
+        refute get_in(response, ["error", "code"]) == Protocol.internal_error(),
+               "#{method} is published by methods/0 but has no route/5 clause"
+      end
+    end
+
+    test "every published notification is routed, none logs as unknown" do
+      # The same drift in the other dispatcher: `handle_notification/3` used a
+      # hand-written case over string literals, so a table entry with no clause
+      # was advertised and then dropped as "Unknown notification".
+      for method <- ["notifications/initialized", "notifications/cancelled"] do
+        assert Map.has_key?(Protocol.methods(), method)
+
+        # A valid notification carries no id.
+        notification = %{"jsonrpc" => "2.0", "method" => method, "params" => %{}}
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            ConduitMcp.Handler.handle_request(notification, ConduitMcp.TestServer)
+          end)
+
+        refute log =~ "Unknown notification",
+               "#{method} is published by methods/0 but handle_notification/3 drops it"
+      end
     end
   end
 

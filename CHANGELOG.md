@@ -7,6 +7,290 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+P1 hardening: everything the 2026-08-24 audit classified as broken today for a
+consumer. No public API removals.
+
+### Breaking changes
+
+Four defaults changed because the old ones were unsafe or wrong. Each has a
+one-line opt-out.
+
+- **CORS is off by default.** `:cors_origin` no longer defaults to `"*"`, and
+  no `access-control-allow-*` header is emitted unless you set it. Previously
+  every response carried `access-control-allow-origin: *`, so a page on
+  `https://evil.example` could POST to the server and *read the reply* — the
+  `options _` route answered the preflight 200 and `ACAO: *` authorised the
+  read. No DNS rebinding required.
+  Opt out: `cors_origin: "*"`.
+- **An unset `:allowed_origins` now fails closed.** A request carrying an
+  `Origin` header is rejected with 403 instead of logged-and-allowed. Requests
+  *without* an `Origin` still pass, so non-browser MCP clients are unaffected.
+  Opt out: `allowed_origins: "*"`.
+- **Cross-mode error codes are now consistent, and spec-correct.** An unknown
+  tool or prompt returns `-32602` with a top-level `"Unknown tool: <name>"` /
+  `"Unknown prompt: <name>"` message in all three authoring modes; a missing
+  resource returns `-32002`. Previously DSL and Endpoint mode buried the real
+  reason inside a `-32602 "Parameter validation failed"` payload's
+  `data.errors`, manual mode returned `-32601 "Tool not found"`, and a DSL
+  server whose resources were all static raised `FunctionClauseError` on an
+  unknown URI and answered `-32603 "Internal server error"`. `-32601` for a
+  missing resource is a spec deviation, not a contract worth preserving.
+- **`tasks/*` authorization is no longer default-open, and `tasks/list` is
+  bounded.** A caller with no principal used to match *every* task; it now
+  matches only unowned ones. `tasks/list` accepts a client `"limit"` and clamps
+  it to a server maximum (default 100, `:tasks_list_max_limit`), where it
+  previously serialised the whole table into one response.
+  Opt in to stricter semantics: `config :conduit_mcp, :tasks_require_owner, true`
+  makes unowned tasks inaccessible too.
+
+- **An OAuth token with no usable subject claim is now rejected with 401.**
+  `sub` is optional in a JWT and absent from many client-credentials access
+  tokens; accepting one produced an *authenticated* principal that every
+  consumer reads as anonymous — tasks created unowned and world-readable, rate
+  limiting on the shared IP bucket. The claims consulted are configurable:
+  `auth: [strategy: :oauth, subject_claims: ["sub", "client_id", ...]]`
+  (default `["sub", "client_id"]`).
+- **`:scope` on a DSL declaration is now validated at compile time.**
+  `scope ""` used to compile clean and authorize everyone, because it splits to
+  `[]` and `Enum.all?([], _)` is true. `ConduitMcp.Component` already rejected
+  it; both authoring modes now share one validation.
+- **`resources/subscribe`, `resources/unsubscribe` and `completion/complete`
+  now enforce the referenced resource's or prompt's `:scope`.** Subscribing
+  delivers a resource's change notifications and completion enumerates its
+  argument values, so both were readable without the scope that gates reading
+  it.
+- **A list passed to `:cors_origin` now raises at `init/1`** instead of raising
+  `FunctionClauseError` inside the pipeline on every request. `:allowed_origins`
+  is the option that takes a list.
+
+Two smaller behaviour changes worth knowing about:
+
+- `notifications/cancelled` is now counted by `ConduitMcp.Plugs.MessageRateLimit`
+  (other notifications are still exempt). It mutates server state and is
+  reachable unauthenticated.
+- `[:conduit_mcp, :auth, :verify]` telemetry reports `reason: :invalid_credential`
+  for a failed static-strategy verification instead of the verifier's own
+  reason, which may embed the credential.
+
+### Security
+
+- **`exp` is now enforced.** `Joken.Config.default_claims(default_exp: 3600)`
+  only affects token *generation*; Joken validates by folding over the claims
+  the token actually carries, so a token with **no `exp` was accepted forever**.
+  `exp` is now mandatory and `nbf` is enforced when present.
+- **Expired and wrong-issuer tokens now report themselves.**
+  `normalize_joken_error/1` matched `"expired"` against a Joken failure that
+  renders as `"Invalid token"`, so expiry, wrong issuer and wrong audience all
+  collapsed into `:invalid_signature` / `"Token verification failed"`. It now
+  dispatches on the failed claim, so a client can tell "refresh your token"
+  from "this token is forged".
+- **Cancellation rows are also bounded per scope**
+  (`:cancellations_max_rows_per_scope`, default 256). A global cap alone is a
+  cross-tenant denial of service: one unauthenticated client filling the table
+  stops every *other* client's cancellations from being recorded. The
+  cancellation table is now an `ordered_set`, so the per-scope count is a
+  bounded range scan.
+- **`ConduitMcp.Plugs.OriginValidation`'s moduledoc no longer claims to stop
+  DNS rebinding.** It does not: after a rebind the attacker's page is
+  *same-origin*, and browsers send no `Origin` on a same-origin GET, so the
+  header-less path applies and the allowlist never runs. What Origin validation
+  does cover is the cross-origin case (a cross-origin POST always carries
+  `Origin`). The control for rebinding is `Host` validation, which this library
+  does not implement — the moduledoc now says so and points at the mitigations.
+- **Cross-client cancellation abuse fixed (`notifications/cancelled`).** The
+  cancellation table was keyed on the raw client-chosen JSON-RPC id, so
+  `{"requestId": "1"}` aborted every concurrent client's request id `1` and a
+  `1..1000` loop aborted every in-flight tool call on the node. Rows are now
+  keyed `{scope, id}`, where scope is the session id, else the principal, else
+  the client IP. Ids must be a string or integer; a `{}` returns a JSON-RPC
+  error instead of a 500.
+- **`:scope` is now enforced on resources and prompts, not only tools.**
+  `use ConduitMcp.Component, type: :resource, scope: "admin:read"` compiled
+  clean and enforced nothing. `handle_resource_read/4` and
+  `handle_prompt_get/4` gained the authorization hook, scopes are collected
+  from all three declaration types (URI templates included), and the DSL's
+  `scope/1` now raises at compile time outside a `tool`/`resource`/`prompt`
+  block.
+- **`strategy: :oauth` works on `ConduitMcp.Transport.SSE`.** SSE had no
+  `:oauth` branch, so it fell through to `ConduitMcp.Plugs.Auth`'s catch-all
+  and returned a blanket 401 "Server configuration error" plus a
+  `Logger.error` on *every* request, even with a valid token.
+- **JWKS refreshes are single-flighted and rate-limited.** Every cache miss was
+  an independent outbound fetch: at TTL lapse with 500 rps, 500 requests each
+  blocked a Bandit process for up to 15 s against an endpoint IdPs rate-limit.
+  `fetch_key/2` also refreshed on *any* unknown `kid`, before any signature
+  check, so an unauthenticated caller could drive one fetch per request. Now:
+  one fetch per URI at a time, a `:refresh_cooldown` (default 30 s) on
+  kid-triggered refreshes, and a lock-age guard so a crashed holder cannot
+  wedge refreshes.
+- **The JWKS 1 MB cap is enforced while streaming.** It was applied to an
+  already-buffered, already-decompressed body, so a multi-gigabyte response
+  exhausted the VM before the guard ran. Responses now stream through a
+  size-bounded collector with `compressed: false`, so a compression bomb can
+  never be expanded in memory. The `:req` requirement is now
+  `"~> 0.6.1 or ~> 0.7"` — the `0.6.1` security floor was previously only prose.
+- **The SSE keep-alive loop is bounded.** It matched only
+  `{:plug_conn, :sent}` with an `after` timeout, so every other message
+  accumulated forever *and* was rescanned on every tick — a monotonic leak with
+  O(n) per-tick cost over a long-lived connection. It now drains foreign
+  messages, honours `:max_connection_lifetime` (default 1 h) and rejects past
+  `:max_connections` (default 1 000) with 503.
+- **Reflected client text is bounded and stripped.** New `ConduitMcp.Reflect`
+  clamps length and removes control characters for every client value echoed
+  into an error message or log line (method names, `protocolVersion`, `taskId`,
+  cancellation reasons, auth failure reasons). A non-string `protocolVersion`
+  now returns `invalid_params` instead of raising into
+  "Internal server error".
+- **`mix bench` no longer ships to consumers.** `package.files` packaged `lib`
+  wholesale and `elixirc_paths` compiled it in `:prod`, so `Mix.Tasks.Bench`
+  was installed in consumer projects, appeared in their `mix help`, and created
+  a stray `bench/output/` in their repo root. It now lives in `dev/`.
+- **The RFC 9728 protected-resource metadata endpoint is publicly reachable.**
+  It sat behind the auth plug, so the document a client fetches *after* a 401
+  to discover the authorization server required already being authenticated.
+  It is now served by both transports, without auth.
+
+### Fixed
+
+- **A JSON array in any reflected field no longer crashes the request.**
+  `ConduitMcp.Reflect.text/2` rescued only `Protocol.UndefinedError`, but
+  `to_string/1` on a list raises `ArgumentError` or `UnicodeConversionError`.
+  `notifications/cancelled` pipes the client's `reason` through it on a path
+  with no rescue, so `"reason": [1.5]` produced a bare 500 with no JSON-RPC
+  reply on either transport. Arrays are now inspected; `[1, 2]` renders as
+  `"[1, 2]"` rather than being coerced to two control characters and stripped
+  to `""`.
+- **`Plug.Router.forward` works again with `:rate_limit`.** Resolving plugs in
+  `init/1` put a *local* function capture in the router's options, and
+  `forward/2` escapes those at compile time — so the Phoenix integration in the
+  README failed to compile with "cannot escape #Function<…default_key_func>"
+  whenever rate limiting was configured. Both rate-limit plugs now expose
+  `default_key_func/1` publicly and capture it remotely.
+- **The global cancellation cap no longer denies callers who are under their
+  own quota.** It was checked first, so one client opening 40 sessions and
+  filling each scope's 256 rows (10 240 > the 10 000 default) refused every
+  *other* client's cancellations — reinstating the cross-tenant denial of
+  service the per-scope quota exists to prevent. The global cap is now a memory
+  backstop that reclaims the oldest rows of the largest scope instead of
+  rejecting.
+- **SSE `:max_connections` fails closed.** An unreadable connection counter was
+  read as "no slots taken", silently disabling the cap rather than enforcing
+  it.
+- **A supervised ETS owner that loses its table now retries.** The degrade was
+  terminal: the process idled forever owning nothing while the table's lifetime
+  silently became one request's. It also reported invalid `:ets.new/2` options
+  as an ownership race; those now raise.
+- **`:key_provider` validation covers `fetch_key/2`.** Only `fetch_keys/1` was
+  checked, but `fetch_signing_key/2` dispatches on the token's `kid` — so a
+  half-implemented provider passed `init/1` and raised
+  `UndefinedFunctionError` on the first token from any real JWKS-publishing
+  authorization server.
+- **Endpoint mode reflects unknown resource URIs safely.** Two of the three
+  "Resource not found" sites still interpolated the raw URI.
+- **`ConduitMcp.Validation.format_validation_errors/1` accepts what the
+  validators return.** They propagate `:tool_not_found` / `:prompt_not_found`
+  as bare atoms, and the function was guarded `when is_list(errors)`, so the
+  documented `{:error, errs} -> format_validation_errors(errs)` raised
+  `FunctionClauseError` on a name typo.
+- **A struct-shaped `:current_user` is namespaced by its type.**
+  `%MyApp.User{id: 42}` and `%MyApp.ApiClient{id: 42}` both derived `"42"`, and
+  task ownership is an exact string compare — so the service account could read
+  and cancel the human's tasks.
+- **A scoped resource with no `read` handler no longer skews scope
+  enforcement.** It contributed to the templated scan but not to dispatch, so
+  an overlapping template could enforce one scope and run another's handler.
+- **The session table survives.** `:conduit_mcp_sessions` was created lazily by
+  whichever request touched it first and died with that request, so
+  `Session.get/2` returned `{:error, :not_found}` for a session id the client
+  had just been handed. It is now owned by a supervised
+  `ConduitMcp.Session.EtsStore.Owner`, capped
+  (`:sessions_max_rows`, default 100 000) and swept by a
+  `ConduitMcp.Session.Janitor` started for you (disable with
+  `config :conduit_mcp, :session_janitor, false`). `initialize` fails closed
+  with 503 when the store is at capacity.
+- **One canonical authenticated principal.** `ConduitMcp.Plugs.OAuth` assigned
+  a *claims map* to `:current_user`, and ownership is an exact-match
+  comparison — so a task stamped on one request never matched on the next and
+  **the owner's own task 404'd**; against static auth every client sharing a
+  token collapsed into one owner. Both plugs now assign
+  `ConduitMcp.Principal` (`conn.assigns[:mcp_principal]`) carrying a stable
+  scalar `:id`, and task ownership, per-user rate limiting and scope checks all
+  read it. `:current_user` is unchanged and still yours to shape.
+- **Per-user message rate limiting actually works.** Its default key read a
+  shape neither auth plug assigned, so two OAuth subjects behind one proxy
+  shared a bucket. It now keys on the principal.
+- **A malformed `remote_ip` no longer kills the request.**
+  `conn.remote_ip |> :inet.ntoa() |> to_string()` raises
+  `Protocol.UndefinedError` on `{:error, :einval}`; both rate-limit plugs now
+  go through `ConduitMcp.Principal.client_ip/1`.
+- **`tasks/list` filters in the C layer.** It copied the whole table into the
+  caller's heap and filtered in Elixir, even when the filter matched nothing.
+  `:owner`, `:status` and `:limit` are now one `:ets.select/3` match spec.
+- **A typo'd validation option fails the build.**
+  `field(:name, :string, min_lenght: 3)` used to warn and validate *nothing*.
+  It now raises, with a "did you mean" suggestion.
+- **`ConduitMcp.Protocol.server_error/0` exists.** The moduledoc advertised it
+  while the `defdelegate` block omitted it, so calling it raised
+  `UndefinedFunctionError`.
+- **`ConduitMcp.Protocol.methods/0` cannot disagree with the router.** It was a
+  second, hand-maintained copy missing six routed methods
+  (`resources/templates/list`, all four `tasks/*`, `notifications/cancelled`).
+  It is now derived from `ConduitMcp.Handler`'s dispatch table.
+- **Optional dependencies fail loudly instead of 401ing.** The
+  `if Code.ensure_loaded?` guards are conditional *compilation*, frozen when
+  `:conduit_mcp` was built inside your `_build` — and Mix does not rebuild an
+  already-built dependency when you later add one. Configuring
+  `strategy: :oauth` or a JWKS `key_provider` without the dependency now raises
+  `ConduitMcp.OptionalDependencyError` at `init/1`, naming the dependency and
+  `mix deps.compile conduit_mcp --force`.
+- Supervision documentation now matches the actual tree (`CLAUDE.md`,
+  `ConduitMcp.Server`, `ConduitMcp.Session.EtsStore`), and
+  `ConduitMcp.Application` appears in the generated docs.
+
+### Added
+
+- `ConduitMcp.Principal` — the canonical "who is calling", with `id/1`,
+  `scopes/1`, `client_ip/1` and `rate_limit_key/1`.
+- `ConduitMcp.Reflect` — the boundary helper for reflected client text.
+- `ConduitMcp.Transport.Shared` — the single implementation of everything the
+  two transports share. No function body exists in both transports any more,
+  and each plug is resolved once in `init/1` rather than on every request.
+- `ConduitMcp.OptionalDeps` / `ConduitMcp.OptionalDependencyError`.
+- `ConduitMcp.Plugs.OriginValidation` now honours the documented `%Regex{}` and
+  bare-string `:allowed_origins` shapes, which previously hit the catch-all and
+  403'd every `Origin`-bearing request.
+- `ConduitMcp.Plugs.Auth` gained `:principal_id` for naming the principal
+  behind a shared static credential.
+- Optional-dependency table in `README.md` and prerequisites blocks in
+  `guides/authentication.md` and `guides/rate_limiting.md`, both stating the
+  `mix deps.compile conduit_mcp --force` requirement.
+- A bare-consumer CI job (`.github/scripts/bare_consumer_check.sh`) that builds
+  `:conduit_mcp` inside a project declaring **no** optional dependencies — the
+  one configuration the main suite can never cover, since `optional: true` deps
+  are fetched for the defining project. `publish` now gates on it.
+- `ConduitMcp.EtsOwner` — the shared implementation behind all five supervised
+  ETS table owners. A lost `:ets.new/2` race now logs and degrades instead of
+  raising: an Owner that raised on restart took `ConduitMcp.Supervisor` — and
+  with it the consumer's application — down after three attempts in five
+  seconds, and a janitor tick calling `ensure_table/0` is enough to cause it.
+- `ConduitMcp.Session.Janitor` gained `:telemetry_event` and `:noun`. The
+  library reuses this janitor for the cancellation table, so the cancellation
+  sweep now emits `[:conduit_mcp, :cancellation, :janitor]` rather than
+  reporting its evictions to your `[:conduit_mcp, :session, :cleanup]` handler
+  once a minute.
+- `:session_janitor` and `:cancellation_janitor` accept `true` as the symmetric
+  spelling of `false`, and raise a message naming the key for anything else
+  instead of a `CaseClauseError` inside `Application.start/2`.
+- `ConduitMcp.Tasks.list/1` accepts `limit: :infinity` — the same "unbounded"
+  spelling `:tasks_max_rows` uses. It previously returned `[]`.
+- `ConduitMcp.Reflect.text/2` also strips U+061C (ALM), U+2060 and U+FEFF —
+  the invisible format and bidi controls outside the ranges it already covered.
+- `ConduitMcp.Plugs.RateLimit.default_key_func/1` and
+  `ConduitMcp.Plugs.MessageRateLimit.default_key_func/1` are public
+  (`@doc false`) so the resolved plug options survive `Plug.Router.forward/2`'s
+  compile-time escape.
+- **Test coverage** expanded to 975 tests (up from 745), 90.2% coverage.
+
 ## [0.10.1] - 2026-08-05
 
 Follow-up hardening from a re-review of the 0.9.4–0.9.7 changes (PRs #13–#17).

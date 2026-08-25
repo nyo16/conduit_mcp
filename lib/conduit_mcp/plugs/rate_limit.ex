@@ -59,16 +59,20 @@ defmodule ConduitMcp.Plugs.RateLimit do
 
   ## Per-user rate limiting
 
+  The default key is the client IP, because this plug bounds raw connections
+  including unauthenticated ones. To bucket by authenticated caller instead,
+  use the canonical principal:
+
       rate_limit: [
         backend: MyApp.RateLimiter,
         limit: 100,
-        key_func: fn conn ->
-          case conn.assigns[:current_user] do
-            %{id: id} -> "user:\#{id}"
-            _ -> conn.remote_ip |> :inet.ntoa() |> to_string()
-          end
-        end
+        key_func: &ConduitMcp.Principal.rate_limit_key/1
       ]
+
+  Do not hand-roll `conn.remote_ip |> :inet.ntoa() |> to_string()` in a custom
+  key function: `:inet.ntoa/1` returns `{:error, :einval}` for a malformed
+  address and `to_string/1` on that raises, killing the request process
+  instead of returning 429. `ConduitMcp.Principal.client_ip/1` handles it.
 
   ## Without rate limiting
 
@@ -96,7 +100,7 @@ defmodule ConduitMcp.Plugs.RateLimit do
       backend: backend,
       scale: Keyword.get(opts, :scale, 60_000),
       limit: Keyword.get(opts, :limit, 60),
-      key_func: Keyword.get(opts, :key_func, &default_key_func/1)
+      key_func: Keyword.get(opts, :key_func, &__MODULE__.default_key_func/1)
     }
   end
 
@@ -155,7 +159,19 @@ defmodule ConduitMcp.Plugs.RateLimit do
     end
   end
 
-  defp default_key_func(conn) do
-    conn.remote_ip |> :inet.ntoa() |> to_string()
+  @doc false
+  # Public, and captured remotely below, because `Transport.Shared.init/2`
+  # resolves this plug at `init/1` time and the result is embedded in the
+  # router's options. `Plug.Router.forward/2` escapes those options at compile
+  # time and a *local* capture cannot be escaped - `forward "/mcp", to:
+  # ConduitMcp.Transport.StreamableHTTP, init_opts: [rate_limit: [...]]` failed
+  # to compile with "cannot escape #Function<...default_key_func>". Remote
+  # captures escape fine.
+  #
+  # `:inet.ntoa/1` returns `{:error, :einval}` for a malformed remote_ip and
+  # `to_string/1` on that raises, killing the request process instead of
+  # returning 429. ConduitMcp.Principal.client_ip/1 handles it.
+  def default_key_func(conn) do
+    ConduitMcp.Principal.client_ip(conn)
   end
 end

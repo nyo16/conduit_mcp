@@ -203,11 +203,56 @@ defmodule ConduitMcp.Validation.SchemaConverter do
     [{:additional_properties, value} | acc]
   end
 
-  # Unknown options are ignored with a warning
-  defp convert_validation_opt({key, _value}, acc) do
-    require Logger
-    Logger.warning("Unknown validation option ignored: #{inspect(key)}")
-    acc
+  # A silently dropped constraint is a security control that vanished:
+  # `field(:name, :string, min_lenght: 3)` used to emit a compile-time warning
+  # and validate *nothing*. Warnings scroll past; this does not.
+  @recognised_validation_opts [
+    :required,
+    :enum,
+    :default,
+    :min,
+    :max,
+    :min_length,
+    :max_length,
+    :validator,
+    :type_coercion,
+    :additional_properties
+  ]
+
+  defp convert_validation_opt({key, value}, _acc) do
+    raise ArgumentError, unknown_option_message(key, value)
+  end
+
+  defp unknown_option_message(key, value) do
+    recognised = Enum.map_join(@recognised_validation_opts, ", ", &inspect/1)
+
+    suggestion =
+      case did_you_mean(key) do
+        nil -> ""
+        candidate -> "\nDid you mean #{inspect(candidate)}?"
+      end
+
+    """
+    unknown validation option #{inspect(key)} (value: #{inspect(value)}).
+
+    Recognised options: #{recognised}.#{suggestion}
+
+    A typo used to be logged as a warning and the constraint silently dropped, \
+    which means the validation you declared did not run.
+    """
+  end
+
+  defp did_you_mean(key) do
+    name = Atom.to_string(key)
+
+    @recognised_validation_opts
+    |> Enum.map(&{&1, String.jaro_distance(name, Atom.to_string(&1))})
+    |> Enum.filter(fn {_opt, score} -> score > 0.8 end)
+    |> Enum.max_by(fn {_opt, score} -> score end, fn -> nil end)
+    |> case do
+      {opt, _score} -> opt
+      nil -> nil
+    end
   end
 
   @doc """

@@ -34,6 +34,33 @@ end
 
 Requires Elixir ~> 1.18.
 
+### Optional dependencies
+
+The core library needs nothing beyond the block above. These features are
+compiled in **only when their dependency is present**, so add the ones you
+need before you configure the feature:
+
+| Feature | Dependency | Add to `deps` |
+|---|---|---|
+| `auth: [strategy: :oauth]` — JWT bearer validation ([guide](guides/authentication.md)) | `:joken`, `:jose` | `{:joken, "~> 2.6"}`<br>`{:jose, "~> 1.11"}` |
+| `ConduitMcp.OAuth.KeyProvider.JWKS` — fetch signing keys from a JWKS URI | `:req` | `{:req, "~> 0.6.1 or ~> 0.7"}` |
+| `ConduitMcp.Plugs.RateLimit` / `ConduitMcp.Plugs.MessageRateLimit` ([guide](guides/rate_limiting.md)) | `:hammer` | `{:hammer, "~> 7.2"}` |
+| `ConduitMcp.PromEx` — Prometheus metrics | `:prom_ex` | `{:prom_ex, "~> 1.11"}` |
+
+> **Adding one of these later requires a forced rebuild.** These modules are
+> guarded by `if Code.ensure_loaded?(Dep)`, which is evaluated once — when
+> `:conduit_mcp` is compiled inside your project's `_build`. Mix does not
+> recompile an already-built dependency when you add a new one, so run:
+>
+> ```bash
+> mix deps.get
+> mix deps.compile conduit_mcp --force
+> ```
+>
+> Skipping this leaves the feature absent. ConduitMCP detects that at
+> `init/1` and raises `ConduitMcp.OptionalDependencyError` naming the missing
+> dependency and this command, rather than failing at request time.
+
 ## Quick Start
 
 Define a server in one module:

@@ -18,11 +18,18 @@ defmodule ConduitMcp.MixProject do
       source_url: @source_url,
       test_coverage: [tool: ExCoveralls],
       elixirc_paths: elixirc_paths(Mix.env()),
+      # `dev/` carries Mix.Tasks.Bench, which is compiled only in :dev and is
+      # what still needs :mix in the PLT.
       dialyzer: [plt_add_apps: [:mix]]
     ]
   end
 
+  # `dev/` is deliberately outside `lib/`: `package.files` ships `lib`
+  # wholesale, so a Mix task under `lib/` is packaged, compiled into the
+  # consumer's :prod build, and shows up in their `mix help`. Keeping it in
+  # `dev/` means `mix bench` still works here and ships nowhere.
   defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(:dev), do: ["lib", "dev"]
   defp elixirc_paths(_), do: ["lib"]
 
   def cli do
@@ -58,12 +65,16 @@ defmodule ConduitMcp.MixProject do
       # Optional: Prometheus metrics via PromEx
       {:prom_ex, "~> 1.11", optional: true},
 
+      # Optional: HTTP client for JWKS key fetching (only needed for JWKS key provider).
+      # 0.6.1 is a security floor: earlier versions carry an unbounded-
+      # decompression advisory the JWKS provider can reach. Expressed as a
+      # union rather than `"~> 0.6 and >= 0.6.1"`, which resolves to `< 0.7.0`
+      # and would exclude the version this repo itself locks.
+      {:req, "~> 0.6.1 or ~> 0.7", optional: true},
+
       # Optional: OAuth 2.1 JWT validation (only needed if using :oauth auth strategy)
       {:joken, "~> 2.6", optional: true},
       {:jose, "~> 1.11", optional: true},
-
-      # Optional: HTTP client for JWKS key fetching (only needed for JWKS key provider)
-      {:req, "~> 0.5", optional: true},
 
       # Development
       {:ex_doc, "~> 0.39", only: :dev, runtime: false},
@@ -143,10 +154,14 @@ defmodule ConduitMcp.MixProject do
       groups_for_modules: [
         Core: [
           ConduitMcp,
+          ConduitMcp.Application,
           ConduitMcp.Server,
           ConduitMcp.DSL,
           ConduitMcp.DSL.Helpers,
-          ConduitMcp.DSL.SchemaBuilder
+          ConduitMcp.DSL.SchemaBuilder,
+          ConduitMcp.OptionalDeps,
+          ConduitMcp.OptionalDependencyError,
+          ConduitMcp.Principal
         ],
         "Endpoint Mode": [
           ConduitMcp.Endpoint,
@@ -161,7 +176,8 @@ defmodule ConduitMcp.MixProject do
         ],
         Transport: [
           ConduitMcp.Transport.StreamableHTTP,
-          ConduitMcp.Transport.SSE
+          ConduitMcp.Transport.SSE,
+          ConduitMcp.Transport.Shared
         ],
         Authentication: [
           ConduitMcp.Plugs.Auth,

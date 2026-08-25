@@ -2,6 +2,35 @@
 
 ConduitMCP supports multiple authentication strategies. Configure auth in transport options or in `ConduitMcp.Endpoint` use opts.
 
+## Prerequisites
+
+Bearer token, API key and custom-function strategies need no extra
+dependencies. **OAuth 2.1 does**, and it is compiled in only when those
+dependencies were present when `:conduit_mcp` was built:
+
+| You configure | You need |
+|---|---|
+| `strategy: :oauth` | `{:joken, "~> 2.6"}` and `{:jose, "~> 1.11"}` |
+| `key_provider: {ConduitMcp.OAuth.KeyProvider.JWKS, ...}` | additionally `{:req, "~> 0.6.1 or ~> 0.7"}` |
+
+After adding them, **force a rebuild of `:conduit_mcp`**:
+
+```bash
+mix deps.get
+mix deps.compile conduit_mcp --force
+```
+
+`ConduitMcp.Plugs.OAuth` and `ConduitMcp.OAuth.KeyProvider.JWKS` are wrapped
+in `if Code.ensure_loaded?(Dep)` guards, which are conditional *compilation*.
+Mix does not recompile an already-built dependency when you later add one of
+its optional deps, so without the `--force` rebuild the modules stay absent.
+When that happens the transport's `init/1` raises
+`ConduitMcp.OptionalDependencyError` naming the missing dependency and this
+command.
+
+`ConduitMcp.OAuth.KeyProvider.Static` also needs `:joken`/`:jose`, but not
+`:req`.
+
 ## Strategies
 
 ### Bearer Token
@@ -88,7 +117,9 @@ auth: [enabled: false]
 
 ## Accessing the Authenticated User
 
-The authenticated user is stored in `conn.assigns[:current_user]`:
+Whatever your `:verify` function returned is stored in
+`conn.assigns[:current_user]` (configurable with `assign_as:`). Use it for
+application data — display names, roles, your own structs:
 
 ```elixir
 # DSL mode
@@ -108,7 +139,51 @@ def execute(_params, conn) do
 end
 ```
 
-OAuth scopes are available in `conn.assigns[:oauth_scopes]`.
+## The canonical principal
+
+`:current_user` is shaped by *you*, so the library cannot use it as an
+identity. For anything that compares, stores, or keys on "who is calling" —
+task ownership, per-user rate limiting, scope checks — read
+`ConduitMcp.Principal`:
+
+```elixir
+ConduitMcp.Principal.id(conn)      # stable scalar identity, or nil
+ConduitMcp.Principal.scopes(conn)  # granted OAuth scopes, or []
+ConduitMcp.Principal.get(conn)     # %{id:, scopes:, strategy:, claims:, user:}
+```
+
+`id/1` is:
+
+| Strategy | `id` |
+|---|---|
+| `:oauth` | the first of `:subject_claims` present in the token (default `["sub", "client_id"]`) |
+| `:function` / `:custom` | derived from the verifier's return (`:id`, `"id"`, `:sub`, `"sub"`, or a bare binary/integer/atom) |
+| `:bearer_token` / `:api_key` | the configured `principal_id:`, else a stable digest of the shared credential |
+
+> **An OAuth token with no usable subject claim is rejected with 401.** `sub`
+> is optional in a JWT and absent from many client-credentials access tokens.
+> Accepting one would create an authenticated principal that everything
+> downstream reads as anonymous — tasks unowned and world-readable, rate
+> limiting on the shared IP bucket. Point `:subject_claims` at whatever your
+> authorization server does emit:
+>
+> ```elixir
+> auth: [strategy: :oauth, subject_claims: ["sub", "client_id", "tenant_id"], ...]
+> ```
+
+> **Never key on `:current_user` or on the OAuth claims map.** The claims map
+> carries `exp`, `iat` and `jti`, which change on every token — an exact-match
+> comparison against it never matches the same user twice, so an owner-scoped
+> task 404s for its own owner.
+
+For a static shared credential, set `principal_id:` to give it a readable
+identity:
+
+```elixir
+auth: [strategy: :bearer_token, token: "...", principal_id: "ci-bot"]
+```
+
+OAuth scopes are also mirrored to `conn.assigns[:oauth_scopes]`.
 
 ## Configuration in Endpoint Mode
 

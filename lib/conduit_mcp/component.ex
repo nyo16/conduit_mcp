@@ -73,7 +73,10 @@ defmodule ConduitMcp.Component do
   - `:description` — Required for tools and prompts
   - `:uri` — Required for resources. URI template with `{param}` placeholders
   - `:mime_type` — Optional for resources
-  - `:scope` — Optional OAuth scope string
+  - `:scope` — Optional space-separated OAuth scope string. Enforced by
+    `ConduitMcp.Handler` for tools, resources **and** prompts; a request
+    lacking the scope is rejected before `execute/2` runs, and a request with
+    no principal fails closed.
   - `:annotations` — Optional keyword list of tool annotations (e.g., `destructive: true`)
 
   ## Generated Functions
@@ -210,6 +213,17 @@ defmodule ConduitMcp.Component do
       raise CompileError,
         description: "#{inspect(module)}: resource components require a :uri option"
     end
+
+    validate_scope!(Keyword.get(opts, :scope), module)
+  end
+
+  # Delegated so the DSL and Component authoring modes cannot disagree about
+  # what a legal `:scope` is.
+  defp validate_scope!(nil, _module), do: :ok
+
+  defp validate_scope!(scope, module) do
+    ConduitMcp.DSL.__validate_scope__!(scope, module)
+    :ok
   end
 
   # Schema generation — reuses existing SchemaBuilder

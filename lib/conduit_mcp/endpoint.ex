@@ -103,10 +103,15 @@ defmodule ConduitMcp.Endpoint do
     tool_validation_clauses = generate_tool_validation_clauses(tools)
     prompt_validation_clauses = generate_prompt_validation_clauses(prompts)
 
-    scope_clauses = generate_scope_clauses(build_scope_map(tools))
+    scope_clauses =
+      ConduitMcp.DSL.__generate_scope_clauses__(
+        component_scopes(tools, & &1.__component_name__()),
+        component_scopes(prompts, & &1.__component_name__()),
+        component_scopes(resources, &Keyword.fetch!(&1.__component_opts__(), :uri))
+      )
 
-    key_map_clauses =
-      generate_key_map_clauses(build_key_maps(tools), build_key_maps(prompts))
+    key_conversion =
+      generate_key_conversion(build_key_maps(tools), build_key_maps(prompts))
 
     capabilities = build_capabilities(tools, resources, prompts)
 
@@ -127,7 +132,7 @@ defmodule ConduitMcp.Endpoint do
       tool_validation_clauses: tool_validation_clauses,
       prompt_validation_clauses: prompt_validation_clauses,
       scope_clauses: scope_clauses,
-      key_map_clauses: key_map_clauses,
+      key_conversion: key_conversion,
       endpoint_config: endpoint_config,
       capabilities: capabilities
     })
@@ -157,8 +162,8 @@ defmodule ConduitMcp.Endpoint do
       def handle_call_tool(_conn, tool_name, _params) do
         {:error,
          %{
-           "code" => ConduitMcp.Errors.method_not_found(),
-           "message" => "Tool not found: #{tool_name}"
+           "code" => ConduitMcp.Errors.invalid_params(),
+           "message" => "Unknown tool: #{ConduitMcp.Reflect.text(tool_name)}"
          }}
       end
 
@@ -180,7 +185,7 @@ defmodule ConduitMcp.Endpoint do
           {:error,
            %{
              "code" => ConduitMcp.Errors.resource_not_found(),
-             "message" => "Resource not found: #{uri}"
+             "message" => "Resource not found: #{ConduitMcp.Reflect.text(uri)}"
            }}
         end
       end
@@ -196,8 +201,8 @@ defmodule ConduitMcp.Endpoint do
       def handle_get_prompt(_conn, prompt_name, _args) do
         {:error,
          %{
-           "code" => ConduitMcp.Errors.method_not_found(),
-           "message" => "Prompt not found: #{prompt_name}"
+           "code" => ConduitMcp.Errors.invalid_params(),
+           "message" => "Unknown prompt: #{ConduitMcp.Reflect.text(prompt_name)}"
          }}
       end
 
@@ -212,27 +217,11 @@ defmodule ConduitMcp.Endpoint do
       def __validation_schema_for_prompt__(_name), do: nil
 
       # --- Scope lookup ---
-
       unquote(parts.scope_clauses)
-
-      def __scope_for_tool__(_tool_name), do: nil
 
       # --- Key maps for atom conversion ---
 
-      unquote(parts.key_map_clauses)
-
-      defp __key_map__(_component_name), do: %{}
-
-      defp __convert_to_atom_keys__(component_name, params) do
-        key_map = __key_map__(component_name)
-
-        Map.new(params, fn {k, v} ->
-          case Map.get(key_map, k) do
-            nil -> {k, v}
-            atom_key -> {atom_key, v}
-          end
-        end)
-      end
+      unquote(parts.key_conversion)
 
       # --- Endpoint config ---
 
@@ -394,7 +383,7 @@ defmodule ConduitMcp.Endpoint do
               {:error,
                %{
                  "code" => ConduitMcp.Errors.resource_not_found(),
-                 "message" => "Resource not found: #{uri}"
+                 "message" => "Resource not found: #{ConduitMcp.Reflect.text(uri)}"
                }}
           end
         end
@@ -405,7 +394,7 @@ defmodule ConduitMcp.Endpoint do
             {:error,
              %{
                "code" => ConduitMcp.Errors.resource_not_found(),
-               "message" => "Resource not found: #{uri}"
+               "message" => "Resource not found: #{ConduitMcp.Reflect.text(uri)}"
              }}
           end
         end
@@ -454,37 +443,73 @@ defmodule ConduitMcp.Endpoint do
     end)
   end
 
-  defp build_scope_map(tools) do
-    Enum.reduce(tools, %{}, fn mod, acc ->
+  # `:scope` is documented as a general component option, so it must be
+  # collected for resources and prompts too — not only tools. Building the map
+  # from tools alone is what made `use ConduitMcp.Component, type: :resource,
+  # scope: "admin:read"` compile clean and enforce nothing.
+  # `Enum.flat_map`, not a prepending reduce: the emitted templated-resource
+  # scope scan must walk templates in the same order `handle_read_resource/2`
+  # dispatches them, or two overlapping templates enforce one scope and run the
+  # other's handler.
+  defp component_scopes(components, key_fun) do
+    components
+    |> Enum.flat_map(fn mod ->
       case Keyword.get(mod.__component_opts__(), :scope) do
-        nil -> acc
-        scope -> Map.put(acc, mod.__component_name__(), scope)
+        nil -> []
+        scope -> [{key_fun.(mod), scope}]
       end
     end)
+    # De-duplicated because two components sharing a name would emit two
+    # identical `__scope_for_*__` clause heads, and the second is unreachable
+    # code the reader has to reason about. It is *not* a build fix: clauses
+    # injected via `unquote` carry no line metadata, so the compiler emits no
+    # "this clause cannot match" diagnostic for them (verified), and
+    # first-declaration-wins already held without this. First declaration wins,
+    # matching dispatch order.
+    |> Enum.uniq_by(&elem(&1, 0))
   end
 
-  # Emit one `__scope_for_tool__(name)` clause per scoped tool.
-  # The catch-all `_ -> nil` is appended in the generated quote block.
-  defp generate_scope_clauses(scope_map) do
-    Enum.map(scope_map, fn {name, scope} ->
-      quote do
-        def __scope_for_tool__(unquote(name)), do: unquote(Macro.escape(scope))
-      end
-    end)
-  end
+  # Emit one `__key_map__(name)` clause per component with a non-empty key
+  # map, plus the conversion helper that consults it.
+  #
+  # When no component declares a schema there is nothing to convert, so the
+  # helper is the identity. Emitting the lookup regardless would leave
+  # `Map.get/2` reading a provably empty map — dead work that the type
+  # checker correctly flags as always returning nil.
+  defp generate_key_conversion(tool_key_maps, prompt_key_maps) do
+    clauses =
+      tool_key_maps
+      |> Map.merge(prompt_key_maps)
+      |> Enum.reject(fn {_name, km} -> km == %{} end)
+      |> Enum.map(fn {name, km} ->
+        quote do
+          defp __key_map__(unquote(name)), do: unquote(Macro.escape(km))
+        end
+      end)
 
-  # Emit one `__key_map__(name)` clause per component with a non-empty
-  # key map. Components without aliases fall through to the catch-all
-  # `_ -> %{}` appended in the generated quote block.
-  defp generate_key_map_clauses(tool_key_maps, prompt_key_maps) do
-    tool_key_maps
-    |> Map.merge(prompt_key_maps)
-    |> Enum.reject(fn {_name, km} -> km == %{} end)
-    |> Enum.map(fn {name, km} ->
+    if clauses == [] do
       quote do
-        defp __key_map__(unquote(name)), do: unquote(Macro.escape(km))
+        defp __convert_to_atom_keys__(_component_name, params), do: params
       end
-    end)
+    else
+      quote do
+        unquote(clauses)
+
+        # Components without aliases fall through to this catch-all.
+        defp __key_map__(_component_name), do: %{}
+
+        defp __convert_to_atom_keys__(component_name, params) do
+          key_map = __key_map__(component_name)
+
+          Map.new(params, fn {k, v} ->
+            case Map.get(key_map, k) do
+              nil -> {k, v}
+              atom_key -> {atom_key, v}
+            end
+          end)
+        end
+      end
+    end
   end
 
   defp build_key_maps(components) do

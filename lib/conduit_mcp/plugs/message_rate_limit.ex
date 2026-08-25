@@ -23,7 +23,8 @@ defmodule ConduitMcp.Plugs.MessageRateLimit do
   ## How it works
 
   - Only POST requests are counted (GET/OPTIONS pass through)
-  - JSON-RPC notifications (requests without an `id` field) are not counted
+  - JSON-RPC notifications (requests without an `id` field) are not counted,
+    except `notifications/cancelled`, which mutates server state
   - Specific methods can be excluded (e.g., `"initialize"`, `"ping"`)
   - Keys are prefixed with `"msg:"` to prevent Hammer counter collision when
     both HTTP and message rate limiters share the same backend
@@ -75,9 +76,11 @@ defmodule ConduitMcp.Plugs.MessageRateLimit do
 
   ## Per-user rate limiting
 
-  The default key function already supports per-user rate limiting when the
-  `ConduitMcp.Plugs.Auth` plug is in the pipeline. If `conn.assigns[:current_user]`
-  is set, it will be used as the key. Otherwise, the client IP is used.
+  The default key function gives each authenticated caller their own bucket:
+  it keys on `ConduitMcp.Principal.id/1` — the stable scalar identity written
+  by `ConduitMcp.Plugs.Auth` and `ConduitMcp.Plugs.OAuth` — and falls back to
+  the client IP when the request is unauthenticated. Two OAuth subjects behind
+  the same proxy therefore get distinct buckets.
 
   You can also provide a custom key function:
 
@@ -114,7 +117,7 @@ defmodule ConduitMcp.Plugs.MessageRateLimit do
       backend: backend,
       scale: Keyword.get(opts, :scale, 300_000),
       limit: Keyword.get(opts, :limit, 50),
-      key_func: Keyword.get(opts, :key_func, &default_key_func/1),
+      key_func: Keyword.get(opts, :key_func, &__MODULE__.default_key_func/1),
       excluded_methods: Keyword.get(opts, :excluded_methods, [])
     }
   end
@@ -139,7 +142,7 @@ defmodule ConduitMcp.Plugs.MessageRateLimit do
       not is_map(body_params) or match?(%Plug.Conn.Unfetched{}, body_params) ->
         conn
 
-      notification?(body_params) ->
+      uncounted_notification?(body_params) ->
         conn
 
       excluded?(body_params["method"], opts.excluded_methods) ->
@@ -201,9 +204,17 @@ defmodule ConduitMcp.Plugs.MessageRateLimit do
     end
   end
 
-  defp notification?(body_params) do
+  # JSON-RPC notifications carry no `id` and expect no response, so counting
+  # them is normally pointless. `notifications/cancelled` is the exception: it
+  # writes a row to the cancellation table and is reachable unauthenticated,
+  # so an unbounded stream of them is exactly the abuse this plug exists to
+  # stop.
+  @counted_notifications ["notifications/cancelled"]
+
+  defp uncounted_notification?(body_params) do
     is_map(body_params) and Map.has_key?(body_params, "method") and
-      not Map.has_key?(body_params, "id")
+      not Map.has_key?(body_params, "id") and
+      body_params["method"] not in @counted_notifications
   end
 
   defp excluded?(nil, _excluded_methods), do: false
@@ -212,14 +223,15 @@ defmodule ConduitMcp.Plugs.MessageRateLimit do
     method in excluded_methods
   end
 
-  defp default_key_func(conn) do
-    base =
-      case conn.assigns[:current_user] do
-        %{id: id} -> "user:#{id}"
-        user when is_binary(user) -> "user:#{user}"
-        _ -> conn.remote_ip |> :inet.ntoa() |> to_string()
-      end
-
-    "msg:" <> base
+  @doc false
+  # Public, and captured remotely below, so the resolved plug options survive
+  # `Plug.Router.forward/2`'s compile-time escape. See the note on
+  # `ConduitMcp.Plugs.RateLimit.default_key_func/1`.
+  #
+  # Authenticated callers get their own bucket keyed on the canonical
+  # principal's stable id. Anonymous callers fall back to the client IP,
+  # which never raises on a malformed `remote_ip`.
+  def default_key_func(conn) do
+    "msg:" <> ConduitMcp.Principal.rate_limit_key(conn)
   end
 end

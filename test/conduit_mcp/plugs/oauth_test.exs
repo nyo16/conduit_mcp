@@ -4,6 +4,9 @@ defmodule ConduitMcp.Plugs.OAuthTest do
   import Plug.Conn
 
   alias ConduitMcp.Plugs.OAuth
+  alias ConduitMcp.TelemetryTestHelper
+
+  @auth_event [:conduit_mcp, :auth, :verify]
 
   # Generate a test RSA key pair for signing JWTs
   @rsa_key JOSE.JWK.generate_key({:rsa, 2048})
@@ -359,6 +362,385 @@ defmodule ConduitMcp.Plugs.OAuthTest do
       body = JSON.decode!(result.resp_body)
       assert body["error"] == "Forbidden"
       assert body["message"] =~ "Insufficient scope"
+    end
+  end
+
+  describe "exp / nbf enforcement" do
+    test "expired token reports :expired, not :invalid_signature" do
+      ref = TelemetryTestHelper.attach_event_handlers(self(), [@auth_event])
+      token = sign_token(%{"exp" => System.system_time(:second) - 3600})
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(@oauth_opts)
+
+      assert result.halted
+      assert result.status == 401
+      assert JSON.decode!(result.resp_body)["message"] == "Token expired"
+
+      assert_receive {@auth_event, ^ref, _measurements,
+                      %{strategy: :oauth, status: :error, reason: :expired}}
+    end
+
+    test "token with no exp claim is rejected as expired, not for some other reason" do
+      # Joken folds validation over the claims the token carries, so an absent
+      # exp was never validated and the token was accepted forever. A bare 401
+      # cannot tell that apart from a signature or issuer rejection - which is
+      # precisely how the pre-change suite passed for the wrong reason.
+      ref = TelemetryTestHelper.attach_event_handlers(self(), [@auth_event])
+      signer = Joken.Signer.create("RS256", @rsa_key_map)
+
+      {:ok, token, _} =
+        Joken.encode_and_sign(
+          %{
+            "iss" => "https://auth.example.com",
+            "aud" => "https://mcp.example.com",
+            "sub" => "user-123"
+          },
+          signer
+        )
+
+      assert {:ok, claims} = Joken.peek_claims(token)
+      refute Map.has_key?(claims, "exp")
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(@oauth_opts)
+
+      assert result.halted
+      assert result.status == 401
+      assert JSON.decode!(result.resp_body)["message"] == "Token expired"
+
+      assert_receive {@auth_event, ^ref, _measurements, %{status: :error, reason: :expired}}
+    end
+
+    test "token whose nbf is in the future is rejected" do
+      ref = TelemetryTestHelper.attach_event_handlers(self(), [@auth_event])
+      token = sign_token(%{"nbf" => System.system_time(:second) + 3600})
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(@oauth_opts)
+
+      assert result.halted
+      assert result.status == 401
+      assert JSON.decode!(result.resp_body)["message"] == "Token not yet valid"
+
+      assert_receive {@auth_event, ^ref, _measurements, %{status: :error, reason: :not_yet_valid}}
+    end
+
+    test "token with a malformed nbf is rejected as not-yet-valid, fail-closed" do
+      # A non-integer nbf must fail closed on the nbf branch. A bare 401 would
+      # also pass if the token were rejected for its signature, which would
+      # leave the malformed-claim path itself untested.
+      ref = TelemetryTestHelper.attach_event_handlers(self(), [@auth_event])
+      token = sign_token(%{"nbf" => "not-a-timestamp"})
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(@oauth_opts)
+
+      assert result.halted
+      assert result.status == 401
+      assert JSON.decode!(result.resp_body)["message"] == "Token not yet valid"
+
+      assert_receive {@auth_event, ^ref, _measurements, %{status: :error, reason: :not_yet_valid}}
+    end
+
+    test "wrong issuer reports :invalid_issuer, not :invalid_signature" do
+      ref = TelemetryTestHelper.attach_event_handlers(self(), [@auth_event])
+      token = sign_token(%{"iss" => "https://wrong-issuer.com"})
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(@oauth_opts)
+
+      assert result.status == 401
+      assert JSON.decode!(result.resp_body)["message"] == "Invalid token issuer"
+
+      assert_receive {@auth_event, ^ref, _measurements,
+                      %{status: :error, reason: :invalid_issuer}}
+    end
+
+    test "wrong audience reports :invalid_audience" do
+      ref = TelemetryTestHelper.attach_event_handlers(self(), [@auth_event])
+      token = sign_token(%{"aud" => "https://wrong-audience.com"})
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(@oauth_opts)
+
+      assert result.status == 401
+      assert JSON.decode!(result.resp_body)["message"] == "Invalid token audience"
+
+      assert_receive {@auth_event, ^ref, _measurements,
+                      %{status: :error, reason: :invalid_audience}}
+    end
+
+    test "a forged signature still reports :invalid_signature" do
+      ref = TelemetryTestHelper.attach_event_handlers(self(), [@auth_event])
+
+      other_key = JOSE.JWK.generate_key({:rsa, 2048}) |> JOSE.JWK.to_map() |> elem(1)
+      signer = Joken.Signer.create("RS256", Map.put(other_key, "kid", "test-key"))
+
+      {:ok, token, _} =
+        Joken.encode_and_sign(
+          %{
+            "iss" => "https://auth.example.com",
+            "aud" => "https://mcp.example.com",
+            "exp" => System.system_time(:second) + 3600
+          },
+          signer
+        )
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(@oauth_opts)
+
+      assert result.status == 401
+      assert JSON.decode!(result.resp_body)["message"] == "Token verification failed"
+
+      assert_receive {@auth_event, ^ref, _measurements,
+                      %{status: :error, reason: :invalid_signature}}
+    end
+  end
+
+  describe "alg-pinned keys (the path every real JWKS takes)" do
+    # Auth0, Okta, Entra, Keycloak and Google all publish "alg" on JWKS keys,
+    # so the alg-pinned clause is what production hits — the suite previously
+    # never entered it because its fixture key had no "alg".
+    @alg_pinned_key Map.put(@rsa_public_key, "alg", "RS256")
+
+    @alg_pinned_opts OAuth.init(
+                       issuer: "https://auth.example.com",
+                       audience: "https://mcp.example.com",
+                       key_provider:
+                         {ConduitMcp.OAuth.KeyProvider.Static, keys: [@alg_pinned_key]}
+                     )
+
+    test "accepts a token whose header alg matches the key's pinned alg" do
+      token = sign_token(%{"scope" => "read"})
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(@alg_pinned_opts)
+
+      refute result.halted
+      assert result.assigns[:oauth_claims]["sub"] == "user-123"
+    end
+
+    test "rejects a token whose header alg contradicts the key's pinned alg" do
+      ref = TelemetryTestHelper.attach_event_handlers(self(), [@auth_event])
+
+      opts =
+        OAuth.init(
+          issuer: "https://auth.example.com",
+          audience: "https://mcp.example.com",
+          # HS256 allow-listed so the allow-list check passes and the pinned
+          # alg is what does the rejecting.
+          algorithms: ["RS256", "HS256"],
+          key_provider: {ConduitMcp.OAuth.KeyProvider.Static, keys: [@alg_pinned_key]}
+        )
+
+      hs_signer = Joken.Signer.create("HS256", "attacker-controlled", %{"kid" => "test-key"})
+
+      {:ok, token, _} =
+        Joken.encode_and_sign(
+          %{
+            "iss" => "https://auth.example.com",
+            "aud" => "https://mcp.example.com",
+            "exp" => System.system_time(:second) + 3600
+          },
+          hs_signer
+        )
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(opts)
+
+      assert result.halted
+      assert result.status == 401
+
+      assert_receive {@auth_event, ^ref, _measurements, %{status: :error, reason: :alg_mismatch}}
+    end
+
+    test "rejects a token whose header carries no alg at all" do
+      ref = TelemetryTestHelper.attach_event_handlers(self(), [@auth_event])
+
+      # Joken always writes an alg, so hand-build the compact serialization.
+      encode = &Base.url_encode64(JSON.encode!(&1), padding: false)
+      header = encode.(%{"typ" => "JWT", "kid" => "test-key"})
+
+      payload =
+        encode.(%{
+          "iss" => "https://auth.example.com",
+          "aud" => "https://mcp.example.com",
+          "exp" => System.system_time(:second) + 3600
+        })
+
+      token = "#{header}.#{payload}.#{Base.url_encode64("sig", padding: false)}"
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(@alg_pinned_opts)
+
+      assert result.halted
+      assert result.status == 401
+
+      assert_receive {@auth_event, ^ref, _measurements, %{status: :error, reason: :missing_alg}}
+    end
+
+    test "rejects a key with no kty and no alg" do
+      ref = TelemetryTestHelper.attach_event_handlers(self(), [@auth_event])
+
+      opts =
+        OAuth.init(
+          issuer: "https://auth.example.com",
+          audience: "https://mcp.example.com",
+          key_provider: {ConduitMcp.OAuth.KeyProvider.Static, keys: [%{"kid" => "test-key"}]}
+        )
+
+      token = sign_token(%{})
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(opts)
+
+      assert result.halted
+      assert result.status == 401
+
+      assert_receive {@auth_event, ^ref, _measurements,
+                      %{status: :error, reason: :unsupported_key_type}}
+    end
+
+    test "accepts an EC P-256 key signing ES256" do
+      ec_key = JOSE.JWK.generate_key({:ec, "P-256"})
+      ec_private = ec_key |> JOSE.JWK.to_map() |> elem(1) |> Map.put("kid", "ec-key")
+
+      ec_public =
+        ec_key
+        |> JOSE.JWK.to_public()
+        |> JOSE.JWK.to_map()
+        |> elem(1)
+        |> Map.put("kid", "ec-key")
+
+      opts =
+        OAuth.init(
+          issuer: "https://auth.example.com",
+          audience: "https://mcp.example.com",
+          key_provider: {ConduitMcp.OAuth.KeyProvider.Static, keys: [ec_public]}
+        )
+
+      signer = Joken.Signer.create("ES256", ec_private)
+
+      {:ok, token, _} =
+        Joken.encode_and_sign(
+          %{
+            "iss" => "https://auth.example.com",
+            "aud" => "https://mcp.example.com",
+            "sub" => "ec-user",
+            "exp" => System.system_time(:second) + 3600
+          },
+          signer
+        )
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(opts)
+
+      refute result.halted
+      assert result.assigns[:oauth_claims]["sub"] == "ec-user"
+    end
+  end
+
+  describe "principal subject resolution" do
+    test "a verified token with no subject claim is rejected, not made anonymous" do
+      # Assigning id: nil would produce an *authenticated* principal that every
+      # consumer reads as anonymous: task ownership collapses to unowned and
+      # rate limiting falls back to the IP bucket.
+      ref = TelemetryTestHelper.attach_event_handlers(self(), [@auth_event])
+      signer = Joken.Signer.create("RS256", @rsa_key_map)
+
+      {:ok, token, _} =
+        Joken.encode_and_sign(
+          %{
+            "iss" => "https://auth.example.com",
+            "aud" => "https://mcp.example.com",
+            "exp" => System.system_time(:second) + 3600
+          },
+          signer
+        )
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(@oauth_opts)
+
+      assert result.halted
+      assert result.status == 401
+      assert JSON.decode!(result.resp_body)["message"] =~ "no usable subject claim"
+
+      assert_receive {@auth_event, ^ref, _measurements,
+                      %{status: :error, reason: :missing_subject}}
+    end
+
+    test "client_id is accepted when sub is absent (client-credentials tokens)" do
+      token = sign_token(%{"sub" => nil, "client_id" => "svc-42"})
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(@oauth_opts)
+
+      refute result.halted
+      assert ConduitMcp.Principal.id(result) == "client_id:svc-42"
+    end
+
+    test "a numeric sub is coerced to a string rather than crashing downstream" do
+      # Principal.rate_limit_key/1 concatenates the id; some IdPs emit numeric
+      # subjects.
+      token = sign_token(%{"sub" => 12_345})
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(@oauth_opts)
+
+      refute result.halted
+      assert ConduitMcp.Principal.id(result) == "sub:12345"
+      assert ConduitMcp.Principal.rate_limit_key(result) == "user:sub:12345"
+    end
+
+    test ":subject_claims can be pointed at a non-standard claim" do
+      opts =
+        OAuth.init(
+          issuer: "https://auth.example.com",
+          audience: "https://mcp.example.com",
+          subject_claims: ["tenant_id"],
+          key_provider: {ConduitMcp.OAuth.KeyProvider.Static, keys: [@rsa_public_key]}
+        )
+
+      token = sign_token(%{"tenant_id" => "acme"})
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(opts)
+
+      refute result.halted
+      assert ConduitMcp.Principal.id(result) == "tenant_id:acme"
     end
   end
 end

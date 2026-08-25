@@ -202,7 +202,10 @@ defmodule ConduitMcp.TelemetryTest do
       assert_receive {[:conduit_mcp, :auth, :verify], ^ref, _measurements, metadata}
       assert metadata.strategy == :bearer_token
       assert metadata.status == :error
-      assert metadata.reason == "Invalid token"
+      # A coarse atom, never the verifier's reason: telemetry metadata ships
+      # verbatim to metrics backends and a :verify function may embed the
+      # credential in its reason.
+      assert metadata.reason == :invalid_credential
     end
 
     test "emits telemetry for custom verification function" do
@@ -220,16 +223,7 @@ defmodule ConduitMcp.TelemetryTest do
 
       Auth.call(conn, opts)
 
-      # Drain any stale telemetry events from concurrent tests, then match ours
       assert_receive {[:conduit_mcp, :auth, :verify], ^ref, _measurements, metadata}
-
-      metadata =
-        if metadata.strategy != :function do
-          assert_receive {[:conduit_mcp, :auth, :verify], ^ref, _measurements, m}
-          m
-        else
-          metadata
-        end
 
       assert metadata.strategy == :function
       assert metadata.status == :ok
@@ -268,6 +262,16 @@ defmodule ConduitMcp.TelemetryTest do
   end
 
   describe "default handlers" do
+    # `"conduit-mcp-default-logger"` is a *global* :telemetry handler. Leaking
+    # it makes the third test below fail (detach returns :ok instead of
+    # {:error, :not_found}) — order-dependent, and reported against the wrong
+    # test — and a leaked handler fires for every subsequent [:conduit_mcp, *]
+    # event while dot-dereferencing metadata.
+    setup do
+      on_exit(fn -> ConduitMcp.Telemetry.detach_default_handlers() end)
+      :ok
+    end
+
     test "can attach and detach default handlers" do
       assert :ok == ConduitMcp.Telemetry.attach_default_handlers()
       assert :ok == ConduitMcp.Telemetry.detach_default_handlers()

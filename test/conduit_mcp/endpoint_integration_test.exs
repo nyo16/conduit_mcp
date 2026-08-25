@@ -201,7 +201,7 @@ defmodule ConduitMcp.EndpointIntegrationTest do
       assert hd(result["content"])["text"] == "HELLO"
     end
 
-    test "returns error for unknown tool" do
+    test "returns the same unknown-tool error as DSL and manual mode" do
       conn =
         json_rpc_request("tools/call", %{
           "name" => "nonexistent",
@@ -209,11 +209,37 @@ defmodule ConduitMcp.EndpointIntegrationTest do
         })
 
       response = parse_response(conn)
-      assert response["error"]
+
+      # `assert response["error"]` passed for a "Parameter validation failed"
+      # -32602 with the real reason buried in data.errors, which is how the
+      # cross-mode divergence went unnoticed. Pin the exact contract.
+      assert response["error"]["code"] == ConduitMcp.Errors.invalid_params()
+      assert response["error"]["message"] == "Unknown tool: nonexistent"
+      refute Map.has_key?(response["error"], "data")
+    end
+
+    test "returns -32002 for an unknown resource, like DSL and manual mode" do
+      conn = json_rpc_request("resources/read", %{"uri" => "nope://missing"})
+      response = parse_response(conn)
+
+      assert response["error"]["code"] == ConduitMcp.Errors.resource_not_found()
+      assert response["error"]["message"] == "Resource not found: nope://missing"
+    end
+
+    test "returns -32602 for an unknown prompt, like DSL and manual mode" do
+      conn = json_rpc_request("prompts/get", %{"name" => "nope"})
+      response = parse_response(conn)
+
+      assert response["error"]["code"] == ConduitMcp.Errors.invalid_params()
+      assert response["error"]["message"] == "Unknown prompt: nope"
     end
 
     test "validates required params" do
-      on_exit(fn -> ConduitMcp.Validation.update_validation_config([]) end)
+      # Snapshot, don't clobber: `update_validation_config([])` also writes
+      # :persistent_term, so the reset outlived this test and changed every
+      # later sync module in seed-dependent order.
+      previous = Application.get_env(:conduit_mcp, :validation, [])
+      on_exit(fn -> ConduitMcp.Validation.update_validation_config(previous) end)
 
       ConduitMcp.Validation.update_validation_config(
         runtime_validation: true,

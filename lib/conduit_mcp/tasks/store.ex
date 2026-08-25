@@ -76,11 +76,13 @@ defmodule ConduitMcp.Tasks.Store do
   the top level in its `to_map`/read path, e.g. add an `owner` column and
   surface it as `"owner"`.
 
-  Scoping is **fully opt-in and back-compatible**: a `nil` caller principal
-  (unauthenticated, or the 2-arg `ConduitMcp.Handler.handle_request/2` path) and
-  an unowned task (`"owner"` absent/`nil`) are always accessible. Scoping only
-  ever denies when the caller has a principal *and* the task is stamped with a
-  different one. Apps that never stamp an owner see no behaviour change.
+  Scoping is **opt-in per task**: it only bites once a task is created with an
+  owner. But it is **not** default-open. The matrix is documented on
+  `ConduitMcp.Tasks.get/2`; the short version is that a caller with no
+  principal sees only unowned tasks, and
+  `config :conduit_mcp, :tasks_require_owner, true` removes even those.
+  Apps that never stamp an owner see no behaviour change; apps that stamp
+  *some* owners no longer leak those tasks to unauthenticated callers.
 
   ## Configuration
 
@@ -136,7 +138,21 @@ defmodule ConduitMcp.Tasks.Store do
   @callback delete(task_id) :: :ok
 
   @doc """
-  Lists tasks, optionally filtered by `:status`.
+  Lists tasks matching `opts`.
+
+  Recognised options:
+
+    * `:status` — restrict to one task status (a string or atom).
+    * `:limit` — maximum number of rows to return.
+    * `:owner` — the caller's principal, or `:any` for an unscoped listing.
+      `nil` means "no principal": return only unowned rows.
+
+  **`:owner` is an authorization filter, not a convenience.** Expressing it as
+  a query predicate is what keeps `tasks/list` from copying every row into the
+  caller's heap before deciding they may not see it. `ConduitMcp.Tasks.list/2`
+  re-checks the returned rows, so a store that ignores `:owner` is slow rather
+  than unsafe — but it *is* slow, and on a large table that is the DoS this
+  contract exists to prevent.
   """
   @callback list(opts :: keyword()) :: [task]
 

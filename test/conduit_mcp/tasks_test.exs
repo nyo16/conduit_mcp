@@ -84,6 +84,25 @@ defmodule ConduitMcp.TasksTest do
       assert length(working) == 1
       assert hd(working)["task_id"] == "task-c"
     end
+
+    test ":limit bounds the result, and :infinity means unbounded" do
+      for i <- 1..5, do: Tasks.create("limit-#{i}")
+
+      assert length(Tasks.list(limit: 2)) == 2
+      assert length(Tasks.list(limit: 5)) == 5
+      # More than exists: not an error, just everything.
+      assert length(Tasks.list(limit: 50)) == 5
+
+      # `:infinity` is this store's own convention for unbounded
+      # (`:tasks_max_rows`), and it used to fall into the non-positive branch
+      # and return [] for a caller asking for everything.
+      assert length(Tasks.list(limit: :infinity)) == 5
+      assert length(Tasks.list([])) == 5
+
+      # Zero and negative genuinely mean nothing, without touching the table.
+      assert Tasks.list(limit: 0) == []
+      assert Tasks.list(limit: -1) == []
+    end
   end
 
   describe "valid_transition?/2" do
@@ -193,6 +212,55 @@ defmodule ConduitMcp.TasksTest do
     test "returns 0 when nothing to clean" do
       Tasks.create("just-made")
       assert Tasks.cleanup(60_000) == 0
+    end
+  end
+
+  describe ":tasks_require_owner" do
+    setup do
+      previous = Application.get_env(:conduit_mcp, :tasks_require_owner)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:conduit_mcp, :tasks_require_owner)
+          value -> Application.put_env(:conduit_mcp, :tasks_require_owner, value)
+        end
+      end)
+
+      :ok
+    end
+
+    test "unowned rows become inaccessible through the scoped API" do
+      {:ok, _} = Tasks.create("req-owned", %{}, "alice")
+      {:ok, _} = Tasks.create("req-unowned", %{})
+
+      # Default: unowned rows are readable by anyone.
+      assert {:ok, _} = Tasks.get("req-unowned", "alice")
+      assert {:ok, _} = Tasks.get("req-unowned", nil)
+
+      Application.put_env(:conduit_mcp, :tasks_require_owner, true)
+
+      assert {:error, :not_found} = Tasks.get("req-unowned", "alice")
+      assert {:error, :not_found} = Tasks.get("req-unowned", nil)
+      # The owner's own task is unaffected.
+      assert {:ok, _} = Tasks.get("req-owned", "alice")
+    end
+
+    test "list/2 excludes unowned rows and returns nothing for a nil principal" do
+      {:ok, _} = Tasks.create("req-l-owned", %{}, "alice")
+      {:ok, _} = Tasks.create("req-l-unowned", %{})
+
+      Application.put_env(:conduit_mcp, :tasks_require_owner, true)
+
+      assert Tasks.list([], "alice") |> Enum.map(& &1["task_id"]) == ["req-l-owned"]
+      assert Tasks.list([], nil) == []
+    end
+
+    test "cancel/2 refuses an unowned row" do
+      {:ok, _} = Tasks.create("req-c", %{})
+      Application.put_env(:conduit_mcp, :tasks_require_owner, true)
+
+      assert {:error, :not_found} = Tasks.cancel("req-c", "alice")
+      assert {:ok, %{"status" => "working"}} = Tasks.get("req-c")
     end
   end
 end
