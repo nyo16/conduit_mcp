@@ -74,6 +74,17 @@ Two smaller behaviour changes worth knowing about:
 
 ### Security
 
+- **Bandit is pinned to a security floor of 1.12.5** (`~> 1.12 and >= 1.12.5`).
+  Bandit is a non-optional dependency and is the server both transports run
+  on, so consumers inherited two HTTP/2 advisories against versions the old
+  `~> 1.9` admitted:
+  [CVE-2026-74836](https://osv.dev/vulnerability/EEF-CVE-2026-74836) (HIGH) —
+  connection-window starvation pins an unbounded number of Plug processes
+  indefinitely, and a client `RST_STREAM` cannot free them because the stream
+  is blocked inside a synchronous call; and
+  [CVE-2026-75484](https://osv.dev/vulnerability/EEF-CVE-2026-75484) (MEDIUM) —
+  HTTP/2 header values containing CR, LF or NUL reach `conn.req_headers`
+  unvalidated, which the HTTP/1 path already rejected.
 - **`exp` is now enforced.** `Joken.Config.default_claims(default_exp: 3600)`
   only affects token *generation*; Joken validates by folding over the claims
   the token actually carries, so a token with **no `exp` was accepted forever**.

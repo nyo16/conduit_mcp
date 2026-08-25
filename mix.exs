@@ -56,7 +56,15 @@ defmodule ConduitMcp.MixProject do
     [
       # Core dependencies
       {:plug, "~> 1.19"},
-      {:bandit, "~> 1.9"},
+      # 1.12.5 is a security floor. Earlier versions carry two HTTP/2
+      # advisories against the server both transports run on:
+      # CVE-2026-74836 (HIGH) — connection-window starvation pins an unbounded
+      # number of Plug processes indefinitely, and a client RST_STREAM cannot
+      # free them because the stream is blocked inside a synchronous call;
+      # CVE-2026-75484 (MEDIUM) — HTTP/2 header values containing CR, LF or NUL
+      # reach `conn.req_headers` unvalidated, which the HTTP/1 path already
+      # rejected. `~> 1.9` admitted 1.12.5 but did not require it.
+      {:bandit, "~> 1.12 and >= 1.12.5"},
       {:nimble_options, "1.1.1"},
 
       # Optional: Rate limiting (only needed if using ConduitMcp.Plugs.RateLimit)
