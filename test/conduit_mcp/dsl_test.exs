@@ -481,6 +481,114 @@ defmodule ConduitMcp.DSLTest do
       assert error["code"] == ConduitMcp.Errors.resource_not_found()
       assert error["message"] =~ "Resource not found"
     end
+
+    defmodule OverlappingTemplatesServer do
+      @moduledoc false
+      use ConduitMcp.Server
+
+      resource "lazy://{id}" do
+        read(fn _conn, params, _opts ->
+          {:ok, %{"contents" => [%{"text" => "first #{params["id"]}"}]}}
+        end)
+      end
+
+      # Also matches every `lazy://…` URI, but is declared second.
+      resource "{kind}://{id}" do
+        read(fn conn, _params, _opts ->
+          send(conn.assigns.test_pid, :second_handler_ran)
+          {:ok, %{"contents" => [%{"text" => "second"}]}}
+        end)
+      end
+    end
+
+    test "an overlapping later template's handler does not run once an earlier one matched" do
+      conn = Plug.Conn.assign(%Plug.Conn{}, :test_pid, self())
+
+      assert {:ok, %{"contents" => [%{"text" => "first 1"}]}} =
+               OverlappingTemplatesServer.handle_read_resource(conn, "lazy://1")
+
+      refute_received :second_handler_ran
+
+      # The probe is live: the second handler runs when the first misses.
+      assert {:ok, %{"contents" => [%{"text" => "second"}]}} =
+               OverlappingTemplatesServer.handle_read_resource(conn, "other://1")
+
+      assert_received :second_handler_ran
+    end
+  end
+
+  describe "duplicate declarations" do
+    # A duplicate would be listed twice by `tools/list` / `prompts/list` /
+    # `resources/list` while only one declaration is ever served, validated
+    # and scope-checked, so the build refuses it.
+    defp compile_server(body) do
+      Code.compile_string("""
+      defmodule DuplicateDeclarationServer#{System.unique_integer([:positive])} do
+        use ConduitMcp.Server
+      #{body}
+      end
+      """)
+    end
+
+    test "a tool name declared twice fails the build" do
+      assert_raise CompileError, ~r/duplicate tool name "dup"/, fn ->
+        compile_server("""
+        tool "dup", "first" do
+          scope("first:scope")
+          handle(fn _conn, _params -> text("first") end)
+        end
+
+        tool "dup", "second" do
+          handle(fn _conn, _params -> text("second") end)
+        end
+        """)
+      end
+    end
+
+    test "a prompt name declared twice fails the build" do
+      assert_raise CompileError, ~r/duplicate prompt name "dup_prompt"/, fn ->
+        compile_server("""
+        prompt "dup_prompt", "first" do
+          scope("first:scope")
+          get(fn _conn, _args -> [] end)
+        end
+
+        prompt "dup_prompt", "second" do
+          get(fn _conn, _args -> [] end)
+        end
+        """)
+      end
+    end
+
+    test "a static resource URI declared twice fails the build" do
+      assert_raise CompileError, ~r/duplicate resource URI "dup:\/\/thing"/, fn ->
+        compile_server("""
+        resource "dup://thing" do
+          read(fn _c, _p, _o -> {:ok, %{"contents" => []}} end)
+        end
+
+        resource "dup://thing" do
+          scope("second:scope")
+          read(fn _c, _p, _o -> {:ok, %{"contents" => []}} end)
+        end
+        """)
+      end
+    end
+
+    test "a resource template declared twice fails the build, readable or not" do
+      assert_raise CompileError, ~r/duplicate resource URI "dup:\/\/\{id\}"/, fn ->
+        compile_server("""
+        resource "dup://{id}" do
+          scope("first:scope")
+          description("No read handler")
+        end
+
+        resource "dup://{id}" do
+          read(fn _c, _p, _o -> {:ok, %{"contents" => []}} end)
+        end
+        """)
+      end
+    end
   end
 
   describe "helper macros" do

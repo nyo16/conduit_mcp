@@ -60,11 +60,20 @@ if Code.ensure_loaded?(Req) do
         a Bandit process for up to 15 s — and IdPs rate-limit JWKS endpoints,
         so a routine expiry became a total auth outage.
 
-      * **Cooldown.** `refresh_keys/1` refuses to fetch more often than
-        `:refresh_cooldown` (default 30 s). `fetch_signing_key/2` runs
-        *before* any signature check, so an unauthenticated caller can
-        otherwise drive one outbound fetch per request just by inventing a
-        `kid`.
+      * **Cooldown.** At most one outbound fetch happens per `jwks_uri` per
+        `:refresh_cooldown` (default 30 s), whether or not it succeeded. Inside
+        that window an unknown `kid` or a lapsed `:cache_ttl` is answered from
+        the cache, still subject to `:stale_max_age`. `fetch_signing_key/2`
+        runs *before* any signature check and authentication runs before rate
+        limiting, so an unauthenticated caller could otherwise drive one
+        outbound fetch per request by inventing a `kid`, or by sending any
+        token while the IdP is failing. The window applies to a cold cache
+        too: after a failed fetch there is nothing cached to serve, so
+        requests inside it get `{:error, :refresh_cooldown}` rather than
+        another fetch, and the first request after it fetches again. The
+        first fetch for a `jwks_uri` has no cooldown to honour. A request that
+        arrives while a fetch is in flight waits for that fetch instead of
+        being answered from the cooldown.
 
       * **Lock age.** A lock older than `:refresh_lock_max_age` (default 30 s,
         comfortably past the HTTP timeouts) is treated as abandoned, so a
@@ -103,7 +112,9 @@ if Code.ensure_loaded?(Req) do
       # this provider supports — for a value identical to the default.
 
       # No accept-encoding: the byte cap below counts bytes on the wire, so a
-      # compressed response must not be able to expand past it.
+      # compressed response must not be able to expand past it. Req also
+      # skips both compression steps when `into:` streams the body, as
+      # `do_fetch/1` does, so this is a second guard, not the only one.
       compressed: false,
       decode_body: false
     ]
@@ -129,15 +140,13 @@ if Code.ensure_loaded?(Req) do
           {:ok, keys}
 
         :miss ->
-          # Deliberately *not* gated by `cooling_down?/2`. The TTL is the
-          # operator's explicit staleness policy and the cooldown must not
-          # override it, and checking it here would preempt the single-flight
-          # wait: a request arriving after the winner recorded `:last_refresh`
-          # but before it published keys would fail instead of waiting. The
-          # pile-up this would guard against is already bounded — exactly one
-          # process fetches and the rest wait on the lock, which the winner
-          # releases as soon as it finishes (fast on a refused connection).
-          fetch_and_cache(jwks_uri, config)
+          fetch_on_miss(jwks_uri, config)
+      end
+    end
+
+    defp fetch_on_miss(jwks_uri, config) do
+      with :ok <- validate_uri_scheme(jwks_uri, config) do
+        refresh_unless_cooling_down(jwks_uri, :refresh_cooldown, config)
       end
     end
 
@@ -166,19 +175,36 @@ if Code.ensure_loaded?(Req) do
     # one outbound fetch per request by inventing a kid.
     defp refresh_keys(config) do
       jwks_uri = Keyword.fetch!(config, :jwks_uri)
+      refresh_unless_cooling_down(jwks_uri, :not_found, config)
+    end
 
-      if cooling_down?(jwks_uri, config) do
-        # `serve_stale/3`, not a raw cache read: it is the single place that
-        # decides whether an aged key set may still be served, and it is what
-        # enforces `:stale_max_age`. A bare read here would authenticate against
-        # keys the fetching path has already refused.
-        serve_stale(jwks_uri, :not_found, config)
+    # Inside the cooldown with no fetch in flight, the cache is answered by
+    # `serve_stale/4`, not a raw read: it is the single place that decides
+    # whether an aged key set may still be served, it enforces
+    # `:stale_max_age`, and with no cached row it returns `{:error, reason}`.
+    # Without it, a failing IdP never rewrites `cached_at`, so every request
+    # after the TTL lapsed would be an outbound fetch: the lock bounds
+    # concurrency, not rate. Anything else goes to `fetch_and_cache/2`, which
+    # fetches or, when the lock is held, waits in `await_refresh/3`.
+    #
+    # A held lock wins over the cooldown: the winner records `:last_refresh`
+    # before it fetches, so a caller arriving between that write and the
+    # publish must wait for the new keys, not be served the old set. The
+    # cooldown is read *before* the lock for the same reason: the winner takes
+    # the lock before it records `:last_refresh` and releases it after
+    # publishing, so a caller that sees the cooldown and then no lock knows the
+    # fetch behind that cooldown has already published its result. Reading the
+    # lock first would leave a window in which a fetch starts between the two
+    # reads and this caller is served the previous key set instead of waiting.
+    defp refresh_unless_cooling_down(jwks_uri, reason, config) do
+      if cooling_down?(jwks_uri, config) and not :ets.member(@table, {:refresh_lock, jwks_uri}) do
+        serve_stale(jwks_uri, reason, config, :cooldown)
       else
         fetch_and_cache(jwks_uri, config)
       end
     end
 
-    # The table is owned by a supervised `Owner` Agent (started from
+    # The table is owned by `Owner`, a supervised `ConduitMcp.EtsOwner` process (started from
     # `ConduitMcp.Application`, like `ConduitMcp.Tasks.EtsStore.Owner` and
     # `ConduitMcp.Cancellation.Owner`) so it stays stable across short-lived
     # Bandit request processes. This matters for more than caching: without a
@@ -416,29 +442,53 @@ if Code.ensure_loaded?(Req) do
     # hold previously fetched keys — serve them loudly until the next
     # successful refresh, but only up to :stale_max_age (default 24h) so a
     # revoked key cannot keep validating tokens indefinitely.
-    defp serve_stale(jwks_uri, reason, config) do
+    #
+    # `context` is `:cooldown` when no fetch was attempted because
+    # `:refresh_cooldown` suppressed it. Serving or failing closed then is
+    # expected, not a failed refresh, so it logs at debug; the failed fetch
+    # that started the cooldown (if any) already logged its own warning or
+    # error. Logging each of these at `:error` would write one line per
+    # unauthenticated request for the whole window.
+    defp serve_stale(jwks_uri, reason, config, context \\ :refresh_failed) do
       stale_max_age = Keyword.get(config, :stale_max_age, @default_stale_max_age)
 
       case :ets.lookup(@table, jwks_uri) do
         [{^jwks_uri, keys, cached_at}] ->
           if System.system_time(:millisecond) - cached_at <= stale_max_age do
-            Logger.warning(
-              "JWKS refresh failed (#{inspect(reason)}); serving stale cached keys for #{jwks_uri}"
-            )
-
+            log_stale_serve(context, reason, jwks_uri)
             {:ok, keys}
           else
-            Logger.error(
-              "JWKS refresh failed and cached keys for #{jwks_uri} exceed stale_max_age; " <>
-                "failing closed"
-            )
-
+            log_fail_closed(context, jwks_uri)
             {:error, reason}
           end
 
         [] ->
           {:error, reason}
       end
+    end
+
+    defp log_stale_serve(:refresh_failed, reason, jwks_uri) do
+      Logger.warning(
+        "JWKS refresh failed (#{inspect(reason)}); serving stale cached keys for #{jwks_uri}"
+      )
+    end
+
+    defp log_stale_serve(:cooldown, _reason, jwks_uri) do
+      Logger.debug("JWKS refresh for #{jwks_uri} skipped inside :refresh_cooldown; serving cache")
+    end
+
+    defp log_fail_closed(:refresh_failed, jwks_uri) do
+      Logger.error(
+        "JWKS refresh failed and cached keys for #{jwks_uri} exceed stale_max_age; " <>
+          "failing closed"
+      )
+    end
+
+    defp log_fail_closed(:cooldown, jwks_uri) do
+      Logger.debug(
+        "JWKS refresh for #{jwks_uri} skipped inside :refresh_cooldown and cached keys " <>
+          "exceed stale_max_age; failing closed"
+      )
     end
 
     defmodule Owner do

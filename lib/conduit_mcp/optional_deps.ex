@@ -2,12 +2,12 @@ defmodule ConduitMcp.OptionalDeps do
   @moduledoc """
   Runtime availability checks for ConduitMCP's conditionally compiled modules.
 
-  `ConduitMcp.Plugs.OAuth`, `ConduitMcp.OAuth.KeyProvider.JWKS` and
-  `ConduitMcp.PromEx` only exist when their optional dependency was present
-  when `:conduit_mcp` was compiled. Every code path that can reach one of them
-  crosses a `Plug.init/1`, so availability is validated there — once, at boot
-  or compile time — rather than degrading into a per-request failure that is
-  indistinguishable from a configuration mistake.
+  `ConduitMcp.Plugs.OAuth` and `ConduitMcp.OAuth.KeyProvider.JWKS` only exist
+  when their optional dependency was present when `:conduit_mcp` was compiled.
+  Every code path that can reach one of them crosses a plug's `init/1`, so
+  availability is validated there — once, at boot or compile time — rather
+  than degrading into a per-request failure that is indistinguishable from a
+  configuration mistake.
 
   See `ConduitMcp.OptionalDependencyError` for why adding the dependency to
   `mix.exs` is not sufficient on its own.
@@ -17,11 +17,9 @@ defmodule ConduitMcp.OptionalDeps do
 
   @oauth_plug ConduitMcp.Plugs.OAuth
   @jwks_provider ConduitMcp.OAuth.KeyProvider.JWKS
-  @prom_ex_plugin ConduitMcp.PromEx
 
   @joken_deps [{:joken, "~> 2.6"}, {:jose, "~> 1.11"}]
   @req_deps [{:req, "~> 0.6.1 or ~> 0.7"}]
-  @prom_ex_deps [{:prom_ex, "~> 1.11"}]
 
   @doc """
   Returns the OAuth plug module, raising `ConduitMcp.OptionalDependencyError`
@@ -40,21 +38,6 @@ defmodule ConduitMcp.OptionalDeps do
   end
 
   @doc """
-  Returns the PromEx plugin module, raising when it was not compiled in.
-  """
-  @spec prom_ex_plugin!() :: module()
-  def prom_ex_plugin! do
-    if Code.ensure_loaded?(@prom_ex_plugin) do
-      @prom_ex_plugin
-    else
-      raise OptionalDependencyError,
-        feature: "The ConduitMCP PromEx plugin",
-        module: @prom_ex_plugin,
-        deps: @prom_ex_deps
-    end
-  end
-
-  @doc """
   Returns `true` when the `:oauth` auth strategy is usable in this build.
   """
   @spec oauth_available?() :: boolean()
@@ -62,11 +45,12 @@ defmodule ConduitMcp.OptionalDeps do
 
   @doc """
   Validates that a configured `:key_provider` module exists and implements
-  `c:ConduitMcp.OAuth.KeyProvider.fetch_keys/1`.
+  both `c:ConduitMcp.OAuth.KeyProvider.fetch_keys/1` and
+  `c:ConduitMcp.OAuth.KeyProvider.fetch_key/2`.
 
-  `ConduitMcp.Plugs.OAuth.init/1` accepts any atom as a key provider and
-  dispatch is unguarded, so without this an absent JWKS provider surfaces as
-  an `UndefinedFunctionError` on the first authenticated request.
+  `ConduitMcp.Plugs.OAuth`'s `init/1` accepts any atom as a key provider and
+  dispatch is unguarded, so without this a missing provider or callback
+  surfaces as an `UndefinedFunctionError` on the first authenticated request.
   """
   @spec validate_key_provider!(module()) :: :ok
   def validate_key_provider!(mod) when is_atom(mod) do

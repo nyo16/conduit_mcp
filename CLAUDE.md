@@ -32,7 +32,7 @@ MCP server modules are **stateless** — just compiled functions. Each HTTP requ
 
 The library itself does start a supervision tree (`ConduitMcp.Application`, `mod:` in `mix.exs`). It is deliberately small: it owns the long-lived ETS tables that must outlive short-lived request processes, plus the session janitor.
 
-- Always: `ConduitMcp.Cancellation.Owner`, `ConduitMcp.Session.EtsStore.Owner`, `ConduitMcp.Transport.SSE.Owner`, `ConduitMcp.Session.Janitor` (as `ConduitMcp.Session.Janitor.Default`; disable with `config :conduit_mcp, :session_janitor, false`), and a second `ConduitMcp.Session.Janitor` sweeping the cancellation table (as `ConduitMcp.Cancellation.Janitor`; disable with `config :conduit_mcp, :cancellation_janitor, false`).
+- Always: `ConduitMcp.Cancellation.Owner`, `ConduitMcp.Cancellation.InFlightOwner` (requests in flight; `notifications/cancelled` is recorded only for those), `ConduitMcp.Session.EtsStore.Owner`, `ConduitMcp.Transport.SSE.Owner`, `ConduitMcp.Session.Janitor` (as `ConduitMcp.Session.Janitor.Default`; disable with `config :conduit_mcp, :session_janitor, false`), and a second `ConduitMcp.Session.Janitor` sweeping the cancellation table and dead processes' in-flight rows (as `ConduitMcp.Cancellation.Janitor`; disable with `config :conduit_mcp, :cancellation_janitor, false`).
 - Conditionally: `ConduitMcp.Tasks.EtsStore.Owner` (default tasks store only), `ConduitMcp.OAuth.KeyProvider.JWKS.Owner` (only when `Req` is compiled in).
 
 Both janitor keys accept `true`, `false`, or a keyword list of `ConduitMcp.Session.Janitor` options; anything else raises at boot naming the key.

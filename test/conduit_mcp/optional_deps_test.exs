@@ -17,10 +17,6 @@ defmodule ConduitMcp.OptionalDepsTest do
   end
 
   describe "validate_key_provider!/1" do
-    test "accepts a module exporting fetch_keys/1" do
-      assert :ok = OptionalDeps.validate_key_provider!(ConduitMcp.OAuth.KeyProvider.Static)
-    end
-
     test "rejects a module that does not export fetch_keys/1" do
       assert_raise ArgumentError, ~r/does not export fetch_keys\/1/, fn ->
         OptionalDeps.validate_key_provider!(NotAKeyProvider)
@@ -87,7 +83,6 @@ defmodule ConduitMcp.OptionalDepsTest do
       # job rather than an assertion here.
       assert OptionalDeps.oauth_available?()
       assert OptionalDeps.oauth_plug!() == ConduitMcp.Plugs.OAuth
-      assert OptionalDeps.prom_ex_plugin!() == ConduitMcp.PromEx
     end
   end
 end

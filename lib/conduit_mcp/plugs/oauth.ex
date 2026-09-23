@@ -48,20 +48,52 @@ if Code.ensure_loaded?(Joken) do
     `conn.assigns[:oauth_scopes]`.
 
     The canonical `ConduitMcp.Principal` is assigned to
-    `conn.assigns[:mcp_principal]`, with `:id` taken from the first claim in
+    `conn.assigns[:mcp_principal]`, with `:id` built from the first claim in
     `:subject_claims` (default `["sub", "client_id"]`) that holds a non-empty
-    string or an integer. Task ownership and per-user rate limiting key on that
-    scalar — never on the claims map, which changes every request (`exp`,
-    `iat`, `jti`).
+    string or an integer, prefixed by that claim's name: `"sub:user-123"`,
+    `"client_id:svc-42"`. The prefix keeps a client-chosen `client_id` from
+    aliasing a user's `sub` (see "Id formats" in `ConduitMcp.Principal`).
+    Task ownership and per-user rate limiting key on that scalar — never on
+    the claims map, which changes every request (`exp`, `iat`, `jti`).
 
     A verified token carrying **none** of those claims is **rejected** with
     401. `sub` is optional in a JWT and absent from many client-credentials
     access tokens, and assigning `id: nil` would produce an authenticated
     principal that every consumer reads as anonymous: tasks created by that
-    caller would be unowned and readable by anyone, and rate limiting would
-    fall back to the shared IP bucket. Point `:subject_claims` at whatever your
+    caller would be unowned (visible to every caller unless
+    `:tasks_require_owner` is set), and rate limiting would fall back to the
+    shared IP bucket. Point `:subject_claims` at whatever your
     authorization server does emit rather than accepting an unidentifiable
     bearer.
+
+    ## Telemetry
+
+    Every verification emits `[:conduit_mcp, :auth, :verify]` with a
+    `:duration` measurement and `%{strategy: :oauth, status: :ok | :error}`
+    metadata. A failure adds `:reason`, always one of these atoms — never the
+    token, a header value, or a key provider's error term:
+
+    | `reason` | Meaning |
+    |---|---|
+    | `:expired` | `exp` is in the past, or absent (it is mandatory) |
+    | `:not_yet_valid` | `nbf` is in the future, or malformed |
+    | `:invalid_issuer` | `iss` does not equal `:issuer` |
+    | `:invalid_audience` | `aud` does not equal or contain `:audience` |
+    | `:invalid_signature` | the signature did not verify |
+    | `:malformed_token` | the token or its header could not be decoded |
+    | `:missing_alg` | the header has no `alg` |
+    | `:alg_not_allowed` | the header `alg` is not in `:algorithms` |
+    | `:alg_mismatch` | the header `alg` does not fit the signing key |
+    | `:unsupported_key_type` | the signing key has no usable `kty` |
+    | `:invalid_key` | the signing key is malformed |
+    | `:key_not_found` | the key provider has no key for the token's `kid` |
+    | `:key_unavailable` | the key provider returned an error |
+    | `:missing_subject` | the token has none of the `:subject_claims` |
+    | `:verification_failed` | any other verification failure |
+
+    A failure without its own 401 message ("Token verification failed") also
+    logs its detailed reason as a `Logger` warning, clamped and stripped of
+    control characters.
     """
 
     import Plug.Conn
@@ -72,6 +104,26 @@ if Code.ensure_loaded?(Joken) do
     @default_algorithms ~w(RS256 RS384 RS512 ES256 ES384 ES512 PS256 PS384 PS512)
     @rsa_algs ~w(RS256 RS384 RS512 PS256 PS384 PS512)
     @hs_algs ~w(HS256 HS384 HS512)
+
+    # The complete set of `reason` values in failure telemetry. Keep in sync
+    # with the moduledoc's "Telemetry" section.
+    @telemetry_reasons [
+      :expired,
+      :not_yet_valid,
+      :invalid_issuer,
+      :invalid_audience,
+      :invalid_signature,
+      :malformed_token,
+      :missing_alg,
+      :alg_not_allowed,
+      :alg_mismatch,
+      :unsupported_key_type,
+      :invalid_key,
+      :key_not_found,
+      :key_unavailable,
+      :missing_subject,
+      :verification_failed
+    ]
 
     # Claims consulted, in order, for the principal's stable identity.
     # `sub` is the usual answer; `client_id` covers client-credentials access
@@ -220,8 +272,10 @@ if Code.ensure_loaded?(Joken) do
 
         {:error, reason} ->
           duration = System.monotonic_time() - start_time
-          emit_auth_error(duration, reason)
-          Logger.warning("OAuth token verification failed: #{inspect(reason)}")
+          emit_auth_error(duration, __telemetry_reason__(reason))
+          # The raw reason may carry header-derived text (a rejected `alg`), so
+          # it is clamped and stripped of control characters before logging.
+          Logger.warning("OAuth token verification failed: #{ConduitMcp.Reflect.text(reason)}")
           unauthorized(conn, opts, "Token verification failed")
       end
     end
@@ -238,14 +292,24 @@ if Code.ensure_loaded?(Joken) do
     defp fetch_signing_key(header, opts) do
       kid = Map.get(header, "kid")
 
-      if kid do
-        opts.key_provider.fetch_key(kid, opts.key_provider_config)
-      else
-        case opts.key_provider.fetch_keys(opts.key_provider_config) do
-          {:ok, [key | _]} -> {:ok, key}
-          {:ok, []} -> {:error, :not_found}
-          error -> error
+      result =
+        if kid do
+          opts.key_provider.fetch_key(kid, opts.key_provider_config)
+        else
+          case opts.key_provider.fetch_keys(opts.key_provider_config) do
+            {:ok, [key | _]} -> {:ok, key}
+            {:ok, []} -> {:error, :not_found}
+            error -> error
+          end
         end
+
+      # A provider's error is an open-ended term — `{:http_error, 503}`, a
+      # `%Req.TransportError{}` naming the host. Tag it so `__telemetry_reason__/1`
+      # maps it to one atom while the log line keeps the detail.
+      case result do
+        {:error, :not_found} -> {:error, :not_found}
+        {:error, reason} -> {:error, {:key_unavailable, reason}}
+        ok -> ok
       end
     end
 
@@ -314,9 +378,12 @@ if Code.ensure_loaded?(Joken) do
     end
 
     defp normalize_joken_error(:signature_error), do: {:error, :invalid_signature}
+    defp normalize_joken_error(:token_malformed), do: {:error, :malformed_token}
+    defp normalize_joken_error(:empty_signer), do: {:error, :invalid_key}
 
-    # Joken's error is `atom() | Keyword.t()`, both covered above.
-    defp normalize_joken_error(reason) when is_atom(reason), do: {:error, reason}
+    # Joken's error is `atom() | Keyword.t()`; any atom not named above is a
+    # verification failure the token did not survive.
+    defp normalize_joken_error(reason) when is_atom(reason), do: {:error, :invalid_signature}
 
     defp validate_claims(claims, opts) do
       with :ok <- validate_exp(claims),
@@ -447,6 +514,29 @@ if Code.ensure_loaded?(Joken) do
         %{strategy: :oauth, status: :error, reason: reason}
       )
     end
+
+    # Telemetry metadata ships verbatim to metrics backends and dashboards, and
+    # several internal reasons carry token-header text (`{:alg_not_allowed,
+    # alg}`) or provider terms. Every failure maps to one atom of the set the
+    # moduledoc's "Telemetry" section documents; a reason no clause names maps
+    # to `:verification_failed`, so a new producer yields a 401, not a
+    # `FunctionClauseError`. It is public (undocumented) because it must accept
+    # any term: as a private function the type checker narrows its input to
+    # today's producers and reports the fallback clause as unreachable.
+    @doc false
+    @spec __telemetry_reason__(term()) :: atom()
+    def __telemetry_reason__(reason) when reason in @telemetry_reasons, do: reason
+    def __telemetry_reason__({:alg_not_allowed, _alg}), do: :alg_not_allowed
+    def __telemetry_reason__({:invalid_token, _detail}), do: :malformed_token
+    def __telemetry_reason__(:invalid_token_format), do: :malformed_token
+    def __telemetry_reason__({:invalid_key, _detail}), do: :invalid_key
+    def __telemetry_reason__({:key_unavailable, _detail}), do: :key_unavailable
+    def __telemetry_reason__(_reason), do: :verification_failed
+
+    # The documented failure-reason set, for tests that pin it to the moduledoc.
+    @doc false
+    @spec __telemetry_reasons__() :: [atom()]
+    def __telemetry_reasons__, do: @telemetry_reasons
 
     @doc """
     Checks if the authenticated request has the required scope.

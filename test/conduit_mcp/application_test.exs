@@ -65,6 +65,11 @@ defmodule ConduitMcp.ApplicationTest do
   end
 
   describe "supervised children" do
+    # Both janitors run on a one-minute timer. Each test inserts a row past the
+    # janitor's TTL, drives one tick itself, and uses `:sys.get_state/1` only as
+    # the barrier that guarantees the tick has been processed.
+    @stale_by :timer.hours(1)
+
     test "the cancellation janitor reports its own telemetry event, not the session's" do
       # Cancellation.cleanup/1 already emits [:conduit_mcp, :cancellation,
       # :cleanup]. If this janitor also used the session default, a consumer's
@@ -73,21 +78,72 @@ defmodule ConduitMcp.ApplicationTest do
       pid = Process.whereis(ConduitMcp.Cancellation.Janitor)
       assert is_pid(pid), "the cancellation janitor is not running"
 
-      state = :sys.get_state(pid)
+      attach_forwarder([
+        [:conduit_mcp, :cancellation, :janitor],
+        [:conduit_mcp, :session, :cleanup]
+      ])
 
-      assert state.store == ConduitMcp.Cancellation
-      assert state.event == [:conduit_mcp, :cancellation, :janitor]
-      refute state.event == [:conduit_mcp, :session, :cleanup]
+      scope = "application-test-#{System.unique_integer([:positive])}"
+      :ok = ConduitMcp.Cancellation.cancel("stale", nil, scope)
+      [{key, row}] = :ets.lookup(:conduit_mcp_cancellations, {scope, "stale"})
+
+      :ets.insert(
+        :conduit_mcp_cancellations,
+        {key, Map.update!(row, "cancelled_at", &(&1 - @stale_by))}
+      )
+
+      send(pid, :cleanup)
+      :sys.get_state(pid)
+
+      assert_received {:telemetry, [:conduit_mcp, :cancellation, :janitor], %{removed: removed},
+                       %{store: ConduitMcp.Cancellation}}
+
+      assert removed >= 1
+      refute ConduitMcp.Cancellation.cancelled?("stale", scope)
+
+      refute_received {:telemetry, [:conduit_mcp, :session, :cleanup], _,
+                       %{store: ConduitMcp.Cancellation}}
     end
 
     test "the session janitor keeps the documented session event" do
       pid = Process.whereis(ConduitMcp.Session.Janitor.Default)
       assert is_pid(pid), "the session janitor is not running"
 
-      state = :sys.get_state(pid)
+      attach_forwarder([[:conduit_mcp, :session, :cleanup]])
 
-      assert state.store == Session.EtsStore
-      assert state.event == [:conduit_mcp, :session, :cleanup]
+      id = "application-test-#{System.unique_integer([:positive])}"
+      :ok = Session.EtsStore.create(id, %{})
+      [{^id, metadata}] = :ets.lookup(:conduit_mcp_sessions, id)
+
+      :ets.insert(
+        :conduit_mcp_sessions,
+        {id, Map.update!(metadata, "created_at", &(&1 - @stale_by))}
+      )
+
+      send(pid, :cleanup)
+      :sys.get_state(pid)
+
+      assert_received {:telemetry, [:conduit_mcp, :session, :cleanup], %{removed: removed},
+                       %{store: Session.EtsStore}}
+
+      assert removed >= 1
+      assert Session.EtsStore.get(id) == {:error, :not_found}
     end
+  end
+
+  defp attach_forwarder(events) do
+    handler_id = "application-test-#{System.unique_integer([:positive])}"
+    parent = self()
+
+    :telemetry.attach_many(
+      handler_id,
+      events,
+      fn event, measurements, metadata, _ ->
+        send(parent, {:telemetry, event, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
   end
 end

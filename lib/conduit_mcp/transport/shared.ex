@@ -3,13 +3,10 @@ defmodule ConduitMcp.Transport.Shared do
   The single implementation of everything `ConduitMcp.Transport.StreamableHTTP`
   and `ConduitMcp.Transport.SSE` have in common.
 
-  The two transports used to carry ~120 lines of copy-pasted plumbing, and the
-  copies diverged. Only StreamableHTTP knew about the `:oauth` auth strategy,
-  so an SSE server configured with `strategy: :oauth` fell through to
-  `ConduitMcp.Plugs.Auth`'s catch-all and returned a blanket 401 — plus a
-  `Logger.error` — on *every* request. Two other features
-  (`/.well-known/oauth-protected-resource` and the `mcp-protocol-version`
-  header) existed on one transport purely because nobody copied them back.
+  Keeping one implementation is what keeps the transports from diverging: a
+  feature added to one router (the `:oauth` auth strategy,
+  `/.well-known/oauth-protected-resource`, the `mcp-protocol-version` header)
+  exists on the other by construction.
 
   `use ConduitMcp.Transport.Shared` therefore generates, in both routers:
 
@@ -25,16 +22,25 @@ defmodule ConduitMcp.Transport.Shared do
   ## Plugs are resolved once
 
   `init/1` resolves `:auth`, `:rate_limit` and `:message_rate_limit` into
-  `{module, initialised_opts}` pairs, so `call/2` is `mod.call(conn, opts)`.
-  Previously every plug's `init/1` ran on every request — including
-  `ConduitMcp.Plugs.OAuth.init/1`, which is the only place an unusable
-  configuration can be reported as a configuration error rather than a 401.
+  `{module, initialised_opts}` pairs, so `call/2` is `mod.call(conn, opts)`
+  and no plug's `init/1` runs per request. It also validates the shape of
+  `:cors_origin` and `:allowed_origins`, so a misconfiguration raises
+  `ArgumentError` at boot rather than failing on every request.
+  `ConduitMcp.Plugs.OAuth`'s `init/1` in particular is where an unusable OAuth
+  configuration is reported as a configuration error rather than a 401.
+
+  ## Callbacks in transport options must be remote captures
+
+  `Plug.Router.forward/2` runs the transport's `init/1` at compile time and
+  escapes the result into the router module. An anonymous function
+  (`fn conn -> ... end`) or a local capture in the options — for example a
+  rate limiter's `:key_func` — cannot be escaped, so the router fails to
+  compile. Use a remote capture such as `&MyApp.RateKeys.by_user/1`.
 
   ## Deliberate asymmetries
 
   Anything the two transports genuinely do differently is listed in their own
-  moduledocs with a reason. Undocumented asymmetry is exactly what produced
-  the `:oauth` bug.
+  moduledocs with a reason, so that no asymmetry is accidental.
   """
 
   require Logger
@@ -91,13 +97,15 @@ defmodule ConduitMcp.Transport.Shared do
       @impl Plug
       def call(conn, opts) do
         conn
-        |> Shared.put_private(opts, __transport_private__(opts))
+        |> Shared.put_private(opts)
         |> super(opts)
       end
 
       @doc false
       # Transport-specific `conn.private` entries merged on top of the shared
-      # ones. Override to add your own.
+      # ones. Called once, from `init/1`, so it is also where a transport
+      # rejects a malformed option of its own: raise `ArgumentError` here and
+      # the misconfiguration fails at boot. Override to add your own.
       def __transport_private__(_opts), do: %{}
 
       defoverridable __transport_private__: 1
@@ -149,7 +157,9 @@ defmodule ConduitMcp.Transport.Shared do
   Validates and resolves transport options once, at `init/1`.
 
   Returns the options with `:auth_config`, `:auth_plug`, `:rate_limit_plug`,
-  `:message_rate_limit_plug` and `:shared_private` added.
+  `:message_rate_limit_plug` and `:shared_private` added. `:shared_private`
+  also carries the transport's own `__transport_private__/1` entries, so an
+  invalid transport-specific option raises here too.
   """
   @spec init(keyword(), module()) :: keyword()
   def init(opts, transport) do
@@ -160,6 +170,7 @@ defmodule ConduitMcp.Transport.Shared do
     end
 
     validate_cors_origin!(Keyword.get(opts, :cors_origin))
+    validate_allowed_origins!(Keyword.get(opts, :allowed_origins))
     warn_if_origins_unset(opts, transport)
 
     endpoint_config = endpoint_config(server_module)
@@ -180,7 +191,7 @@ defmodule ConduitMcp.Transport.Shared do
       :message_rate_limit_plug,
       resolve_plug(Plugs.MessageRateLimit, message_rate_limit_config)
     )
-    |> then(&Keyword.put(&1, :shared_private, shared_private(&1, endpoint_config)))
+    |> then(&Keyword.put(&1, :shared_private, shared_private(&1, endpoint_config, transport)))
   end
 
   # `:allowed_origins` accepts a *list* and is documented two bullets above
@@ -197,6 +208,39 @@ defmodule ConduitMcp.Transport.Shared do
           ":cors_origin must be a single header value (a string) or nil; got " <>
             "#{inspect(origin)}. Note that :allowed_origins — not :cors_origin — is the " <>
             "option that accepts a list."
+  end
+
+  # `ConduitMcp.Plugs.OriginValidation` reads this value on every request, so
+  # an unsupported shape is caught here, once, rather than failing closed with
+  # a log line per request.
+  @allowed_origins_shapes "a list of strings, a bare string, a Regex, or \"*\""
+
+  defp validate_allowed_origins!(nil), do: :ok
+  defp validate_allowed_origins!(origin) when is_binary(origin), do: :ok
+  defp validate_allowed_origins!(%Regex{}), do: :ok
+
+  defp validate_allowed_origins!(origins) when is_list(origins) do
+    cond do
+      Enum.all?(origins, &is_binary/1) ->
+        :ok
+
+      # List entries are compared with `in`, so a Regex inside a list would
+      # never match any origin.
+      Enum.any?(origins, &is_struct(&1, Regex)) ->
+        raise ArgumentError,
+              ":allowed_origins must be #{@allowed_origins_shapes}; a list may hold only " <>
+                "strings. To match by pattern, pass a single Regex; got #{inspect(origins)}"
+
+      true ->
+        raise_allowed_origins!(origins)
+    end
+  end
+
+  defp validate_allowed_origins!(origins), do: raise_allowed_origins!(origins)
+
+  defp raise_allowed_origins!(origins) do
+    raise ArgumentError,
+          ":allowed_origins must be #{@allowed_origins_shapes}; got #{inspect(origins)}"
   end
 
   @doc """
@@ -267,8 +311,8 @@ defmodule ConduitMcp.Transport.Shared do
     :ok
   end
 
-  defp shared_private(opts, endpoint_config) do
-    %{
+  defp shared_private(opts, endpoint_config, transport) do
+    shared = %{
       server_module: Keyword.get(opts, :server_module),
       allowed_origins: Keyword.get(opts, :allowed_origins),
       cors_origin: Keyword.get(opts, :cors_origin),
@@ -281,15 +325,16 @@ defmodule ConduitMcp.Transport.Shared do
       server_name: Keyword.get(opts, :server_name) || Keyword.get(endpoint_config, :name),
       server_version: Keyword.get(opts, :server_version) || Keyword.get(endpoint_config, :version)
     }
+
+    Map.merge(shared, transport.__transport_private__(opts))
   end
 
   # --- call/2 -----------------------------------------------------------
 
   @doc false
-  @spec put_private(Plug.Conn.t(), keyword(), map()) :: Plug.Conn.t()
-  def put_private(conn, opts, transport_private) do
-    private = Map.merge(Keyword.fetch!(opts, :shared_private), transport_private)
-    %{conn | private: Map.merge(conn.private, private)}
+  @spec put_private(Plug.Conn.t(), keyword()) :: Plug.Conn.t()
+  def put_private(conn, opts) do
+    %{conn | private: Map.merge(conn.private, Keyword.fetch!(opts, :shared_private))}
   end
 
   @doc false

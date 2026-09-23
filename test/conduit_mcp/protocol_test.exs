@@ -97,24 +97,6 @@ defmodule ConduitMcp.ProtocolTest do
       assert methods["notifications/cancelled"] == :cancelled
     end
 
-    test "every listed method is actually routed by the handler" do
-      # methods/0 and the dispatcher are the same map, so this pins the other
-      # direction: a method in the table with no route clause.
-      notifications = ["notifications/initialized", "notifications/cancelled"]
-
-      for {method, _name} <- Protocol.methods(), method not in notifications do
-        request = %{"jsonrpc" => "2.0", "id" => 1, "method" => method, "params" => %{}}
-        response = ConduitMcp.Handler.handle_request(request, ConduitMcp.TestServer)
-
-        # A server callback may legitimately answer "not found"; what must not
-        # happen is the *router* rejecting a method it publishes.
-        message = get_in(response, ["error", "message"]) || ""
-
-        refute message =~ "Method not found",
-               "#{method} is listed in methods/0 but the handler does not route it"
-      end
-    end
-
     test "no published method reaches the rescue's internal_error" do
       # `route/5` has no catch-all, so a table entry with no clause raises
       # FunctionClauseError, which the rescue converts into -32603. That makes

@@ -28,7 +28,9 @@ defmodule ConduitMcp.Plugs.MessageRateLimit do
   - Specific methods can be excluded (e.g., `"initialize"`, `"ping"`)
   - Keys are prefixed with `"msg:"` to prevent Hammer counter collision when
     both HTTP and message rate limiters share the same backend
-  - Authenticated users are tracked by user ID; anonymous users by IP
+  - Authenticated users are tracked by user ID; anonymous users by client
+    bucket (`ConduitMcp.Principal.client_bucket/1`: the IPv4 address, or the
+    IPv6 /64)
 
   ## Options
 
@@ -39,7 +41,10 @@ defmodule ConduitMcp.Plugs.MessageRateLimit do
   - `:scale` - Time window in milliseconds (default: `300_000` / 5 minutes)
   - `:limit` - Maximum messages per window (default: `50`)
   - `:key_func` - Function to derive the rate limit key from the connection
-    (default: user-aware with `"msg:"` prefix). Signature: `(Plug.Conn.t()) -> String.t()`
+    (default: user-aware with `"msg:"` prefix). Signature: `(Plug.Conn.t()) -> String.t()`.
+    Pass a remote capture (`&MyApp.RateKeys.msg/1`), not an anonymous `fn`:
+    `Plug.Router.forward/2` escapes transport init opts at compile time, and
+    anonymous functions cannot be escaped.
   - `:excluded_methods` - List of MCP method names to skip rate limiting for
     (default: `[]`). Example: `["initialize", "ping"]`
 
@@ -79,17 +84,22 @@ defmodule ConduitMcp.Plugs.MessageRateLimit do
   The default key function gives each authenticated caller their own bucket:
   it keys on `ConduitMcp.Principal.id/1` — the stable scalar identity written
   by `ConduitMcp.Plugs.Auth` and `ConduitMcp.Plugs.OAuth` — and falls back to
-  the client IP when the request is unauthenticated. Two OAuth subjects behind
-  the same proxy therefore get distinct buckets.
+  the client bucket (`ConduitMcp.Principal.client_bucket/1`: the IPv4 address,
+  or the IPv6 /64) when the request is unauthenticated. Two OAuth subjects
+  behind the same proxy therefore get distinct buckets.
 
-  You can also provide a custom key function:
+  To key anonymous callers on the exact address instead, or on anything else,
+  provide a custom key function. It must be a remote capture of a public
+  function:
+
+      defmodule MyApp.RateKeys do
+        def msg(conn), do: "msg:custom:" <> MyApp.custom_key(conn)
+      end
 
       message_rate_limit: [
         backend: MyApp.RateLimiter,
         limit: 50,
-        key_func: fn conn ->
-          "msg:custom:" <> get_custom_key(conn)
-        end
+        key_func: &MyApp.RateKeys.msg/1
       ]
 
   ## Without message rate limiting
@@ -159,7 +169,9 @@ defmodule ConduitMcp.Plugs.MessageRateLimit do
          body_params
        ) do
     key = key_func.(conn)
-    method = body_params["method"]
+    # The client controls `method`: telemetry metadata promises
+    # `String.t() | nil`, so any other JSON shape is reported as nil.
+    method = if is_binary(body_params["method"]), do: body_params["method"]
     start_time = System.monotonic_time()
 
     case backend.hit(key, scale, limit) do
@@ -176,7 +188,9 @@ defmodule ConduitMcp.Plugs.MessageRateLimit do
 
       {:deny, ms_until_next} ->
         duration = System.monotonic_time() - start_time
-        retry_after = max(div(ms_until_next, 1000), 1)
+        # Round up, as `ConduitMcp.Plugs.RateLimit` does: a floored value
+        # sends the client back before the backend's window has passed.
+        retry_after = max(div(ms_until_next + 999, 1000), 1)
 
         :telemetry.execute(
           [:conduit_mcp, :message_rate_limit, :check],
@@ -184,7 +198,9 @@ defmodule ConduitMcp.Plugs.MessageRateLimit do
           %{key: key, status: :deny, retry_after: retry_after, method: method}
         )
 
-        Logger.warning("Message rate limit exceeded for key=#{key} method=#{method}")
+        Logger.warning(
+          "Message rate limit exceeded for key=#{key} method=#{ConduitMcp.Reflect.text(method, 64)}"
+        )
 
         conn
         |> put_resp_content_type("application/json")
@@ -229,8 +245,8 @@ defmodule ConduitMcp.Plugs.MessageRateLimit do
   # `ConduitMcp.Plugs.RateLimit.default_key_func/1`.
   #
   # Authenticated callers get their own bucket keyed on the canonical
-  # principal's stable id. Anonymous callers fall back to the client IP,
-  # which never raises on a malformed `remote_ip`.
+  # principal's stable id. Anonymous callers fall back to the client bucket
+  # (IPv4 address or IPv6 /64), which never raises on a malformed `remote_ip`.
   def default_key_func(conn) do
     "msg:" <> ConduitMcp.Principal.rate_limit_key(conn)
   end

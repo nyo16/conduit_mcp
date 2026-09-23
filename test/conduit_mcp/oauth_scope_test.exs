@@ -196,7 +196,7 @@ defmodule ConduitMcp.OAuthScopeTest do
   end
 
   describe "resource scope enforcement" do
-    defp read_resource(uri, conn) do
+    defp read_resource(uri, conn, server \\ ScopedServer) do
       Handler.handle_request(
         %{
           "jsonrpc" => "2.0",
@@ -204,7 +204,7 @@ defmodule ConduitMcp.OAuthScopeTest do
           "method" => "resources/read",
           "params" => %{"uri" => uri}
         },
-        ScopedServer,
+        server,
         conn
       )
     end
@@ -250,7 +250,7 @@ defmodule ConduitMcp.OAuthScopeTest do
   end
 
   describe "prompt scope enforcement" do
-    defp get_prompt(name, conn) do
+    defp get_prompt(name, conn, server \\ ScopedServer) do
       Handler.handle_request(
         %{
           "jsonrpc" => "2.0",
@@ -258,7 +258,7 @@ defmodule ConduitMcp.OAuthScopeTest do
           "method" => "prompts/get",
           "params" => %{"name" => name, "arguments" => %{"code" => "x"}}
         },
-        ScopedServer,
+        server,
         conn
       )
     end
@@ -288,6 +288,259 @@ defmodule ConduitMcp.OAuthScopeTest do
     end
   end
 
+  describe "prompt scope enforcement in Endpoint mode" do
+    defmodule ScopedPromptComponent do
+      @moduledoc false
+      use ConduitMcp.Component,
+        type: :prompt,
+        name: "endpoint_secret_review",
+        description: "Requires review scope",
+        scope: "review:run"
+
+      schema do
+        field(:code, :string, "Code")
+      end
+
+      @impl true
+      def execute(_args, _conn) do
+        {:ok,
+         %{"messages" => [%{"role" => "user", "content" => %{"type" => "text", "text" => "z"}}]}}
+      end
+    end
+
+    defmodule ScopedPromptEndpoint do
+      @moduledoc false
+      use ConduitMcp.Endpoint, name: "scoped prompts", version: "1.0.0"
+      component(ScopedPromptComponent)
+    end
+
+    test "a scoped prompt component is denied without the scope" do
+      response =
+        get_prompt("endpoint_secret_review", with_scopes(["other"]), ScopedPromptEndpoint)
+
+      assert response["error"]["message"] =~ "Insufficient scope. Required: review:run"
+    end
+
+    test "a scoped prompt component is served with the scope" do
+      response =
+        get_prompt("endpoint_secret_review", with_scopes(["review:run"]), ScopedPromptEndpoint)
+
+      assert [%{"content" => %{"text" => "z"}}] = response["result"]["messages"]
+    end
+  end
+
+  # The scope lookup must answer for the resource `handle_read_resource/2`
+  # actually dispatches to — including an unscoped one. Otherwise an unscoped
+  # resource inherits the scope of an overlapping template it never runs
+  # through, and a caller is refused a resource that needs no scope at all.
+  describe "the resource scope lookup mirrors dispatch" do
+    # --- DSL mode ---
+
+    defmodule PublicMeServer do
+      @moduledoc false
+      use ConduitMcp.Server
+
+      # Declared before the static on purpose: dispatch serves `user://me`
+      # from its static clause whatever the declaration order.
+      resource "user://{id}" do
+        scope("admin")
+
+        read(fn _c, params, _o ->
+          {:ok, %{"contents" => [%{"text" => "user #{params["id"]}"}]}}
+        end)
+      end
+
+      resource "user://me" do
+        read(fn _c, _p, _o -> {:ok, %{"contents" => [%{"text" => "me"}]}} end)
+      end
+    end
+
+    defmodule OpenTemplateFirstServer do
+      @moduledoc false
+      use ConduitMcp.Server
+
+      # Unscoped and declared first, so dispatch serves every `doc://…` URI
+      # from here even though the scoped template below also matches it.
+      resource "doc://{id}" do
+        read(fn _c, _p, _o -> {:ok, %{"contents" => [%{"text" => "open doc"}]}} end)
+      end
+
+      # Also unscoped and first, and its handler returns nothing usable.
+      resource "void://{id}" do
+        read(fn _c, _p, _o -> nil end)
+      end
+
+      resource "{kind}://{id}" do
+        scope("admin")
+        read(fn _c, _p, _o -> {:ok, %{"contents" => [%{"text" => "any"}]}} end)
+      end
+    end
+
+    # --- Endpoint mode ---
+
+    defmodule UserTemplateResource do
+      @moduledoc false
+      use ConduitMcp.Component,
+        type: :resource,
+        uri: "user://{id}",
+        description: "Admin-only user",
+        scope: "admin"
+
+      @impl true
+      def execute(%{id: id}, _conn), do: {:ok, %{"contents" => [%{"text" => "user #{id}"}]}}
+    end
+
+    defmodule UserMeResource do
+      @moduledoc false
+      use ConduitMcp.Component, type: :resource, uri: "user://me", description: "Public me"
+
+      @impl true
+      def execute(_params, _conn), do: {:ok, %{"contents" => [%{"text" => "me"}]}}
+    end
+
+    defmodule OpenDocResource do
+      @moduledoc false
+      use ConduitMcp.Component, type: :resource, uri: "doc://{id}", description: "Open doc"
+
+      @impl true
+      def execute(_params, _conn), do: {:ok, %{"contents" => [%{"text" => "open doc"}]}}
+    end
+
+    defmodule VoidResource do
+      @moduledoc false
+      use ConduitMcp.Component, type: :resource, uri: "void://{id}", description: "Void"
+
+      @impl true
+      def execute(_params, _conn), do: nil
+    end
+
+    defmodule AnyKindResource do
+      @moduledoc false
+      use ConduitMcp.Component,
+        type: :resource,
+        uri: "{kind}://{id}",
+        description: "Admin-only anything",
+        scope: "admin"
+
+      @impl true
+      def execute(_params, _conn), do: {:ok, %{"contents" => [%{"text" => "any"}]}}
+    end
+
+    defmodule PublicMeEndpoint do
+      @moduledoc false
+      use ConduitMcp.Endpoint, name: "public me", version: "1.0.0"
+      component(UserTemplateResource)
+      component(UserMeResource)
+    end
+
+    defmodule OpenTemplateFirstEndpoint do
+      @moduledoc false
+      use ConduitMcp.Endpoint, name: "open template first", version: "1.0.0"
+      component(OpenDocResource)
+      component(VoidResource)
+      component(AnyKindResource)
+    end
+
+    defp read_text(server, uri, conn) do
+      case read_resource(uri, conn, server) do
+        %{"result" => %{"contents" => [%{"text" => text} | _]}} -> {:ok, text}
+        %{"error" => %{"message" => message}} -> {:error, message}
+      end
+    end
+
+    for {mode, me_server, open_first_server} <- [
+          {"DSL", PublicMeServer, OpenTemplateFirstServer},
+          {"Endpoint", PublicMeEndpoint, OpenTemplateFirstEndpoint}
+        ] do
+      @me_server me_server
+      @open_first_server open_first_server
+
+      test "#{mode}: an unscoped static resource needs no scope beside a scoped template" do
+        assert read_text(@me_server, "user://me", %Plug.Conn{}) == {:ok, "me"}
+        assert @me_server.__scope_for_resource__("user://me") == nil
+      end
+
+      test "#{mode}: the scoped template is still enforced for the URIs it serves" do
+        assert {:error, "Insufficient scope. Required: admin"} =
+                 read_text(@me_server, "user://42", %Plug.Conn{})
+
+        assert read_text(@me_server, "user://42", with_scopes(["admin"])) == {:ok, "user 42"}
+      end
+
+      test "#{mode}: an unscoped template declared first governs the URIs it dispatches" do
+        assert read_text(@open_first_server, "doc://1", %Plug.Conn{}) == {:ok, "open doc"}
+
+        assert {:error, "Insufficient scope. Required: admin"} =
+                 read_text(@open_first_server, "other://1", %Plug.Conn{})
+
+        assert read_text(@open_first_server, "other://1", with_scopes(["admin"])) ==
+                 {:ok, "any"}
+      end
+
+      test "#{mode}: a later template never serves a URI an earlier unscoped one matched" do
+        # The lookup answers `nil` for `void://…` because the unscoped
+        # template matches first. That is only safe while dispatch also stops
+        # there, whatever that template's handler returns.
+        assert @open_first_server.__scope_for_resource__("void://1") == nil
+
+        response = read_resource("void://1", %Plug.Conn{}, @open_first_server)
+
+        refute response["result"]
+        assert %{"message" => message} = response["error"]
+        refute message =~ "Insufficient scope"
+      end
+    end
+
+    test "Endpoint: a template param with no atom at runtime is served and gated by its scope" do
+      # Template param names are atomized when the endpoint compiles, so
+      # whether a template dispatches cannot depend on the runtime atom
+      # table. The name is built at runtime so this test module cannot
+      # create the atom itself.
+      n = System.unique_integer([:positive])
+      param = "never_an_atom_#{n}"
+
+      Code.compile_string("""
+      defmodule UnatomizedScoped#{n} do
+        use ConduitMcp.Component,
+          type: :resource,
+          name: "unatomized",
+          uri: "atomize://{#{param}}",
+          description: "Scoped, and the one dispatch serves",
+          scope: "admin"
+
+        @impl true
+        def execute(params, _conn),
+          do: {:ok, %{"contents" => [%{"text" => inspect(Map.to_list(params))}]}}
+      end
+
+      defmodule LaterOpen#{n} do
+        use ConduitMcp.Component,
+          type: :resource,
+          name: "later_open",
+          uri: "atomize://{id}",
+          description: "Unscoped, and shadowed by the template above"
+
+        @impl true
+        def execute(_params, _conn), do: {:ok, %{"contents" => [%{"text" => "open"}]}}
+      end
+
+      defmodule AtomizeEndpoint#{n} do
+        use ConduitMcp.Endpoint, name: "atomize", version: "1.0.0"
+        component(UnatomizedScoped#{n})
+        component(LaterOpen#{n})
+      end
+      """)
+
+      endpoint = Module.concat(["AtomizeEndpoint#{n}"])
+
+      assert read_text(endpoint, "atomize://x", with_scopes(["admin"])) ==
+               {:ok, ~s([#{param}: "x"])}
+
+      assert read_text(endpoint, "atomize://x", %Plug.Conn{}) ==
+               {:error, "Insufficient scope. Required: admin"}
+    end
+  end
+
   describe "scope/1 outside a declaration" do
     test "raises at compile time" do
       # A silently ignored authorization control is worse than an unsupported
@@ -307,101 +560,6 @@ defmodule ConduitMcp.OAuthScopeTest do
                      end
                      """)
                    end
-    end
-  end
-
-  describe "two scoped components sharing a name" do
-    setup do
-      # `scope_clause_count/2` reads abstract code, which runtime
-      # `Code.compile_string/1` omits under ExUnit unless asked.
-      previous = Code.get_compiler_option(:debug_info)
-      Code.put_compiler_option(:debug_info, true)
-      on_exit(fn -> Code.put_compiler_option(:debug_info, previous) end)
-      :ok
-    end
-
-    test "emits one scope clause per name, in both authoring modes" do
-      # This used to assert `refute diagnostics =~ "this clause"` — which holds
-      # whether or not the de-duplication exists, because clauses injected via
-      # `unquote` carry no line metadata and the compiler never emits that
-      # diagnostic for them. So did `first declaration wins`, which is the
-      # natural clause order anyway. Both assertions passed with `Enum.uniq_by`
-      # deleted from dsl.ex *and* endpoint.ex.
-      #
-      # The generated clause *count* is the property that actually changes.
-      dsl_source = """
-      defmodule DupScopeServer#{System.unique_integer([:positive])} do
-        use ConduitMcp.Server
-
-        tool "dup", "first" do
-          scope("first:scope")
-          handle(fn _conn, _params -> text("first") end)
-        end
-
-        tool "dup", "second" do
-          scope("second:scope")
-          handle(fn _conn, _params -> text("second") end)
-        end
-      end
-      """
-
-      [{dsl_mod, dsl_bin} | _] = Code.compile_string(dsl_source)
-
-      assert scope_clause_count(dsl_bin, :__scope_for_tool__) == 1,
-             "DSL mode emitted a duplicate __scope_for_tool__/1 clause head"
-
-      # First declaration wins, matching the order `handle_call_tool/3`
-      # dispatches in.
-      assert dsl_mod.__scope_for_tool__("dup") == "first:scope"
-
-      # Endpoint mode goes through Endpoint.component_scopes/2, a separate
-      # implementation that no test reached before. Duplicate *tool* names are
-      # impossible there — `validate_no_name_conflicts!/3` rejects them at
-      # compile time — but resource scopes are keyed on `:uri` while that check
-      # dedupes on `__component_name__/0`, so two differently-named resources
-      # sharing a `:uri` compile straight through.
-      n = System.unique_integer([:positive])
-
-      Code.compile_string("""
-      defmodule DupResA#{n} do
-        use ConduitMcp.Component,
-          type: :resource,
-          name: "res_a",
-          uri: "dup://thing",
-          description: "a",
-          scope: "first:scope"
-
-        @impl true
-        def execute(_params, _conn), do: {:ok, %{"contents" => []}}
-      end
-
-      defmodule DupResB#{n} do
-        use ConduitMcp.Component,
-          type: :resource,
-          name: "res_b",
-          uri: "dup://thing",
-          description: "b",
-          scope: "second:scope"
-
-        @impl true
-        def execute(_params, _conn), do: {:ok, %{"contents" => []}}
-      end
-      """)
-
-      {endpoint_mod, endpoint_bin} =
-        Code.compile_string("""
-        defmodule DupScopeEndpoint#{n} do
-          use ConduitMcp.Endpoint, name: "dup", version: "1"
-          component(DupResA#{n})
-          component(DupResB#{n})
-        end
-        """)
-        |> then(fn [{mod, bin} | _] -> {mod, bin} end)
-
-      assert scope_clause_count(endpoint_bin, :__scope_for_resource__) == 1,
-             "Endpoint mode emitted a duplicate __scope_for_resource__/1 clause head"
-
-      assert endpoint_mod.__scope_for_resource__("dup://thing") == "first:scope"
     end
   end
 
@@ -439,21 +597,6 @@ defmodule ConduitMcp.OAuthScopeTest do
 
       assert {:ok, _result} = DanglingScopeServer.handle_read_resource(conn, "vault2://a")
     end
-  end
-
-  # Counts the *declared* clause heads for `fun`, excluding the trailing `nil`
-  # catch-all. Reads the compiled binary's abstract code rather than calling
-  # the function, because a duplicate head is invisible at runtime — the
-  # second can never match — which is exactly why the old assertions passed
-  # with the de-duplication removed.
-  defp scope_clause_count(binary, fun) do
-    {:ok, {_mod, [{:abstract_code, {:raw_abstract_v1, forms}}]}} =
-      :beam_lib.chunks(binary, [:abstract_code])
-
-    forms
-    |> Enum.filter(&match?({:function, _, ^fun, 1, _}, &1))
-    |> Enum.flat_map(fn {:function, _, _, _, clauses} -> clauses end)
-    |> Enum.count(fn {:clause, _, [arg], _, _} -> match?({:bin, _, _}, arg) end)
   end
 
   # Regression tests for defects found reviewing the S-H1 fix itself.

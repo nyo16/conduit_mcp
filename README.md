@@ -94,7 +94,7 @@ curl -s -X POST http://localhost:4000/ -H 'Content-Type: application/json' -d '{
 }'
 ```
 
-For multi-tool servers, authentication, sessions, OAuth, MCP Apps, and more, see the [guides](guides/) and [examples/](examples/).
+For multi-tool servers, authentication, sessions, OAuth, MCP Apps, and more, see the [guides](https://github.com/nyo16/conduit_mcp/tree/master/guides) and [examples](https://github.com/nyo16/conduit_mcp/tree/master/examples).
 
 ## Stability
 
@@ -493,13 +493,17 @@ Both support per-user keying via `:key_func`. Returns HTTP 429 with `Retry-After
 
 ## Session Management
 
-StreamableHTTP supports server-side sessions with pluggable stores:
+StreamableHTTP supports server-side sessions with pluggable stores. Sessions are
+off unless you configure them:
 
 ```elixir
-session: [store: ConduitMcp.Session.EtsStore]  # Default
-session: [store: MyApp.RedisSessionStore]       # Custom store
-session: false                                   # Disable
+session: []                                 # Opt in, using ConduitMcp.Session.EtsStore
+session: [store: MyApp.RedisSessionStore]   # Opt in with a custom store
+session: false                              # Off — same as omitting :session
 ```
+
+Any other `:session` value (`true`, a map) raises `ArgumentError` at the
+transport's `init/1`, so the mistake fails at boot.
 
 See guides: [Multi-Node Sessions](guides/multi_node_sessions.md)
 

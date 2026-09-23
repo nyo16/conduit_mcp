@@ -18,14 +18,22 @@ defmodule ConduitMcp.Plugs.Auth do
     > coarse atom `:invalid_credential` instead, because metadata is shipped
     > verbatim to metrics backends. Return `{:error, :not_found}`, not
     > `{:error, "no user for token #{~s(abc123)}"}`.
-  - `:token` - Static token for `:bearer_token` strategy (simple auth)
-  - `:api_key` - Static API key for `:api_key` strategy
+  - `:token` - Static token for `:bearer_token` strategy (simple auth). Must be
+    a non-empty string: `init/1` raises otherwise, because an empty secret
+    would match an empty `Authorization: Bearer ` header.
+  - `:api_key` - Static API key for `:api_key` strategy. Must be a non-empty
+    string, for the same reason.
   - `:header` - Header name for `:api_key` strategy (default: `"x-api-key"`)
   - `:assign_as` - Key to assign authenticated user in conn.assigns (default: `:current_user`)
-  - `:principal_id` - Explicit stable identity for the static `:bearer_token` /
-    `:api_key` strategies. A shared static credential identifies exactly one
-    principal; without this the id is a stable digest of the credential.
-    See `ConduitMcp.Principal`.
+  - `:principal_id` - Explicit stable identity for a static shared secret:
+    requires `:token` (`:bearer_token` strategy) or `:api_key` (`:api_key`
+    strategy). A shared static credential identifies exactly one principal;
+    without this the id is a stable digest of the credential.
+    Setting it anywhere else — `:function` / `:custom`, or a `:verify`
+    function under `:bearer_token` / `:api_key` — raises `ArgumentError` at
+    `init/1`: one fixed id would merge every user the verifier tells apart
+    into a single principal. Return the identity from `:verify` instead.
+    See `ConduitMcp.Principal` for every id format.
 
   ## The authenticated principal
 
@@ -121,16 +129,45 @@ defmodule ConduitMcp.Plugs.Auth do
 
   @impl true
   def init(opts) do
+    strategy = Keyword.get(opts, :strategy, :bearer_token)
+    principal_id = Keyword.get(opts, :principal_id)
+
+    validate_secret!(:token, Keyword.get(opts, :token))
+    validate_secret!(:api_key, Keyword.get(opts, :api_key))
+
+    if principal_id != nil and not static_secret?(strategy, opts) do
+      raise ArgumentError,
+            ":principal_id requires a static secret (:token with :bearer_token, or " <>
+              ":api_key with :api_key); with strategy #{inspect(strategy)} and no such " <>
+              "secret, :verify authenticates, and one fixed id would merge every user " <>
+              "into one principal. Return the identity from :verify instead."
+    end
+
     %{
       enabled: Keyword.get(opts, :enabled, true),
-      strategy: Keyword.get(opts, :strategy, :bearer_token),
+      strategy: strategy,
       verify: Keyword.get(opts, :verify),
       token: Keyword.get(opts, :token),
       api_key: Keyword.get(opts, :api_key),
       header: Keyword.get(opts, :header, "x-api-key"),
       assign_as: Keyword.get(opts, :assign_as, :current_user),
-      principal_id: Keyword.get(opts, :principal_id)
+      principal_id: principal_id
     }
+  end
+
+  # Mirrors the static clauses of `do_verify/2`: only these authenticate by
+  # comparing against a configured secret. Without it, `:verify` runs.
+  defp static_secret?(:bearer_token, opts), do: Keyword.get(opts, :token) != nil
+  defp static_secret?(:api_key, opts), do: Keyword.get(opts, :api_key) != nil
+  defp static_secret?(_strategy, _opts), do: false
+
+  # `Plug.Crypto.secure_compare("", "")` is true, so an empty configured
+  # secret authenticates any request that sends an empty credential.
+  defp validate_secret!(_key, nil), do: :ok
+  defp validate_secret!(_key, secret) when is_binary(secret) and secret != "", do: :ok
+
+  defp validate_secret!(key, _secret) do
+    raise ArgumentError, "#{inspect(key)} must be a non-empty string when set"
   end
 
   @impl true
@@ -243,10 +280,11 @@ defmodule ConduitMcp.Plugs.Auth do
     result
   end
 
-  # The static strategies previously assigned the constant
-  # `%{authenticated: true}`, which carries no identity at all. Everything
-  # downstream that needs to tell two callers apart reads
-  # `ConduitMcp.Principal` instead.
+  # The static strategies' `do_verify/2` returns the constant
+  # `%{authenticated: true}` (kept as `:current_user` for compatibility), which
+  # carries no identity: `Principal.derive_id/1` yields nil for it, so the
+  # credential digest is the id. `init/1` accepts `:principal_id` only with a
+  # configured `:token` / `:api_key`, so it only ever names a static credential.
   defp build_principal(user, credential, opts) do
     %{
       id: opts.principal_id || Principal.derive_id(user) || credential_id(credential),

@@ -43,16 +43,19 @@ defmodule ConduitMcp.Transport.SSE do
     (e.g. `"https://mcp.example.com"`). Defaults to deriving it from the
     request's `Host` header (sanitized). Set this when running behind a proxy.
   - `:allowed_origins` - allowlist for the `Origin` header. Accepts a list of
-    strings, a bare string, a `Regex`, or `"*"`. **Unset fails closed**: any
-    request carrying an `Origin` is rejected with 403. Requests without an
-    `Origin` always pass. See `ConduitMcp.Plugs.OriginValidation`.
+    strings, a bare string, a `Regex`, or `"*"`; any other value raises
+    `ArgumentError` at `init/1`. A `Regex` is matched unanchored, so anchor it:
+    `~r/\\Ahttps:\\/\\/example\\.com\\z/`. **Unset fails closed**: any request
+    carrying an `Origin` is rejected with 403. Requests without an `Origin`
+    always pass. See `ConduitMcp.Plugs.OriginValidation`.
   - `:keep_alive_interval` - milliseconds between SSE keepalive comments
     (default: 15 000).
   - `:max_connection_lifetime` - milliseconds after which an SSE stream is
     closed (default: 1 hour). A stream pins a process, a socket and a
     `Plug.Conn`; without a lifetime a client that opens connections and never
     reads accumulates both indefinitely.
-  - `:max_connections` - maximum concurrent SSE streams. Further connections
+  - `:max_connections` - maximum concurrent SSE streams, a positive integer;
+    any other value raises `ArgumentError` at `init/1`. Further connections
     get HTTP 503 (default: 1 000).
 
   ## Example
@@ -90,8 +93,18 @@ defmodule ConduitMcp.Transport.SSE do
       keep_alive_interval: Keyword.get(opts, :keep_alive_interval, @default_keep_alive_interval),
       max_connection_lifetime:
         Keyword.get(opts, :max_connection_lifetime, @default_max_connection_lifetime),
-      max_connections: Keyword.get(opts, :max_connections, @default_max_connections)
+      max_connections:
+        validate_max_connections!(Keyword.get(opts, :max_connections, @default_max_connections))
     }
+  end
+
+  # Checked at boot: a non-integer compares greater than every count, so it
+  # would silently disable the cap.
+  defp validate_max_connections!(max) when is_integer(max) and max > 0, do: max
+
+  defp validate_max_connections!(max) do
+    raise ArgumentError,
+          ":max_connections must be a positive integer; got #{inspect(max)}"
   end
 
   # --- routes -----------------------------------------------------------
@@ -120,11 +133,14 @@ defmodule ConduitMcp.Transport.SSE do
       true ->
         Logger.info("New SSE connection established")
 
+        # No `connection: keep-alive`: HTTP/1.1 is persistent by default and
+        # proxies strip hop-by-hop headers anyway, while RFC 9113 §8.2.2
+        # forbids connection-specific headers in HTTP/2 and strict clients
+        # (curl, nghttp2) reject a response carrying one as malformed.
         try do
           conn
           |> put_resp_content_type("text/event-stream")
           |> put_resp_header("cache-control", "no-cache")
-          |> put_resp_header("connection", "keep-alive")
           |> put_resp_header("x-accel-buffering", "no")
           |> send_chunked(200)
           |> send_sse_endpoint_info()
@@ -253,65 +269,146 @@ defmodule ConduitMcp.Transport.SSE do
   # --- connection accounting --------------------------------------------
 
   # Each SSE stream pins a process, a socket and a Plug.Conn for its whole
-  # life, so the count has to be bounded somewhere. `:ets.update_counter/4`
-  # makes the check-and-increment atomic, which a read-then-write pair would
-  # not be under concurrency.
+  # life, so the count has to be bounded somewhere. Every stream holds one row,
+  # `{{:slot, pid}, monotonic_time}`, keyed by the pid of the process serving
+  # it.
+  #
+  # Keying by pid is what makes a slot reclaimable when its cleanup never runs.
+  # Under HTTP/2, Bandit's `Bandit.HTTP2.StreamProcess` is linked to the
+  # connection process and does not trap exits, so a peer close kills the
+  # stream before the `after` in the `GET /sse` route can call
+  # release_connection_slot/0. A bare counter leaked one slot per such
+  # disconnect for the life of the node; a row whose pid is dead is
+  # recognisably stale and __acquire_slot__/3 sweeps it.
+  #
+  # Insert-then-count keeps the cap exact under concurrency: each acquirer's
+  # own row is part of the count it reads, so two racers at the boundary can
+  # both reject (under-admit) but no interleaving admits more than `max`.
+  # Dead rows are only swept once the count exceeds `max`; below the cap they
+  # are never counted against anyone.
+  #
+  # The count is `:ets.info(table, :size)`, O(1): every row is a slot row
+  # except one `:last_sweep` marker, which is subtracted. The marker is
+  # overwritten but never deleted, so a concurrent count can only see it
+  # appear - an overcount by one, which rejects rather than over-admits.
+  #
+  # A sweep is O(rows), so the reject path rate-limits it. A sweep that freed
+  # nothing writes `{:last_sweep, now_ms}`; for `@sweep_window_ms` after that,
+  # an over-cap acquirer rejects without sweeping again. At the cap with every
+  # stream alive, a flood of rejected connects therefore costs one sweep per
+  # window instead of one per connect. A release, or a sweep that did free a
+  # row, resets the marker to `{:last_sweep, nil}`: the table has changed, so
+  # "nothing here is dead" no longer describes it. A dead row cannot be
+  # starved by this: the skip only applies within one window of a fruitless
+  # sweep, so a stream killed without releasing is reclaimed by the first
+  # over-cap connect after that window - at most `@sweep_window_ms` later
+  # than with no skip at all.
+  #
+  # One row per pid holds because an HTTP/2 stream is its own process and
+  # HTTP/1.1 keep-alive runs requests sequentially in one process, where the
+  # `after` runs before the next request. `Process.alive?/1` is local-only,
+  # which is fine: Bandit handlers run on this node.
   #
   # The table is owned by the supervised `Owner` below, not by whichever stream
-  # first touched it. Without that, closing the *creating* connection destroyed
-  # the table and reset `:active` to 0 while every other stream was still live,
-  # so `:max_connections` could be walked past indefinitely — the same defect
-  # RC2 fixed for the session table.
+  # first touched it. Otherwise closing the *creating* connection would destroy
+  # the table, and every other live stream's slot with it, so
+  # `:max_connections` could be walked past indefinitely.
+  @slot_pids_spec [{{{:slot, :"$1"}, :_}, [], [:"$1"]}]
+  @sweep_window_ms 1_000
+
   defp acquire_connection_slot(conn) do
-    max = conn.private[:max_connections] || @default_max_connections
     ensure_connections_table()
+    __acquire_slot__(@connections_table, conn.private[:max_connections])
+  end
 
-    case update_active(1) do
-      # Counter unreadable. A resource cap must read that as "no" - returning a
-      # number here meant `0 > max` was false and the slot was granted, so
-      # every failure mode of the counter silently disabled the cap. That is
-      # reachable whenever the Owner has degraded and the table belongs to a
-      # stream process that has since exited.
-      :unavailable ->
-        false
+  # Takes the table name so the fail-closed path can be exercised against a
+  # table that does not exist, without touching the global one, and the sweep
+  # window so its expiry can be exercised without waiting it out.
+  @doc false
+  def __acquire_slot__(table, max, sweep_window_ms \\ @sweep_window_ms) do
+    :ets.insert(table, {{:slot, self()}, System.monotonic_time()})
 
-      active when active > max ->
-        update_active(-1)
-        false
+    if admit?(table, max, sweep_window_ms) do
+      true
+    else
+      :ets.delete(table, {:slot, self()})
+      false
+    end
+  rescue
+    # The table is missing or unusable. A resource cap must read that as "no":
+    # granting the slot would let every failure mode of the table silently
+    # disable the cap. The route recreates a missing table in
+    # ensure_connections_table/0 first, so this is reachable only if the table
+    # vanishes after that check - between it and the insert, or mid-count.
+    ArgumentError -> false
+  end
 
-      _active ->
-        true
+  defp admit?(table, max, sweep_window_ms) do
+    count = count_slots(table)
+
+    cond do
+      not is_integer(count) -> false
+      count <= max -> true
+      recently_swept_in_vain?(table, sweep_window_ms) -> false
+      true -> within_cap?(sweep_dead_slots(table), max)
     end
   end
 
-  defp release_connection_slot do
-    ensure_connections_table()
-    # `{2, -1, 0, 0}` clamps at zero: a slot leaked by an untrappable exit
-    # (`Process.exit(pid, :kill)`) must not drive the counter negative.
-    :ets.update_counter(@connections_table, :active, {2, -1, 0, 0}, {:active, 0})
+  defp within_cap?(count, max), do: is_integer(count) and count <= max
+
+  # `:undefined` (not an integer) when the table has vanished; callers treat
+  # that as over the cap.
+  defp count_slots(table) do
+    marker = if :ets.member(table, :last_sweep), do: 1, else: 0
+
+    case :ets.info(table, :size) do
+      size when is_integer(size) -> size - marker
+      :undefined -> :undefined
+    end
+  end
+
+  defp recently_swept_in_vain?(table, sweep_window_ms) do
+    case :ets.lookup(table, :last_sweep) do
+      [{:last_sweep, at}] when is_integer(at) ->
+        System.monotonic_time(:millisecond) - at < sweep_window_ms
+
+      _ ->
+        false
+    end
+  end
+
+  # Deletes the rows of streams that died without releasing, records whether
+  # that freed anything, then recounts.
+  defp sweep_dead_slots(table) do
+    dead = for pid <- :ets.select(table, @slot_pids_spec), not Process.alive?(pid), do: pid
+    Enum.each(dead, &:ets.delete(table, {:slot, &1}))
+
+    swept_at = if dead == [], do: System.monotonic_time(:millisecond)
+    :ets.insert(table, {:last_sweep, swept_at})
+
+    count_slots(table)
+  end
+
+  defp release_connection_slot, do: __release_slot__(@connections_table)
+
+  @doc false
+  def __release_slot__(table) do
+    :ets.delete(table, {:slot, self()})
+    # A freed slot ends any skip window: see the section comment.
+    :ets.insert(table, {:last_sweep, nil})
     :ok
   rescue
-    # The table vanished between the check and the update. Nothing to release.
+    # The table is gone, and this stream's row with it. Nothing to release.
     ArgumentError -> :ok
   end
 
-  defp update_active(delta) do
-    :ets.update_counter(@connections_table, :active, {2, delta}, {:active, 0})
-  rescue
-    # A racing `:ets.new` in ensure_connections_table/0, or the table being
-    # recreated underneath us. Distinguishable from a real count so the caller
-    # can fail closed rather than read it as "no slots taken".
-    ArgumentError -> :unavailable
-  end
-
+  # The number of slot rows whose process is alive. Read-only: a getter that
+  # swept dead rows would hide leaks from the tests that should see them.
   @doc false
   def active_connections do
-    ensure_connections_table()
-
-    case :ets.lookup(@connections_table, :active) do
-      [{:active, count}] -> count
-      [] -> 0
-    end
+    @connections_table
+    |> :ets.select(@slot_pids_spec)
+    |> Enum.count(&Process.alive?/1)
   rescue
     ArgumentError -> 0
   end
@@ -336,13 +433,13 @@ defmodule ConduitMcp.Transport.SSE do
   defmodule Owner do
     @moduledoc """
     Long-lived process that owns the `:conduit_mcp_sse_connections` ETS table,
-    which holds the concurrent-stream counter behind
-    `ConduitMcp.Transport.SSE`'s `:max_connections`.
+    the slot table behind `ConduitMcp.Transport.SSE`'s `:max_connections`:
+    one row per SSE stream, keyed by the pid serving it.
 
-    Started under `ConduitMcp.Supervisor` by `ConduitMcp.Application`. Without a
-    supervised owner the table belonged to whichever SSE stream created it, and
-    closing that one connection destroyed the counter for every other live
-    stream — letting a client walk straight past `:max_connections`.
+    Started under `ConduitMcp.Supervisor` by `ConduitMcp.Application`, so the
+    table outlives every individual stream. If a stream owned it, closing that
+    one connection would destroy the slots of every other live stream and let
+    a client walk straight past `:max_connections`.
     """
 
     # Not a GenServer itself: the process is a `ConduitMcp.EtsOwner`

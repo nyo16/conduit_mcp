@@ -307,7 +307,7 @@ defmodule ConduitMcp.ValidationTest do
 
     test "non-map params are rejected" do
       for params <- ["not a map", 42, nil, ["a"], {:tuple}] do
-        assert {:error, [%{message: message}]} =
+        assert {:error, [%{"message" => message}]} =
                  Validation.validate_tool_params(@server, "simple_tool", params)
 
         assert message == "Parameters must be a map"
@@ -315,7 +315,7 @@ defmodule ConduitMcp.ValidationTest do
     end
 
     test "non-map prompt arguments are rejected" do
-      assert {:error, [%{message: "Arguments must be a map"}]} =
+      assert {:error, [%{"message" => "Arguments must be a map"}]} =
                Validation.validate_prompt_args(@server, "test_prompt", "nope")
     end
 
@@ -594,6 +594,71 @@ defmodule ConduitMcp.ValidationTest do
         end
         """)
       end
+    end
+
+    test "a recognised option with a bad value is reported as a bad value, not a typo" do
+      error =
+        assert_raise ArgumentError, fn ->
+          SchemaConverter.dsl_params_to_nimble_options([
+            %{name: :age, type: :integer, opts: [min: "5"]}
+          ])
+        end
+
+      message = Exception.message(error)
+      assert message =~ ~s(invalid value for :min validation option)
+      assert message =~ ~s(got: "5")
+      refute message =~ "unknown validation option"
+      refute message =~ "Did you mean"
+
+      # A misspelt key with the same value is still the unknown-option error.
+      assert_raise ArgumentError, ~r/unknown validation option :mni/, fn ->
+        SchemaConverter.dsl_params_to_nimble_options([
+          %{name: :age, type: :integer, opts: [mni: "5"]}
+        ])
+      end
+    end
+  end
+
+  describe "per-parameter type_coercion" do
+    setup do
+      previous = Application.get_env(:conduit_mcp, :validation, [])
+      on_exit(fn -> Validation.update_validation_config(previous) end)
+
+      [{server, _bytecode}] =
+        Code.compile_string("""
+        defmodule CoercionTool#{System.unique_integer([:positive])} do
+          use ConduitMcp.Server
+
+          tool "t", "d" do
+            param(:raw, :integer, "Raw", type_coercion: false)
+            param(:forced, :integer, "Forced", type_coercion: true)
+            param(:plain, :integer, "Plain")
+            handle(fn _conn, _params -> text("ok") end)
+          end
+        end
+        """)
+
+      %{server: server}
+    end
+
+    test "type_coercion: false opts one param out of global coercion", %{server: server} do
+      Validation.update_validation_config(runtime_validation: true, type_coercion: true)
+
+      assert {:ok, %{"plain" => 5}} =
+               Validation.validate_tool_params(server, "t", %{"plain" => "5"})
+
+      assert {:error, [%{"parameter" => "raw"}]} =
+               Validation.validate_tool_params(server, "t", %{"raw" => "5"})
+    end
+
+    test "type_coercion: true opts one param in when global coercion is off", %{server: server} do
+      Validation.update_validation_config(runtime_validation: true, type_coercion: false)
+
+      assert {:ok, %{"forced" => 5}} =
+               Validation.validate_tool_params(server, "t", %{"forced" => "5"})
+
+      assert {:error, [%{"parameter" => "plain"}]} =
+               Validation.validate_tool_params(server, "t", %{"plain" => "5"})
     end
   end
 

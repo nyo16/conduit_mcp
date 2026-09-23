@@ -33,7 +33,7 @@ defmodule ConduitMcp.Handler do
   Otherwise the base `tools`/`resources`/`prompts` set is used.
   Capability flags for optional features (`completions`, `logging`,
   `resources.subscribe`) are overlaid at runtime based on which callbacks
-  the server exports, via `ConduitMcp.ServerMeta`.
+  the server exports, via the internal `ServerMeta` cache.
 
   ## Telemetry
 
@@ -44,18 +44,22 @@ defmodule ConduitMcp.Handler do
   - `[:conduit_mcp, :tool, :execute]` — per `tools/call`.
   - `[:conduit_mcp, :resource, :read]` — per `resources/read`.
   - `[:conduit_mcp, :prompt, :get]` — per `prompts/get`.
-  - `[:conduit_mcp, :request, :cancelled]` — when
-    `notifications/cancelled` is received.
+  - `[:conduit_mcp, :request, :cancelled]` — when a
+    `notifications/cancelled` for a request in flight is recorded.
 
   ## Cancellation
 
   The handler stashes the request id into `conn.assigns[:mcp_request_id]`
-  before dispatch and uses `try/after` to clear any cancellation flag
-  after the response is produced. Tools poll
+  before dispatch, marks the request in flight with
+  `ConduitMcp.Cancellation.track/2`, and uses `try/after` to untrack it and
+  clear any cancellation flag after the response is produced. Tools poll
   `ConduitMcp.Cancellation.cancelled?(conn)` for cooperative aborts.
+  `notifications/cancelled` is recorded only for a request in flight in the
+  caller's scope; one naming an unknown or completed request is ignored.
   """
 
   require Logger
+  alias ConduitMcp.Cancellation
   alias ConduitMcp.Protocol
   alias ConduitMcp.ServerMeta
 
@@ -66,14 +70,28 @@ defmodule ConduitMcp.Handler do
   Returns a response map for a request, and `:ok` for a notification that was
   handled or ignored.
 
-  The one exception: a `notifications/cancelled` carrying a `requestId` that is
-  not a string or an integer returns an **error map with `"id" => nil`**. A
-  notification has no id to correlate, so JSON-RPC says drop it — but silently
-  dropping it meant `to_string(%{})` raised out of the un-rescued notification
-  path and the transport answered 500. Reporting the client's own malformed
-  request back to it is the lesser deviation. A transport that pattern-matches
-  `:ok` for every notification must handle the map too; both of ours do, via
-  `ConduitMcp.Transport.Shared.dispatch_post/2`.
+  A notification has no id to correlate, so JSON-RPC says a failed one is
+  dropped. `notifications/cancelled` is the exception: in these cases it
+  returns an **error map with `"id" => nil`** instead of `:ok`, because
+  reporting the client's own mistake back to it is a lesser deviation than a
+  silent drop:
+
+    * `params` is present but not an object → `-32602` invalid params.
+    * `requestId` is present and neither an integer nor a string of at most
+      256 bytes → `-32602` invalid params (a missing or `null` `requestId` is
+      ignored: `:ok`). This is checked whether or not the request is in
+      flight.
+    * the request is in flight and the caller's scope is at its cancellation
+      quota (`{:error, :cancellation_limit_reached}` from
+      `ConduitMcp.Cancellation.cancel/3`) → `-32000` server error.
+
+  A `notifications/cancelled` for a request that is not in flight in the
+  caller's scope returns `:ok` and records nothing.
+
+  A transport that pattern-matches `:ok` for every notification must handle
+  the map too; both of ours do, via
+  `ConduitMcp.Transport.Shared.dispatch_post/2`, which sends it with status
+  200.
   """
   # `Plug.Conn.t() | map()`, not `Plug.Conn.t()`: the default is a bare
   # `%Plug.Conn{}`, whose `:owner` is `nil` where `t()` declares `pid()`. Real
@@ -104,7 +122,7 @@ defmodule ConduitMcp.Handler do
       [:conduit_mcp, :request, :stop],
       %{duration: duration},
       %{
-        method: Map.get(request, "method"),
+        method: telemetry_text(Map.get(request, "method")),
         server_module: server_module,
         status: if(match?(%{"error" => _}, result), do: :error, else: :ok)
       }
@@ -118,13 +136,17 @@ defmodule ConduitMcp.Handler do
     id = Map.get(request, "id")
     params = Map.get(request, "params", %{})
     conn = Plug.Conn.assign(conn, :mcp_request_id, id)
+    scope = Cancellation.scope(conn)
 
     Logger.debug("Handling method", method: ConduitMcp.Reflect.text(method))
+
+    Cancellation.track(id, scope)
 
     try do
       do_handle_method(method, id, params, server_module, conn)
     after
-      ConduitMcp.Cancellation.clear(id, ConduitMcp.Cancellation.scope(conn))
+      Cancellation.untrack(id, scope)
+      Cancellation.clear(id, scope)
     end
   end
 
@@ -276,38 +298,74 @@ defmodule ConduitMcp.Handler do
   end
 
   # A notification carries no id, so a malformed one is answered with a
-  # JSON-RPC error whose id is null. Returning :ok here (and letting the
-  # interpolation raise on a non-scalar requestId) turned a client mistake
-  # into a 500.
+  # JSON-RPC error whose id is null. Returning :ok here turned a client mistake
+  # into a 500: this path is outside do_handle_method/5's rescue, so a
+  # non-map `params` (`Map.get/2` raises BadMapError) or a non-scalar
+  # requestId (the interpolation raised) escaped handle_request/3 entirely.
+  # A missing `params` is a well-formed notification with no requestId, which
+  # is ignored.
   defp handle_cancelled(notification, conn) do
-    params = Map.get(notification, "params", %{})
-    request_id = Map.get(params, "requestId")
-    reason = Map.get(params, "reason")
+    case Map.get(notification, "params", %{}) do
+      %{} = params ->
+        cancel_request(params, conn)
 
-    case ConduitMcp.Cancellation.cancel(
-           request_id,
-           reason,
-           ConduitMcp.Cancellation.scope(conn)
-         ) do
-      :ok ->
-        :ok
-
-      {:error, :invalid_request_id} ->
+      _ ->
         Protocol.error_response(
           nil,
           Protocol.invalid_params(),
-          "notifications/cancelled requires a string or integer requestId"
-        )
-
-      {:error, :cancellation_limit_reached} ->
-        Logger.warning("cancellation table at capacity; dropping notifications/cancelled")
-
-        Protocol.error_response(
-          nil,
-          Protocol.internal_error(),
-          "Too many outstanding cancellations; try again shortly."
+          "notifications/cancelled requires a params object"
         )
     end
+  end
+
+  # Validation first, so a malformed id is reported whether or not anything
+  # is in flight; then the in-flight gate, so a cancel naming no running
+  # request writes no row. MCP lets a receiver ignore such a cancel, and
+  # recording it let an unauthenticated client fill its quota with ids that
+  # name nothing.
+  defp cancel_request(params, conn) do
+    request_id = Map.get(params, "requestId")
+    scope = Cancellation.scope(conn)
+
+    cond do
+      is_nil(request_id) ->
+        :ok
+
+      not Cancellation.valid_request_id?(request_id) ->
+        invalid_request_id_error()
+
+      Cancellation.in_flight?(request_id, scope) ->
+        request_id
+        |> Cancellation.cancel(Map.get(params, "reason"), scope)
+        |> cancel_result()
+
+      true ->
+        :ok
+    end
+  end
+
+  defp cancel_result(:ok), do: :ok
+  defp cancel_result({:error, :invalid_request_id}), do: invalid_request_id_error()
+
+  defp cancel_result({:error, :cancellation_limit_reached}) do
+    Logger.warning("cancellation quota reached for caller; dropping notifications/cancelled")
+
+    # -32000, not -32603: a per-caller quota is a server-defined refusal,
+    # not a fault in the server.
+    Protocol.error_response(
+      nil,
+      Protocol.server_error(),
+      "Too many outstanding cancellations; try again shortly."
+    )
+  end
+
+  defp invalid_request_id_error do
+    Protocol.error_response(
+      nil,
+      Protocol.invalid_params(),
+      "notifications/cancelled requires a string or integer requestId " <>
+        "(strings at most 256 bytes)"
+    )
   end
 
   defp handle_initialize(id, params, server_module, conn) do
@@ -421,7 +479,7 @@ defmodule ConduitMcp.Handler do
       [:conduit_mcp, :tool, :execute],
       %{duration: duration},
       %{
-        tool_name: tool_name,
+        tool_name: telemetry_text(tool_name),
         server_module: server_module,
         status: if(match?(%{"error" => _}, result), do: :error, else: :ok)
       }
@@ -435,7 +493,7 @@ defmodule ConduitMcp.Handler do
     start_time = System.monotonic_time()
 
     result =
-      case verify_scope(conn, required_scope(server_module, :scope_for_resource, uri)) do
+      case authorize_resource(conn, server_module, uri) do
         :ok ->
           dispatch_callback(
             id,
@@ -446,6 +504,9 @@ defmodule ConduitMcp.Handler do
 
         {:error, :insufficient_scope, required} ->
           insufficient_scope_error(id, required)
+
+        {:error, :invalid_uri} ->
+          invalid_uri_error(id, uri)
       end
 
     duration = System.monotonic_time() - start_time
@@ -454,7 +515,7 @@ defmodule ConduitMcp.Handler do
       [:conduit_mcp, :resource, :read],
       %{duration: duration},
       %{
-        uri: uri,
+        uri: telemetry_text(uri),
         server_module: server_module,
         status: if(Map.has_key?(result, "error"), do: :error, else: :ok)
       }
@@ -500,7 +561,7 @@ defmodule ConduitMcp.Handler do
       [:conduit_mcp, :prompt, :get],
       %{duration: duration},
       %{
-        prompt_name: prompt_name,
+        prompt_name: telemetry_text(prompt_name),
         server_module: server_module,
         status: if(Map.has_key?(result, "error"), do: :error, else: :ok)
       }
@@ -508,6 +569,15 @@ defmodule ConduitMcp.Handler do
 
     result
   end
+
+  # Telemetry metadata documents these fields as `String.t() | nil`. They come
+  # from the client's JSON body, so a map, list or number is possible once the
+  # request is past the checks that used to raise on it (resources/read with
+  # `"uri": {}` now returns -32602 and still emits). Passing it through would
+  # break every handler written against the documented type - including
+  # `ConduitMcp.Telemetry`'s default logger, which `:telemetry` then detaches.
+  defp telemetry_text(value) when is_binary(value), do: value
+  defp telemetry_text(_value), do: nil
 
   # One source of "you asked for something that doesn't exist" for tools and
   # prompts, so the three authoring modes cannot disagree. `-32602` is what the
@@ -551,6 +621,27 @@ defmodule ConduitMcp.Handler do
       id,
       ConduitMcp.Errors.server_error(),
       "Insufficient scope. Required: #{required_scope}"
+    )
+  end
+
+  # `uri` is client input, and a templated resource's scope lookup matches it
+  # with `Regex.run/2`, which raises for a non-binary. Gating on the type
+  # first keeps a client mistake a -32602 rather than the request-path
+  # rescue's -32603 and its error log. Used by every route that authorizes a
+  # resource by uri: resources/read, subscribe and unsubscribe.
+  defp authorize_resource(conn, server_module, uri) when is_binary(uri),
+    do: verify_scope(conn, required_scope(server_module, :scope_for_resource, uri))
+
+  defp authorize_resource(_conn, _server_module, _uri), do: {:error, :invalid_uri}
+
+  defp invalid_uri_error(id, nil),
+    do: Protocol.error_response(id, Protocol.invalid_params(), "Missing uri")
+
+  defp invalid_uri_error(id, uri) do
+    Protocol.error_response(
+      id,
+      Protocol.invalid_params(),
+      "uri must be a string, got: #{ConduitMcp.Reflect.text(uri, 40)}"
     )
   end
 
@@ -623,12 +714,27 @@ defmodule ConduitMcp.Handler do
   defp validate_completion_ref(%{"type" => "ref/resource", "uri" => uri}) when is_binary(uri),
     do: :ok
 
-  defp validate_completion_ref(%{"type" => type}) when type in ["ref/prompt", "ref/resource"] do
-    {:error, "Invalid completion ref: missing #{ref_required_field(type)}"}
+  # `ref/resource`'s uri is gated for the same reason `authorize_resource/3`
+  # gates it: `completion_scope/2` hands it to the templated scope lookup.
+  defp validate_completion_ref(%{"type" => type} = ref)
+       when type in ["ref/prompt", "ref/resource"] do
+    field = ref_required_field(type)
+
+    case Map.fetch(ref, field) do
+      {:ok, value} ->
+        {:error,
+         "Invalid completion ref: #{field} must be a string, got: " <>
+           ConduitMcp.Reflect.text(value, 40)}
+
+      :error ->
+        {:error, "Invalid completion ref: missing #{field}"}
+    end
   end
 
   defp validate_completion_ref(%{"type" => type}) do
-    {:error, ~s(Invalid completion ref type "#{type}"; expected "ref/prompt" or "ref/resource")}
+    {:error,
+     ~s(Invalid completion ref type "#{ConduitMcp.Reflect.text(type, 40)}"; ) <>
+       ~s(expected "ref/prompt" or "ref/resource")}
   end
 
   defp validate_completion_ref(_),
@@ -665,12 +771,15 @@ defmodule ConduitMcp.Handler do
   defp subscription(id, params, server_module, conn, kind) do
     uri = Map.get(params, "uri")
 
-    case verify_scope(conn, required_scope(server_module, :scope_for_resource, uri)) do
+    case authorize_resource(conn, server_module, uri) do
       :ok ->
         dispatch_subscription(id, server_module, conn, kind, uri)
 
       {:error, :insufficient_scope, required} ->
         insufficient_scope_error(id, required)
+
+      {:error, :invalid_uri} ->
+        invalid_uri_error(id, uri)
     end
   end
 
@@ -710,7 +819,9 @@ defmodule ConduitMcp.Handler do
   # from `conn` (via `ConduitMcp.Tasks.owner/1`) and passed to the owner-aware
   # facade arities so a client can't read or cancel another principal's task.
   # When there is no principal (unauthenticated, or the 2-arg
-  # `handle_request/2` path) scoping is a no-op — see `ConduitMcp.Tasks`.
+  # `handle_request/2` path) the owner is `nil`. `nil` = no principal: sees
+  # only unowned tasks; nothing under `:tasks_require_owner` (see
+  # `ConduitMcp.Tasks.get/2`).
   defp handle_tasks_get(id, params, conn) do
     case Map.get(params, "taskId") do
       nil ->

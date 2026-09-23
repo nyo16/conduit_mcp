@@ -12,8 +12,8 @@ consumer. No public API removals.
 
 ### Breaking changes
 
-Four defaults changed because the old ones were unsafe or wrong. Each has a
-one-line opt-out.
+Twelve behaviour changes, because the old behaviour was unsafe or wrong. Each
+bullet names its one-line opt-out, or says why it has none.
 
 - **CORS is off by default.** `:cors_origin` no longer defaults to `"*"`, and
   no `access-control-allow-*` header is emitted unless you set it. Previously
@@ -25,6 +25,10 @@ one-line opt-out.
 - **An unset `:allowed_origins` now fails closed.** A request carrying an
   `Origin` header is rejected with 403 instead of logged-and-allowed. Requests
   *without* an `Origin` still pass, so non-browser MCP clients are unaffected.
+  An `:allowed_origins` of an unsupported shape (anything but a string, `"*"`,
+  a list of strings or a single `%Regex{}`) raises `ArgumentError` at `init/1`
+  on both transports. A `%Regex{}` is matched unanchored, so anchor it:
+  `~r/\Ahttps:\/\/example\.com\z/`.
   Opt out: `allowed_origins: "*"`.
 - **Cross-mode error codes are now consistent, and spec-correct.** An unknown
   tool or prompt returns `-32602` with a top-level `"Unknown tool: <name>"` /
@@ -33,47 +37,112 @@ one-line opt-out.
   reason inside a `-32602 "Parameter validation failed"` payload's
   `data.errors`, manual mode returned `-32601 "Tool not found"`, and a DSL
   server whose resources were all static raised `FunctionClauseError` on an
-  unknown URI and answered `-32603 "Internal server error"`. `-32601` for a
-  missing resource is a spec deviation, not a contract worth preserving.
+  unknown URI and answered `-32603 "Internal server error"`.
+  No opt-out: this is a spec-conformance fix. `-32601` for a missing tool or
+  resource is a spec deviation, and a switch restoring it would be a permanent
+  compatibility path for non-spec behaviour.
 - **`tasks/*` authorization is no longer default-open, and `tasks/list` is
   bounded.** A caller with no principal used to match *every* task; it now
   matches only unowned ones. `tasks/list` accepts a client `"limit"` and clamps
   it to a server maximum (default 100, `:tasks_list_max_limit`), where it
   previously serialised the whole table into one response.
   Opt in to stricter semantics: `config :conduit_mcp, :tasks_require_owner, true`
-  makes unowned tasks inaccessible too.
-
+  makes unowned tasks inaccessible too. No opt-out restores default-open
+  matching: it is the cross-principal read this change closes.
 - **An OAuth token with no usable subject claim is now rejected with 401.**
   `sub` is optional in a JWT and absent from many client-credentials access
   tokens; accepting one produced an *authenticated* principal that every
   consumer reads as anonymous — tasks created unowned and world-readable, rate
   limiting on the shared IP bucket. The claims consulted are configurable:
   `auth: [strategy: :oauth, subject_claims: ["sub", "client_id", ...]]`
-  (default `["sub", "client_id"]`).
+  (default `["sub", "client_id"]`). There is no switch to accept a token that
+  carries none of them, because that principal cannot be told apart from an
+  anonymous caller; list the claim your tokens do carry.
 - **`:scope` on a DSL declaration is now validated at compile time.**
   `scope ""` used to compile clean and authorize everyone, because it splits to
   `[]` and `Enum.all?([], _)` is true. `ConduitMcp.Component` already rejected
-  it; both authoring modes now share one validation.
+  it; both authoring modes now share one validation. No opt-out: `scope ""`
+  meant "unscoped", so delete the `scope` line to get the same behaviour.
 - **`resources/subscribe`, `resources/unsubscribe` and `completion/complete`
   now enforce the referenced resource's or prompt's `:scope`.** Subscribing
   delivers a resource's change notifications and completion enumerates its
   argument values, so both were readable without the scope that gates reading
-  it.
+  it. No opt-out: grant the caller the scope that already gates reading the
+  resource or prompt.
 - **A list passed to `:cors_origin` now raises at `init/1`** instead of raising
   `FunctionClauseError` inside the pipeline on every request. `:allowed_origins`
-  is the option that takes a list.
+  is the option that takes a list. No opt-out: a list never worked; pass one
+  origin string.
+- **`ConduitMcp.Transport.StreamableHTTP` creates no sessions unless `:session`
+  is configured.** Omitting `:session` now means the same as `session: false`:
+  no `mcp-session-id` is issued or validated. Previously every `initialize`,
+  authenticated or not, added a row to the session table, so the default
+  configuration let any client fill it.
+  Opt in: `session: []` (`ConduitMcp.Session.EtsStore`) or
+  `session: [store: MyStore]`. Any other `:session` value (`true`, a map)
+  raises `ArgumentError` at `init/1` instead of silently meaning "off".
+- **A duplicate DSL tool name, prompt name or resource URI fails the build**,
+  as does a duplicate resource URI across Endpoint components (Endpoint already
+  rejected duplicate tool and prompt names). A duplicate used to compile, and
+  which declaration served a request depended on how the compiler ordered the
+  generated clauses — on Elixir 1.20 / OTP 29 the *last*, while the scope
+  lookup and parameter validation could follow another, so a caller holding
+  one declaration's scope could reach the other's handler.
+  No opt-out: delete or rename one of the declarations.
+- **Anonymous IPv6 clients are rate-limited per /64, not per address.** The
+  default keys of `ConduitMcp.Plugs.RateLimit` and
+  `ConduitMcp.Plugs.MessageRateLimit`, and `ConduitMcp.Principal.rate_limit_key/1`,
+  key an unauthenticated IPv6 caller on its /64 prefix
+  (`"2001:db8:1:2::/64"`), and an IPv4-mapped IPv6 peer (`::ffff:a.b.c.d`) on
+  its IPv4 address. A host is allocated a whole /64 and picks the low 64 bits
+  itself, so a per-address key let one client rotate addresses to evade the
+  limit. Hosts sharing a /64 now share a bucket; raise `:limit` if that
+  matters. The same bucket is the anonymous cancellation scope.
+  Opt out: `rate_limit: [key_func: &ConduitMcp.Principal.client_ip/1]` (and a
+  remote-capture `:key_func` for `:message_rate_limit` that prefixes `"msg:"`).
+- **An empty or non-string static `:token` / `:api_key` raises at `init/1`.**
+  `Plug.Crypto.secure_compare("", "")` is true, so `api_key: ""` (for example
+  `System.get_env("API_KEY", "")` with the variable unset) authenticated any
+  request that sent an empty header.
+  No opt-out: configure a real secret, or omit the option and use `:verify`.
 
-Two smaller behaviour changes worth knowing about:
+Smaller behaviour changes worth knowing about:
 
 - `notifications/cancelled` is now counted by `ConduitMcp.Plugs.MessageRateLimit`
   (other notifications are still exempt). It mutates server state and is
   reachable unauthenticated.
 - `[:conduit_mcp, :auth, :verify]` telemetry reports `reason: :invalid_credential`
   for a failed static-strategy verification instead of the verifier's own
-  reason, which may embed the credential.
+  reason, which may embed the credential. `ConduitMcp.Plugs.OAuth` failures
+  report one atom from the set documented in its moduledoc (`:expired`,
+  `:alg_not_allowed`, `:key_unavailable`, …); token-header text and key-provider
+  error terms go only to the clamped log line. A failure no documented reason
+  covers reports `:verification_failed` rather than raising.
+- `resources/read`, `resources/subscribe` and `resources/unsubscribe` with a
+  missing or non-string `uri`, and `completion/complete` with a non-string
+  `ref.uri` / `ref.name`, return `-32602` with the value clamped. A scoped
+  server answered `-32603` and logged an error; an unscoped server passed the
+  non-string value to your callback, which no longer receives one. Telemetry
+  metadata `uri`, `tool_name`, `prompt_name` and `method` are `nil` when the
+  client sent a non-string, and the default telemetry logger renders them
+  through `ConduitMcp.Reflect`, so a client value can neither raise and detach
+  it nor forge a log line.
+- `ConduitMcp.Validation.validate_tool_params/3` and `validate_prompt_args/3`
+  return string-keyed error maps on every path. The non-map-input path returned
+  atom keys.
 
 ### Security
 
+- **plug is pinned to a security floor of 1.20.3** (`~> 1.20 and >= 1.20.3`).
+  `Plug.Parsers` runs before authentication and always decodes the query
+  string, so `~> 1.19` let a consumer resolve plug 1.19.0–1.19.2 and hand
+  unauthenticated callers CVE-2026-54892 (quadratic decoding of nested
+  params). 1.19.x and 1.20.0–1.20.2 also carry CVE-2026-56813 and
+  CVE-2026-56814; 1.20.3 is the first release clear of all three.
+- **hpax is floored at 1.0.4** (`optional: true`, so no new dependency for
+  consumers). Bandit's HTTP/2 stack depends on it, and Bandit's own
+  requirement still admits hpax 1.0.0–1.0.3 (CVE-2026-58226, unauthenticated
+  HPACK decoding DoS).
 - **Bandit is pinned to a security floor of 1.12.5** (`~> 1.12 and >= 1.12.5`).
   Bandit is a non-optional dependency and is the server both transports run
   on, so consumers inherited two HTTP/2 advisories against versions the old
@@ -100,7 +169,21 @@ Two smaller behaviour changes worth knowing about:
   cross-tenant denial of service: one unauthenticated client filling the table
   stops every *other* client's cancellations from being recorded. The
   cancellation table is now an `ordered_set`, so the per-scope count is a
-  bounded range scan.
+  bounded range scan. The per-scope quota is the only thing that rejects a
+  cancellation; a refused `notifications/cancelled` answers `-32000` (server
+  error). Through the handler, a cancellation is recorded only for a request
+  that is in flight in the caller's scope (MCP lets a receiver ignore unknown
+  or finished requests), so a client holds no more rows than it has requests
+  running, and the caps are a backstop. In-flight markers live in a second
+  table, `:conduit_mcp_in_flight`, owned by
+  `ConduitMcp.Cancellation.InFlightOwner`; markers left by a request process
+  killed before its cleanup ran are swept by the cancellation janitor
+  (`[:conduit_mcp, :cancellation, :cleanup]` reports them as
+  `in_flight_removed`). The in-flight table is a `:duplicate_bag` and the
+  per-request clear only writes when a cancellation row exists, so request
+  bookkeeping scales across schedulers instead of serialising on one ETS
+  lock (16 processes: about 3 M `ping`/s, where a single ordered-set lock
+  held them to about 0.2 M).
 - **`ConduitMcp.Plugs.OriginValidation`'s moduledoc no longer claims to stop
   DNS rebinding.** It does not: after a rebind the attacker's page is
   *same-origin*, and browsers send no `Origin` on a same-origin GET, so the
@@ -112,16 +195,27 @@ Two smaller behaviour changes worth knowing about:
   cancellation table was keyed on the raw client-chosen JSON-RPC id, so
   `{"requestId": "1"}` aborted every concurrent client's request id `1` and a
   `1..1000` loop aborted every in-flight tool call on the node. Rows are now
-  keyed `{scope, id}`, where scope is the session id, else the principal, else
-  the client IP. Ids must be a string or integer; a `{}` returns a JSON-RPC
-  error instead of a 500.
+  keyed `{scope, id}`, where scope is `"session:<id>"`, else
+  `"principal:<id>"`, else `"ip:<addr>"` — namespaced, so a principal whose id
+  equals a client IP does not share that IP's rows or quota. The `scope`
+  metadata on `[:conduit_mcp, :request, :cancelled]` carries the prefixed
+  value. For an anonymous IPv6 caller the `"ip:"` scope is its /64 prefix, so
+  rotating addresses does not multiply the per-scope quota. Ids must be a
+  string or an integer, and a string at most 256 bytes; anything else returns
+  a `-32602` JSON-RPC error instead of a 500 or an unbounded row.
 - **`:scope` is now enforced on resources and prompts, not only tools.**
   `use ConduitMcp.Component, type: :resource, scope: "admin:read"` compiled
   clean and enforced nothing. `handle_resource_read/4` and
   `handle_prompt_get/4` gained the authorization hook, scopes are collected
   from all three declaration types (URI templates included), and the DSL's
   `scope/1` now raises at compile time outside a `tool`/`resource`/`prompt`
-  block.
+  block. The resource scope lookup mirrors `resources/read` dispatch in both
+  modes, unscoped resources included: a URI served by a static resource, or by
+  an earlier-declared template, is governed by that resource's scope even when
+  it declares none, so an unscoped `user://me` no longer inherits
+  `user://{id}`'s scope. Endpoint mode builds each template's parameter keys
+  at compile time, so every declared template dispatches and is gated,
+  whatever atoms happen to exist at runtime.
 - **`strategy: :oauth` works on `ConduitMcp.Transport.SSE`.** SSE had no
   `:oauth` branch, so it fell through to `ConduitMcp.Plugs.Auth`'s catch-all
   and returned a blanket 401 "Server configuration error" plus a
@@ -131,9 +225,18 @@ Two smaller behaviour changes worth knowing about:
   blocked a Bandit process for up to 15 s against an endpoint IdPs rate-limit.
   `fetch_key/2` also refreshed on *any* unknown `kid`, before any signature
   check, so an unauthenticated caller could drive one fetch per request. Now:
-  one fetch per URI at a time, a `:refresh_cooldown` (default 30 s) on
-  kid-triggered refreshes, and a lock-age guard so a crashed holder cannot
-  wedge refreshes.
+  one fetch per URI at a time, a `:refresh_cooldown` (default 30 s), and a
+  lock-age guard so a crashed holder cannot wedge refreshes. The cooldown
+  gates both kid-triggered refreshes and refetches after `:cache_ttl` lapses:
+  with a cached key set, a request inside the window is served the cached keys
+  (bounded by `:stale_max_age`) instead of fetching, so a failing IdP sees one
+  fetch per cooldown, not one per request. The window also applies to a cold
+  cache after a failed fetch: nothing is cached to serve, so requests inside
+  it get `{:error, :refresh_cooldown}` instead of another fetch (the first
+  fetch for a URI is never delayed). A request that arrives mid-refresh,
+  whether from a lapsed TTL or an unknown `kid`, waits for its result. A
+  refresh skipped by the cooldown logs at `:debug`, not as a failed refresh,
+  including when the cached keys are past `:stale_max_age` and it fails closed.
 - **The JWKS 1 MB cap is enforced while streaming.** It was applied to an
   already-buffered, already-decompressed body, so a multi-gigabyte response
   exhausted the VM before the guard ran. Responses now stream through a
@@ -145,7 +248,14 @@ Two smaller behaviour changes worth knowing about:
   accumulated forever *and* was rescanned on every tick — a monotonic leak with
   O(n) per-tick cost over a long-lived connection. It now drains foreign
   messages, honours `:max_connection_lifetime` (default 1 h) and rejects past
-  `:max_connections` (default 1 000) with 503.
+  `:max_connections` (default 1 000) with 503. Each stream holds one row keyed
+  by its pid, and rows whose process has died are swept when the cap is
+  reached: under HTTP/2, a peer close kills Bandit's stream process before its
+  cleanup runs, so a counter would leak one slot per disconnect. The count is
+  O(1), and while every slot is live a rejected connect re-sweeps at most once
+  a second. `:max_connections` must be a positive integer; anything else
+  raises at `init/1` (a non-integer used to compare greater than any count and
+  silently disable the cap).
 - **Reflected client text is bounded and stripped.** New `ConduitMcp.Reflect`
   clamps length and removes control characters for every client value echoed
   into an error message or log line (method names, `protocolVersion`, `taskId`,
@@ -163,6 +273,26 @@ Two smaller behaviour changes worth knowing about:
 
 ### Fixed
 
+- **`Retry-After` rounds up.** Both rate-limit plugs floored the backend's
+  wait to whole seconds, so a client told to wait after a 1.5 s window came
+  back after 1 s and was denied again. Hammer 7.5's token-bucket backend
+  reports real sub-second waits, which made this common. The header now
+  rounds up, with a floor of 1 s.
+- **SSE works over HTTP/2 for strict clients.** `GET /sse` sent
+  `connection: keep-alive`, a connection-specific header RFC 9113 §8.2.2
+  forbids in HTTP/2, so curl and other nghttp2-based clients rejected every
+  stream. The header is gone; HTTP/1.1 connections are persistent by default,
+  so nothing changes there.
+- **`ConduitMcp.Plugs.MessageRateLimit` no longer crashes on a non-string
+  `method`.** A denied request whose JSON-RPC `method` was an object raised
+  `Protocol.UndefinedError` in the warning log (a 500 instead of a 429), and a
+  `method` containing a newline forged log lines. Telemetry `method` is `nil`
+  for a non-string, as documented, and the log line goes through
+  `ConduitMcp.Reflect`.
+- **`notifications/cancelled` with a non-object `params` no longer crashes the
+  request.** `null`, an array, a string or a number raised `BadMapError`, and
+  the transport answered a bare 500. It now returns a JSON-RPC `-32602` error
+  with `"id": null` (HTTP 200).
 - **A JSON array in any reflected field no longer crashes the request.**
   `ConduitMcp.Reflect.text/2` rescued only `Protocol.UndefinedError`, but
   `to_string/1` on a list raises `ArgumentError` or `UnicodeConversionError`.
@@ -182,11 +312,11 @@ Two smaller behaviour changes worth knowing about:
   filling each scope's 256 rows (10 240 > the 10 000 default) refused every
   *other* client's cancellations — reinstating the cross-tenant denial of
   service the per-scope quota exists to prevent. The global cap is now a memory
-  backstop that reclaims the oldest rows of the largest scope instead of
-  rejecting.
-- **SSE `:max_connections` fails closed.** An unreadable connection counter was
-  read as "no slots taken", silently disabling the cap rather than enforcing
-  it.
+  backstop that evicts instead of rejecting: each reclaim frees a full batch of
+  `max_rows / 20` rows, oldest first from the largest scope, then from the next
+  largest, so a flood of one-row scopes cannot force a table scan per insert.
+- **SSE `:max_connections` fails closed.** An unavailable slot table was read
+  as "no slots taken", silently disabling the cap rather than enforcing it.
 - **A supervised ETS owner that loses its table now retries.** The degrade was
   terminal: the process idled forever owning nothing while the table's lifetime
   silently became one request's. It also reported invalid `:ets.new/2` options
@@ -206,10 +336,18 @@ Two smaller behaviour changes worth knowing about:
 - **A struct-shaped `:current_user` is namespaced by its type.**
   `%MyApp.User{id: 42}` and `%MyApp.ApiClient{id: 42}` both derived `"42"`, and
   task ownership is an exact string compare — so the service account could read
-  and cancel the human's tasks.
+  and cancel the human's tasks. A verifier returning a status value (`true`,
+  `false`, `:ok`) derives no id, so the principal falls back to the
+  per-credential digest instead of every caller sharing the id `"true"`.
 - **A scoped resource with no `read` handler no longer skews scope
   enforcement.** It contributed to the templated scan but not to dispatch, so
   an overlapping template could enforce one scope and run another's handler.
+- **Overlapping URI templates run one handler.** DSL mode evaluated every
+  matching template's `read` handler, side effects included, before picking
+  the first result. Only the first matching template's handler runs now, and
+  a handler returning `nil` no longer falls through to the next template (in
+  either mode); it is reported as an internal error, like a static handler
+  returning `nil`.
 - **The session table survives.** `:conduit_mcp_sessions` was created lazily by
   whichever request touched it first and died with that request, so
   `Session.get/2` returned `{:error, :not_found}` for a session id the client
@@ -226,7 +364,12 @@ Two smaller behaviour changes worth knowing about:
   token collapsed into one owner. Both plugs now assign
   `ConduitMcp.Principal` (`conn.assigns[:mcp_principal]`) carrying a stable
   scalar `:id`, and task ownership, per-user rate limiting and scope checks all
-  read it. `:current_user` is unchanged and still yours to shape.
+  read it. `:current_user` is unchanged and still yours to shape. The id
+  formats (`"sub:<v>"`, `"client_id:<v>"`, `"<Struct>:<id>"`,
+  `"static:<digest>"`) are documented in `ConduitMcp.Principal`.
+  `ConduitMcp.Principal.id/1` returns only strings: a principal assigned
+  without `put/2` whose `:id` is not a string is treated as anonymous instead
+  of raising in the cancellation scope or the rate-limit key.
 - **Per-user message rate limiting actually works.** Its default key read a
   shape neither auth plug assigned, so two OAuth subjects behind one proxy
   shared a bucket. It now keys on the principal.
@@ -236,10 +379,19 @@ Two smaller behaviour changes worth knowing about:
   go through `ConduitMcp.Principal.client_ip/1`.
 - **`tasks/list` filters in the C layer.** It copied the whole table into the
   caller's heap and filtered in Elixir, even when the filter matched nothing.
-  `:owner`, `:status` and `:limit` are now one `:ets.select/3` match spec.
+  `:owner`, `:status` and `:limit` are now one `:ets.select/3` match spec. The
+  owner is embedded as a match-spec constant, so a tuple owner (or a map
+  containing one) lists its own tasks instead of raising `ArgumentError`, and
+  `ConduitMcp.Tasks.list/2` re-applies `:limit` after its owner re-check, so a
+  custom store that ignores `:owner` or `:limit` cannot over-return. Owners
+  compare with `=:=`, the facade's exact match, so owner `1` does not count
+  `1.0`'s rows. A custom store that ignores `:owner` must also ignore
+  `:limit` (see `ConduitMcp.Tasks.Store`).
 - **A typo'd validation option fails the build.**
   `field(:name, :string, min_lenght: 3)` used to warn and validate *nothing*.
-  It now raises, with a "did you mean" suggestion.
+  It now raises, with a "did you mean" suggestion. A recognised option with a
+  badly shaped value (`min: "5"`) is reported as an invalid value, not as a
+  typo of itself.
 - **`ConduitMcp.Protocol.server_error/0` exists.** The moduledoc advertised it
   while the `defdelegate` block omitted it, so calling it raised
   `UndefinedFunctionError`.
@@ -261,7 +413,10 @@ Two smaller behaviour changes worth knowing about:
 ### Added
 
 - `ConduitMcp.Principal` — the canonical "who is calling", with `id/1`,
-  `scopes/1`, `client_ip/1` and `rate_limit_key/1`.
+  `scopes/1`, `client_ip/1`, `client_bucket/1` and `rate_limit_key/1`.
+- `ConduitMcp.Cancellation.track/2`, `untrack/2`, `in_flight?/2` and
+  `valid_request_id?/1` — the in-flight registry the handler uses to decide
+  whether a `notifications/cancelled` is recorded.
 - `ConduitMcp.Reflect` — the boundary helper for reflected client text.
 - `ConduitMcp.Transport.Shared` — the single implementation of everything the
   two transports share. No function body exists in both transports any more,
@@ -271,7 +426,12 @@ Two smaller behaviour changes worth knowing about:
   bare-string `:allowed_origins` shapes, which previously hit the catch-all and
   403'd every `Origin`-bearing request.
 - `ConduitMcp.Plugs.Auth` gained `:principal_id` for naming the principal
-  behind a shared static credential.
+  behind a shared static credential. It requires a configured static secret
+  (`:bearer_token` with `:token`, `:api_key` with `:api_key`); `init/1` raises
+  `ArgumentError` whenever a `:verify` function authenticates instead —
+  `:function`, `:custom`, or `:bearer_token` / `:api_key` configured with
+  `verify:` — where one fixed id would merge every user into a single
+  principal.
 - Optional-dependency table in `README.md` and prerequisites blocks in
   `guides/authentication.md` and `guides/rate_limiting.md`, both stating the
   `mix deps.compile conduit_mcp --force` requirement.
@@ -279,11 +439,14 @@ Two smaller behaviour changes worth knowing about:
   `:conduit_mcp` inside a project declaring **no** optional dependencies — the
   one configuration the main suite can never cover, since `optional: true` deps
   are fetched for the defining project. `publish` now gates on it.
-- `ConduitMcp.EtsOwner` — the shared implementation behind all five supervised
-  ETS table owners. A lost `:ets.new/2` race now logs and degrades instead of
-  raising: an Owner that raised on restart took `ConduitMcp.Supervisor` — and
-  with it the consumer's application — down after three attempts in five
-  seconds, and a janitor tick calling `ensure_table/0` is enough to cause it.
+- `ConduitMcp.EtsOwner` — the shared implementation behind all six supervised
+  ETS table owners. A lost `:ets.new/2` race logs and retries every second
+  instead of raising: an Owner that raised on restart took
+  `ConduitMcp.Supervisor` — and with it the consumer's application — down
+  after three attempts in five seconds, and a janitor tick calling
+  `ensure_table/0` is enough to cause it. Invalid `:ets.new/2` options still
+  raise. The retry interval is `EtsOwner.start_link/4`'s `:reclaim_interval`
+  (default 1 000 ms).
 - `ConduitMcp.Session.Janitor` gained `:telemetry_event` and `:noun`. The
   library reuses this janitor for the cancellation table, so the cancellation
   sweep now emits `[:conduit_mcp, :cancellation, :janitor]` rather than
@@ -296,11 +459,21 @@ Two smaller behaviour changes worth knowing about:
   spelling `:tasks_max_rows` uses. It previously returned `[]`.
 - `ConduitMcp.Reflect.text/2` also strips U+061C (ALM), U+2060 and U+FEFF —
   the invisible format and bidi controls outside the ranges it already covered.
-- `ConduitMcp.Plugs.RateLimit.default_key_func/1` and
-  `ConduitMcp.Plugs.MessageRateLimit.default_key_func/1` are public
+- `default_key_func/1` on `ConduitMcp.Plugs.RateLimit` and
+  `ConduitMcp.Plugs.MessageRateLimit` is public
   (`@doc false`) so the resolved plug options survive `Plug.Router.forward/2`'s
-  compile-time escape.
-- **Test coverage** expanded to 975 tests (up from 745), 90.2% coverage.
+  compile-time escape. The same constraint applies to your own callbacks in
+  transport options (e.g. `:key_func`): pass a remote capture
+  (`&MyApp.RateKeys.msg/1`), not an anonymous function. See
+  `ConduitMcp.Transport.Shared`.
+- A per-parameter `type_coercion: boolean` validation option overrides the
+  global `:type_coercion` setting for that parameter; an object parameter's
+  fields inherit it.
+- **Test coverage** expanded to 1 067 tests (up from 745), 91.6% coverage.
+- **Dependencies updated** (lock only; no requirement changed): hammer 7.5.0,
+  joken 2.7.0, prom_ex 1.12.0, req 0.7.4, credo 1.7.19, dialyxir 1.4.8,
+  ex_doc 0.40.4, sobelow 0.15.0, stream_data 1.4.0, benchee 1.5.1, plus
+  transitive updates. `peep` 5.x is held back by prom_ex's requirement.
 
 ## [0.10.1] - 2026-08-05
 
@@ -611,7 +784,7 @@ Follow-up hardening from a re-review of the 0.9.4–0.9.7 changes (PRs #13–#17
 ### Performance
 
 - **persistent_term validation config** — replaced `Application.get_env` with `:persistent_term.get` for O(1) lock-free config reads on every validated request (4–10% faster validation, 5–11% less memory)
-- **Cached server capabilities** — new `ConduitMcp.ServerMeta` module lazily caches all `function_exported?` results in persistent_term, eliminating 9 repeated BIF calls per request (2–7% faster handler dispatch)
+- **Cached server capabilities** — new internal `ServerMeta` module lazily caches all `function_exported?` results in persistent_term, eliminating 9 repeated BIF calls per request (2–7% faster handler dispatch)
 - **Pre-computed clean schemas** — `__validation_schema_for_tool__/1` now returns `{full_schema, clean_schema}` tuples pre-stripped of constraint markers at compile time, eliminating per-request `Keyword.drop`
 - **Static resource URI dispatch** — resources with no `{param}` placeholders now generate direct pattern-match clauses (O(1)) instead of linear regex scan (O(n))
 
@@ -724,7 +897,7 @@ Follow-up hardening from a re-review of the 0.9.4–0.9.7 changes (PRs #13–#17
 ### Fixed
 
 - Version mismatch where handler returned hardcoded version instead of app version
-- Hardcoded protocol version in transport (now uses `Protocol.protocol_version/0`)
+- Hardcoded protocol version in transport (now uses `ConduitMcp.Protocol.protocol_version/0`)
 - Flaky telemetry tests caused by async race conditions
 - Flaky StreamableHTTP tests caused by shared ETS state in async mode
 - Elixir 1.20 compilation warnings

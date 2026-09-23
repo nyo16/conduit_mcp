@@ -152,19 +152,52 @@ ConduitMcp.Principal.scopes(conn)  # granted OAuth scopes, or []
 ConduitMcp.Principal.get(conn)     # %{id:, scopes:, strategy:, claims:, user:}
 ```
 
-`id/1` is:
+`id/1` is always a string (or `nil`). Its exact format depends on the strategy:
 
-| Strategy | `id` |
-|---|---|
-| `:oauth` | the first of `:subject_claims` present in the token (default `["sub", "client_id"]`) |
-| `:function` / `:custom` | derived from the verifier's return (`:id`, `"id"`, `:sub`, `"sub"`, or a bare binary/integer/atom) |
-| `:bearer_token` / `:api_key` | the configured `principal_id:`, else a stable digest of the shared credential |
+| Strategy | `id` | Example |
+|---|---|---|
+| `:oauth` | `"<claim>:<value>"` for the first of `:subject_claims` (default `["sub", "client_id"]`) holding a non-empty string or an integer | `"sub:user-123"`, `"client_id:svc-42"`, `"sub:12345"` |
+| `:function` / `:custom`, or `:verify` with no `:token` / `:api_key` | `ConduitMcp.Principal.derive_id/1` of the verifier's return; `"static:<digest>"` when it carries no identity | see below |
+| `:bearer_token` with `:token` / `:api_key` with `:api_key` | the configured `principal_id:`, else `"static:<digest>"` | `"ci-bot"`, `"static:0wRuzI3TJCrfYoAa"` |
+
+- **OAuth ids carry the claim name.** Without the prefix, an authorization
+  server that lets a client pick its own `client_id` would let it register a
+  victim's `sub` as its `client_id`, obtain a client-credentials token (no
+  `sub`, so `client_id` wins) and become that user's principal. Integer claims
+  render as decimal strings, so `sub: 1` and `client_id: "1"` would collide
+  too.
+- **Verifier returns** (`:function`, and the deprecated `:custom`, which is
+  recorded as `strategy: :function`):
+
+  | `{:ok, ...}` from `:verify` | `id` |
+  |---|---|
+  | `%MyApp.User{id: 42}` (any struct with `:id`, else `:sub`) | `"MyApp.User:42"` |
+  | `%{id: 42}` / `%{"id" => 42}` / `%{sub: "alice"}` / `%{"sub" => "alice"}` | `"42"` / `"alice"` |
+  | `"alice"`, `42`, `:svc` | `"alice"`, `"42"`, `"svc"` |
+  | `true`, `false`, `:ok`, or no scalar identity | `"static:<digest>"` of the presented credential |
+
+  Structs are namespaced by type so `%User{id: 42}` and `%ApiClient{id: 42}`
+  stay different principals. `principal_id:` is rejected at `init/1` whenever
+  `:verify` authenticates — including `:bearer_token` / `:api_key` without a
+  `:token` / `:api_key` — since one fixed id would merge every user into one
+  principal.
+- **`"static:<digest>"`** is the first 12 bytes of the SHA-256 of the
+  credential, base64url without padding (`"shared-secret"` →
+  `"static:0wRuzI3TJCrfYoAa"`). Stable across requests and restarts; never
+  echoes the credential.
+
+`nil` = no principal: sees only unowned tasks; nothing under
+`:tasks_require_owner` (see `ConduitMcp.Tasks.get/2`). Rate-limit keys and
+cancellation scopes fall back to the client bucket,
+`ConduitMcp.Principal.client_bucket/1`: the IPv4 address, or the IPv6 `/64`
+(see [Rate Limiting](rate_limiting.md#anonymous-clients)).
 
 > **An OAuth token with no usable subject claim is rejected with 401.** `sub`
 > is optional in a JWT and absent from many client-credentials access tokens.
 > Accepting one would create an authenticated principal that everything
-> downstream reads as anonymous — tasks unowned and world-readable, rate
-> limiting on the shared IP bucket. Point `:subject_claims` at whatever your
+> downstream reads as anonymous — tasks unowned (visible to every caller
+> unless `:tasks_require_owner` is set), rate limiting on the shared
+> client-address bucket. Point `:subject_claims` at whatever your
 > authorization server does emit:
 >
 > ```elixir
@@ -177,7 +210,7 @@ ConduitMcp.Principal.get(conn)     # %{id:, scopes:, strategy:, claims:, user:}
 > task 404s for its own owner.
 
 For a static shared credential, set `principal_id:` to give it a readable
-identity:
+identity. It requires the secret itself (`:token` or `:api_key`):
 
 ```elixir
 auth: [strategy: :bearer_token, token: "...", principal_id: "ci-bot"]
@@ -207,7 +240,10 @@ end
 
 ## Telemetry
 
-Auth events: `[:conduit_mcp, :auth, :verify]` with metadata `%{strategy, status, error}`.
+Auth events: `[:conduit_mcp, :auth, :verify]` with metadata `%{strategy, status}`,
+plus `:reason` on failure. `:reason` is always an atom, never verifier or token
+text: `:invalid_credential` / `:invalid_return` for `ConduitMcp.Plugs.Auth`, and
+the set in the "Telemetry" section of `ConduitMcp.Plugs.OAuth` for `:oauth`.
 
 ## Behavior
 

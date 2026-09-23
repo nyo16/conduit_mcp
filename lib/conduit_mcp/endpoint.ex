@@ -98,6 +98,9 @@ defmodule ConduitMcp.Endpoint do
 
     tool_clauses = generate_tool_clauses(tools)
     prompt_clauses = generate_prompt_clauses(prompts)
+
+    # Dispatch and the scope lookup are both built from `resources`, so the
+    # lookup answers for exactly the component `handle_read_resource/2` runs.
     resource_clause = generate_resource_clause(resources)
 
     tool_validation_clauses = generate_tool_validation_clauses(tools)
@@ -107,7 +110,7 @@ defmodule ConduitMcp.Endpoint do
       ConduitMcp.DSL.__generate_scope_clauses__(
         component_scopes(tools, & &1.__component_name__()),
         component_scopes(prompts, & &1.__component_name__()),
-        component_scopes(resources, &Keyword.fetch!(&1.__component_opts__(), :uri))
+        component_scopes(resources, &resource_uri/1)
       )
 
     key_conversion =
@@ -247,8 +250,23 @@ defmodule ConduitMcp.Endpoint do
     resources = Enum.filter(components, &(&1.__component_type__() == :resource))
     prompts = Enum.filter(components, &(&1.__component_type__() == :prompt))
 
-    validate_no_name_conflicts!(tools, :tool, module)
-    validate_no_name_conflicts!(prompts, :prompt, module)
+    ConduitMcp.DSL.__validate_unique__!(
+      module,
+      Enum.map(tools, & &1.__component_name__()),
+      "tool name"
+    )
+
+    ConduitMcp.DSL.__validate_unique__!(
+      module,
+      Enum.map(prompts, & &1.__component_name__()),
+      "prompt name"
+    )
+
+    ConduitMcp.DSL.__validate_unique__!(
+      module,
+      Enum.map(resources, &resource_uri/1),
+      "resource URI"
+    )
 
     {tools, resources, prompts}
   end
@@ -293,17 +311,6 @@ defmodule ConduitMcp.Endpoint do
     end)
   end
 
-  defp validate_no_name_conflicts!(components, type, endpoint_module) do
-    names = Enum.map(components, & &1.__component_name__())
-    duplicates = names -- Enum.uniq(names)
-
-    unless Enum.empty?(duplicates) do
-      raise CompileError,
-        description:
-          "#{inspect(endpoint_module)}: duplicate #{type} name(s): #{inspect(Enum.uniq(duplicates))}"
-    end
-  end
-
   defp generate_tool_clauses(tools) do
     Enum.map(tools, fn mod ->
       name = mod.__component_name__()
@@ -335,56 +342,58 @@ defmodule ConduitMcp.Endpoint do
   defp generate_resource_clause(resources) do
     # Separate static URIs (no {param} placeholders) from templated URIs
     {static_resources, templated_resources} =
-      Enum.split_with(resources, fn mod ->
-        template = Keyword.fetch!(mod.__component_opts__(), :uri)
-        not String.contains?(template, "{")
-      end)
+      Enum.split_with(resources, &(not String.contains?(resource_uri(&1), "{")))
 
     # Static URIs get direct pattern-match clauses — O(1) dispatch
     static_clauses =
       Enum.map(static_resources, fn mod ->
-        uri = Keyword.fetch!(mod.__component_opts__(), :uri)
-
         quote do
-          def handle_read_resource(conn, unquote(uri)) do
+          def handle_read_resource(conn, unquote(resource_uri(mod))) do
             unquote(mod).execute(%{}, conn)
           end
         end
       end)
 
-    # Templated URIs use pre-compiled regex scan; store {template, mod} pairs
-    # and look up the regex from persistent_term at request time to avoid
-    # per-process Regex.recompile/1 (Macro.escape strips re_pattern).
-    templated_template_mod_pairs =
+    # Templated URIs use pre-compiled regex scan; store {template, keys, mod}
+    # triples and look up the regex from persistent_term at request time to
+    # avoid per-process Regex.recompile/1 (Macro.escape strips re_pattern).
+    templated_triples =
       Enum.map(templated_resources, fn mod ->
-        {Keyword.fetch!(mod.__component_opts__(), :uri), mod}
+        template = resource_uri(mod)
+        {template, template_param_atoms(template), mod}
       end)
 
     templated_clause =
       if templated_resources != [] do
         quote do
-          @__resource_template_pairs unquote(Macro.escape(templated_template_mod_pairs))
+          @__resource_templates unquote(Macro.escape(templated_triples))
 
+          # The serving component is the first whose template matches — the
+          # one `__scope_for_resource__/1` answers for. It is found first and
+          # executed once, so no later component runs whatever the first
+          # one's `execute/2` returns.
           def handle_read_resource(conn, uri) do
-            Enum.find_value(@__resource_template_pairs, fn {template, mod} ->
-              {param_names, regex} = ConduitMcp.DSL.template_regex(__MODULE__, template)
+            serving =
+              Enum.find_value(@__resource_templates, fn {template, keys, mod} ->
+                {_param_names, regex} = ConduitMcp.DSL.template_regex(__MODULE__, template)
 
-              case ConduitMcp.DSL.extract_uri_params_compiled(uri, param_names, regex) do
-                {:ok, params} ->
-                  case ConduitMcp.Endpoint.atomize_uri_params(params) do
-                    {:ok, atom_params} -> mod.execute(atom_params, conn)
-                    :error -> nil
-                  end
+                case ConduitMcp.DSL.extract_uri_params_compiled(uri, keys, regex) do
+                  {:ok, atom_params} -> {mod, atom_params}
+                  :no_match -> nil
+                end
+              end)
 
-                :no_match ->
-                  nil
-              end
-            end) ||
-              {:error,
-               %{
-                 "code" => ConduitMcp.Errors.resource_not_found(),
-                 "message" => "Resource not found: #{ConduitMcp.Reflect.text(uri)}"
-               }}
+            case serving do
+              {mod, atom_params} ->
+                mod.execute(atom_params, conn)
+
+              nil ->
+                {:error,
+                 %{
+                   "code" => ConduitMcp.Errors.resource_not_found(),
+                   "message" => "Resource not found: #{ConduitMcp.Reflect.text(uri)}"
+                 }}
+            end
           end
         end
       else
@@ -406,13 +415,12 @@ defmodule ConduitMcp.Endpoint do
     end
   end
 
-  @doc false
-  # URI template param names are compile-time-defined atoms; an unknown name
-  # means the URI matched a different shape — treat as no-match, don't crash.
-  def atomize_uri_params(params) do
-    {:ok, Map.new(params, fn {k, v} -> {String.to_existing_atom(k), v} end)}
-  rescue
-    ArgumentError -> :error
+  # sobelow_skip ["DOS.StringToAtom"]
+  # Compile time only: the names come from the developer's URI template literal, never request input.
+  # Minting them here means whether a template dispatches cannot depend on the runtime atom table.
+  defp template_param_atoms(template) do
+    {param_names, _regex} = ConduitMcp.DSL.compile_uri_template(template)
+    Enum.map(param_names, &String.to_atom/1)
   end
 
   defp generate_tool_validation_clauses(tools) do
@@ -443,31 +451,21 @@ defmodule ConduitMcp.Endpoint do
     end)
   end
 
-  # `:scope` is documented as a general component option, so it must be
-  # collected for resources and prompts too — not only tools. Building the map
-  # from tools alone is what made `use ConduitMcp.Component, type: :resource,
+  # `:scope` is documented as a general component option, so it is collected
+  # for resources and prompts too — not only tools. Building the map from
+  # tools alone is what made `use ConduitMcp.Component, type: :resource,
   # scope: "admin:read"` compile clean and enforce nothing.
-  # `Enum.flat_map`, not a prepending reduce: the emitted templated-resource
-  # scope scan must walk templates in the same order `handle_read_resource/2`
-  # dispatches them, or two overlapping templates enforce one scope and run the
-  # other's handler.
+  #
+  # One `{key, scope | nil}` entry per component, unscoped ones included, in
+  # the order given, which is dispatch order: the lookup mirrors dispatch,
+  # including when the component dispatch runs is unscoped.
+  # `ConduitMcp.DSL.__generate_scope_clauses__/4` de-duplicates and drops the
+  # unscoped entries it does not need.
   defp component_scopes(components, key_fun) do
-    components
-    |> Enum.flat_map(fn mod ->
-      case Keyword.get(mod.__component_opts__(), :scope) do
-        nil -> []
-        scope -> [{key_fun.(mod), scope}]
-      end
-    end)
-    # De-duplicated because two components sharing a name would emit two
-    # identical `__scope_for_*__` clause heads, and the second is unreachable
-    # code the reader has to reason about. It is *not* a build fix: clauses
-    # injected via `unquote` carry no line metadata, so the compiler emits no
-    # "this clause cannot match" diagnostic for them (verified), and
-    # first-declaration-wins already held without this. First declaration wins,
-    # matching dispatch order.
-    |> Enum.uniq_by(&elem(&1, 0))
+    Enum.map(components, &{key_fun.(&1), Keyword.get(&1.__component_opts__(), :scope)})
   end
+
+  defp resource_uri(mod), do: Keyword.fetch!(mod.__component_opts__(), :uri)
 
   # Emit one `__key_map__(name)` clause per component with a non-empty key
   # map, plus the conversion helper that consults it.

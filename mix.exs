@@ -55,7 +55,13 @@ defmodule ConduitMcp.MixProject do
   defp deps do
     [
       # Core dependencies
-      {:plug, "~> 1.19"},
+      # 1.20.3 is a security floor. `Plug.Parsers` runs before
+      # authentication and always decodes the query string, so an older plug
+      # hands unauthenticated callers CVE-2026-54892 (quadratic decoding of
+      # nested params, 1.19.0-1.19.2); 1.19.x and 1.20.0-1.20.2 also carry
+      # CVE-2026-56813 and CVE-2026-56814. 1.20.3 is the first release clear
+      # of all of them.
+      {:plug, "~> 1.20 and >= 1.20.3"},
       # 1.12.5 is a security floor. Earlier versions carry two HTTP/2
       # advisories against the server both transports run on:
       # CVE-2026-74836 (HIGH) — connection-window starvation pins an unbounded
@@ -65,6 +71,12 @@ defmodule ConduitMcp.MixProject do
       # reach `conn.req_headers` unvalidated, which the HTTP/1 path already
       # rejected. `~> 1.9` admitted 1.12.5 but did not require it.
       {:bandit, "~> 1.12 and >= 1.12.5"},
+      # Not used directly: Bandit's HTTP/2 stack depends on it. Declared only
+      # to put a security floor under it, since Bandit's own requirement still
+      # admits hpax 1.0.0-1.0.3 (CVE-2026-58226, unauthenticated HPACK decoding
+      # DoS). `optional: true` adds no dependency for consumers; Mix applies
+      # this requirement whenever Bandit brings hpax in.
+      {:hpax, "~> 1.0 and >= 1.0.4", optional: true},
       {:nimble_options, "1.1.1"},
 
       # Optional: Rate limiting (only needed if using ConduitMcp.Plugs.RateLimit)

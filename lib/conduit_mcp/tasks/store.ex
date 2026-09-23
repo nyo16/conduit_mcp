@@ -81,8 +81,8 @@ defmodule ConduitMcp.Tasks.Store do
   `ConduitMcp.Tasks.get/2`; the short version is that a caller with no
   principal sees only unowned tasks, and
   `config :conduit_mcp, :tasks_require_owner, true` removes even those.
-  Apps that never stamp an owner see no behaviour change; apps that stamp
-  *some* owners no longer leak those tasks to unauthenticated callers.
+  Apps that never stamp an owner are unaffected; a task stamped with an owner
+  is never visible to an unauthenticated caller.
 
   ## Configuration
 
@@ -145,14 +145,22 @@ defmodule ConduitMcp.Tasks.Store do
     * `:status` — restrict to one task status (a string or atom).
     * `:limit` — maximum number of rows to return.
     * `:owner` — the caller's principal, or `:any` for an unscoped listing.
-      `nil` means "no principal": return only unowned rows.
+      `nil` = no principal: sees only unowned tasks; nothing under
+      `:tasks_require_owner` (see `ConduitMcp.Tasks.get/2`).
 
   **`:owner` is an authorization filter, not a convenience.** Expressing it as
   a query predicate is what keeps `tasks/list` from copying every row into the
-  caller's heap before deciding they may not see it. `ConduitMcp.Tasks.list/2`
-  re-checks the returned rows, so a store that ignores `:owner` is slow rather
-  than unsafe — but it *is* slow, and on a large table that is the DoS this
-  contract exists to prevent.
+  caller's heap before deciding they may not see it. Compare owners with exact
+  equality (`===`), as `ConduitMcp.Tasks` does, so `1` and `1.0` are distinct
+  principals.
+
+  `ConduitMcp.Tasks.list/2` re-checks the returned rows and re-applies
+  `:limit`, so a store that ignores `:owner` cannot leak another principal's
+  tasks. **A store that ignores `:owner` must also ignore `:limit`**: honouring
+  `:limit` alone returns the first N rows of *any* owner, and the owner
+  re-check then leaves the caller with fewer of their own rows than exist, or
+  none. Even when it ignores both, the store copies every row on each call,
+  which on a large table is the DoS this contract exists to prevent.
   """
   @callback list(opts :: keyword()) :: [task]
 

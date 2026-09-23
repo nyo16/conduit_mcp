@@ -15,11 +15,30 @@ defmodule ConduitMcp.Server do
   - Each HTTP request runs in parallel (limited only by Bandit's process pool)
 
   The library does run a small supervision tree of its own
-  (`ConduitMcp.Application`) to own the long-lived ETS tables that must
-  outlive request processes — cancellation flags, sessions, tasks, and the
-  JWKS cache — plus the session janitor. It starts automatically with the
-  `:conduit_mcp` application; see `ConduitMcp.Application` for what runs and
-  how to configure it.
+  (`ConduitMcp.Application`). It starts automatically with the `:conduit_mcp`
+  application and owns the long-lived ETS tables that must outlive request
+  processes, plus the janitors that sweep them:
+
+  - `ConduitMcp.Cancellation.Owner` — cancellation flags
+  - `ConduitMcp.Cancellation.InFlightOwner` — requests in flight, which gate
+    the cancellations recorded
+  - `ConduitMcp.Session.EtsStore.Owner` — sessions
+  - `ConduitMcp.Transport.SSE.Owner` — the SSE slot table (one row per live
+    stream)
+  - `ConduitMcp.Session.Janitor` (as `ConduitMcp.Session.Janitor.Default`) —
+    sweeps expired sessions; disable with
+    `config :conduit_mcp, :session_janitor, false`
+  - `ConduitMcp.Cancellation.Janitor` — sweeps stale cancellation rows and
+    in-flight rows of dead processes; disable with
+    `config :conduit_mcp, :cancellation_janitor, false`
+  - `ConduitMcp.Tasks.EtsStore.Owner` — tasks, only with the default tasks
+    store
+  - `ConduitMcp.OAuth.KeyProvider.JWKS.Owner` — the JWKS cache, only when
+    `Req` is compiled in
+
+  Every owner is a `ConduitMcp.EtsOwner` process that creates a `:public`
+  table and idles; reads and writes go straight to ETS from the calling
+  process. See `ConduitMcp.Application` for configuration details.
 
   ## Example (Using DSL - Recommended)
 
