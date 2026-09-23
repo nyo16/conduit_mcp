@@ -92,9 +92,95 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
       end
     end
 
-    test "a string or nil :cors_origin is accepted" do
-      assert StreamableHTTP.init(server_module: TestServer, cors_origin: "*")
-      assert StreamableHTTP.init(server_module: TestServer, allowed_origins: "*")
+    test "an :allowed_origins of an unsupported shape is a boot-time error" do
+      for bad <- [42, :all, %{"origin" => "https://a.example"}, ["https://a.example", 7]] do
+        assert_raise ArgumentError, ~r/:allowed_origins must be/, fn ->
+          StreamableHTTP.init(server_module: TestServer, allowed_origins: bad)
+        end
+      end
+    end
+
+    test "a list mixing in a Regex is rejected rather than silently never matching" do
+      # List entries are compared with `in`, so a Regex inside a list could
+      # never match any origin.
+      assert_raise ArgumentError, ~r/single Regex/, fn ->
+        StreamableHTTP.init(
+          server_module: TestServer,
+          allowed_origins: ["https://a.example", ~r/\Ahttps:\/\/b\.example\z/]
+        )
+      end
+    end
+
+    test "every documented :allowed_origins shape is accepted" do
+      for good <- [
+            nil,
+            "*",
+            "https://a.example",
+            [],
+            ["https://a.example"],
+            ~r/\Ahttps:\/\/a\.example\z/
+          ] do
+        assert StreamableHTTP.init(server_module: TestServer, allowed_origins: good)
+      end
+    end
+
+    test "a :session that is neither off nor a keyword list is a boot-time error" do
+      # Only a keyword list turns sessions on, so `session: true` used to mean
+      # "no sessions" - and no `require_session` - without any signal.
+      for bad <- [true, %{store: ConduitMcp.Session.EtsStore}, :ets, [:store]] do
+        assert_raise ArgumentError, ~r/session: \[\]/, fn ->
+          StreamableHTTP.init(server_module: TestServer, session: bad)
+        end
+      end
+    end
+
+    test "every documented :session shape is accepted" do
+      for good <- [nil, false, [], [store: ConduitMcp.Session.EtsStore, require_session: true]] do
+        assert StreamableHTTP.init(server_module: TestServer, session: good)
+      end
+    end
+  end
+
+  describe "sessions are opt-in" do
+    setup do
+      ConduitMcp.Session.EtsStore.ensure_table()
+      :ok
+    end
+
+    test "without :session, initialize creates no session" do
+      body =
+        JSON.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "initialize",
+          "params" => %{"protocolVersion" => "2025-06-18", "capabilities" => %{}}
+        })
+
+      before = :ets.info(:conduit_mcp_sessions, :size)
+
+      conn =
+        conn(:post, "/", body)
+        |> put_req_header("content-type", "application/json")
+        |> StreamableHTTP.call(@opts)
+
+      assert conn.status == 200
+      assert get_resp_header(conn, "mcp-session-id") == []
+      # `<=`, not `==`: the session Janitor may sweep expired rows between the
+      # two reads.
+      assert :ets.info(:conduit_mcp_sessions, :size) <= before
+    end
+
+    test "session: [] turns sessions on with the default store" do
+      opts = StreamableHTTP.init(server_module: TestServer, session: [])
+
+      conn =
+        conn(:post, "/", initialize_request_body())
+        |> put_req_header("content-type", "application/json")
+        |> StreamableHTTP.call(opts)
+
+      assert conn.status == 200
+      assert [session_id] = get_resp_header(conn, "mcp-session-id")
+      assert {:ok, _} = ConduitMcp.Session.get(session_id, ConduitMcp.Session.EtsStore)
     end
   end
 

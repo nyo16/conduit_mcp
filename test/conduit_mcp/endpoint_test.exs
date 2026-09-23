@@ -586,6 +586,62 @@ defmodule ConduitMcp.EndpointTest do
       end
     end
 
+    test "raises for duplicate prompt names" do
+      assert_raise CompileError, ~r/duplicate prompt name/, fn ->
+        defmodule DuplicatePromptEndpoint do
+          use ConduitMcp.Endpoint, name: "bad", version: "1"
+
+          component(CodeReviewPrompt)
+          component(CodeReviewPrompt)
+        end
+      end
+    end
+
+    # Differently named components, so only the URI collides.
+    defmodule OtherReadmeResource do
+      use ConduitMcp.Component,
+        type: :resource,
+        uri: "static://readme",
+        description: "A second readme",
+        scope: "readme:read"
+
+      @impl true
+      def execute(_params, _conn), do: {:ok, %{"contents" => []}}
+    end
+
+    defmodule OtherUserResource do
+      use ConduitMcp.Component,
+        type: :resource,
+        uri: "user://{id}",
+        description: "A second user resource",
+        scope: "user:read"
+
+      @impl true
+      def execute(_params, _conn), do: {:ok, %{"contents" => []}}
+    end
+
+    test "raises for a static resource URI declared by two components" do
+      assert_raise CompileError, ~r/duplicate resource URI "static:\/\/readme"/, fn ->
+        defmodule DuplicateStaticUriEndpoint do
+          use ConduitMcp.Endpoint, name: "bad", version: "1"
+
+          component(ReadmeResource)
+          component(OtherReadmeResource)
+        end
+      end
+    end
+
+    test "raises for a resource template declared by two components" do
+      assert_raise CompileError, ~r/duplicate resource URI "user:\/\/\{id\}"/, fn ->
+        defmodule DuplicateTemplateEndpoint do
+          use ConduitMcp.Endpoint, name: "bad", version: "1"
+
+          component(UserResource)
+          component(OtherUserResource)
+        end
+      end
+    end
+
     test "raises for invalid component module" do
       assert_raise CompileError, ~r/not a valid ConduitMcp.Component/, fn ->
         defmodule BadComponentEndpoint do

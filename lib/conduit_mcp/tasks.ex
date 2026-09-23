@@ -62,8 +62,8 @@ defmodule ConduitMcp.Tasks do
 
   Pass `owner` (typically `owner(conn)`) to stamp the task with a principal so
   it can be owner-scoped via `get/2`, `cancel/2`, and `list/2`. When `owner` is
-  `nil` (the default) the task is left unowned and readable by anyone, which
-  preserves back-compatibility for apps that don't use scoping.
+  `nil` (the default) the task is left unowned: every caller may see it, unless
+  `:tasks_require_owner` is set, in which case no caller may (see `get/2`).
 
   The owner is stored under the top-level `"owner"` key of the task metadata —
   see the "Owner scoping" section of `ConduitMcp.Tasks.Store`.
@@ -91,11 +91,10 @@ defmodule ConduitMcp.Tasks do
   | `Y` | `Y` | allow | allow |
   | `Y` | `X` | deny | deny |
 
-  The `Y`/`nil` row is the fix: a `nil` caller used to match *everything*,
-  which made authorization default-open — an unauthenticated request read any
-  principal's task. Set `config :conduit_mcp, :tasks_require_owner, true` to
-  also refuse unowned tasks, which is the right posture once every creation
-  site stamps an owner.
+  The `Y`/`nil` row keeps authorization default-closed: an unauthenticated
+  request never reads a principal's task. Set
+  `config :conduit_mcp, :tasks_require_owner, true` to also refuse unowned
+  tasks, which is the right posture once every creation site stamps an owner.
 
   See the "Owner scoping" section of `ConduitMcp.Tasks.Store`.
   """
@@ -160,20 +159,26 @@ defmodule ConduitMcp.Tasks do
   The owner is pushed into the store query rather than applied afterwards, so
   a store can express it as a predicate (the default `EtsStore` compiles all
   three options into one `:ets.select/3` match spec). The facade re-checks the
-  returned rows: a custom store that ignores `:owner` must not turn into a
-  silent authorization bypass.
+  returned rows and then applies `:limit` itself: a custom store that ignores
+  `:owner` must not turn into a silent authorization bypass, nor return more
+  than `:limit` rows. Such a store must ignore `:limit` too, or it truncates the
+  caller's own rows before the re-check (see `c:ConduitMcp.Tasks.Store.list/1`).
 
-  Returns the caller's own tasks plus unowned ones. A `nil` `owner` (no
-  principal) sees **only** unowned tasks — it no longer matches everything.
-  Set `config :conduit_mcp, :tasks_require_owner, true` to make unowned tasks
-  inaccessible too. See `get/2` for the full matrix.
+  Returns the caller's own tasks plus unowned ones. `nil` = no principal: sees
+  only unowned tasks; nothing under `:tasks_require_owner` (see `get/2`).
   """
   def list(opts, owner) do
     opts
     |> Keyword.put(:owner, owner)
     |> store().list()
     |> Enum.filter(&authorized?(&1, owner))
+    |> take_limit(Keyword.get(opts, :limit))
   end
+
+  # Same `:limit` semantics as `ConduitMcp.Tasks.EtsStore.list/1`.
+  defp take_limit(rows, limit) when is_integer(limit) and limit > 0, do: Enum.take(rows, limit)
+  defp take_limit(rows, limit) when limit in [nil, :infinity], do: rows
+  defp take_limit(_rows, _non_positive), do: []
 
   @doc """
   Extracts the owner principal from a `Plug.Conn` (or conn-like map).
@@ -182,11 +187,12 @@ defmodule ConduitMcp.Tasks do
   (`config :conduit_mcp, :task_owner_fun`), which defaults to
   `ConduitMcp.Principal.id/1` — the stable scalar identity assigned by both
   auth plugs. Returns `nil` for `nil`/non-conn input or when no principal is
-  present; `nil` means "no scoping" throughout this module.
+  present. `nil` = no principal: sees only unowned tasks; nothing under
+  `:tasks_require_owner` (see `get/2`).
 
   > #### Return a stable scalar {: .warning}
   >
-  > Ownership is checked by **exact match** (`==`), so a custom extractor must
+  > Ownership is checked by **exact match** (`===`), so a custom extractor must
   > return a stable, comparable identity — the user's `sub`/`id` scalar, never
   > a struct or claims map. A term carrying any per-request volatile field
   > (`exp`, `iat`, `jti`) fails to match its own tasks on the next request, so

@@ -3,6 +3,8 @@ defmodule ConduitMcp.OAuth.KeyProvider.JWKSTest do
   # through Req.Test stubs, and a shared named ETS cache table.
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias ConduitMcp.OAuth.KeyProvider.JWKS
 
   @table :conduit_mcp_jwks_cache
@@ -76,40 +78,44 @@ defmodule ConduitMcp.OAuth.KeyProvider.JWKSTest do
              JWKS.fetch_keys(jwks_uri: "https://auth.example.com/jwks-redirect")
   end
 
-  test "rejects oversized responses while streaming, not after buffering" do
-    # 8 MB: the cap must halt the stream, not guard an already-buffered body.
-    huge = String.duplicate("a", 8 * 1_048_576)
-
-    Req.Test.stub(__MODULE__, fn conn -> Plug.Conn.send_resp(conn, 200, huge) end)
-
-    assert {:error, :jwks_too_large} =
-             JWKS.fetch_keys(jwks_uri: "https://auth.example.com/jwks-huge")
-
-    # Just past the cap is rejected too — the boundary, not only the extreme.
+  test "rejects a response body past the 1 MB cap and accepts one at it" do
+    # Req.Test hands the collector the whole body as a single chunk, so this
+    # pins the cap's boundary, not incremental streaming.
     Req.Test.stub(__MODULE__, fn conn ->
       Plug.Conn.send_resp(conn, 200, String.duplicate("a", 1_048_577))
     end)
 
     assert {:error, :jwks_too_large} =
              JWKS.fetch_keys(jwks_uri: "https://auth.example.com/jwks-huge-boundary")
+
+    # Exactly at the cap passes the size check and fails only on parsing.
+    Req.Test.stub(__MODULE__, fn conn ->
+      Plug.Conn.send_resp(conn, 200, String.duplicate("a", 1_048_576))
+    end)
+
+    assert {:error, :invalid_jwks} =
+             JWKS.fetch_keys(jwks_uri: "https://auth.example.com/jwks-at-cap")
   end
 
-  test "never decompresses a response body, so a compression bomb cannot expand" do
-    # A few KB of gzip that inflates to 64 MB. The provider asks for no
-    # compression and never inflates, so this can only ever fail to parse —
-    # it must never be accepted, and must never be expanded in memory.
-    bomb = :zlib.gzip(String.duplicate("a", 64 * 1_048_576))
-    assert byte_size(bomb) < 1_048_576
+  test "never decompresses a response body, even a valid gzipped key set" do
+    # A valid key set, so the only way this can fail to parse is that the
+    # provider left the gzip bytes alone. Decompressing it would return keys.
+    #
+    # Req's `decompress_body` step skips when the request streams through
+    # `into:`, and also when `compressed: false` is set. Either guard alone
+    # keeps these bytes intact, so this fails only if `do_fetch/1` drops both
+    # the `into:` collector and `compressed: false`.
+    gzipped = :zlib.gzip(JSON.encode!(%{"keys" => @keys}))
 
     Req.Test.stub(__MODULE__, fn conn ->
       conn
       |> Plug.Conn.put_resp_header("content-encoding", "gzip")
       |> Plug.Conn.put_resp_content_type("application/json")
-      |> Plug.Conn.send_resp(200, bomb)
+      |> Plug.Conn.send_resp(200, gzipped)
     end)
 
     assert {:error, :invalid_jwks} =
-             JWKS.fetch_keys(jwks_uri: "https://auth.example.com/jwks-bomb")
+             JWKS.fetch_keys(jwks_uri: "https://auth.example.com/jwks-gzip")
   end
 
   test "rejects non-HTTP URI schemes" do
@@ -137,9 +143,16 @@ defmodule ConduitMcp.OAuth.KeyProvider.JWKSTest do
     [{^uri, keys, _at}] = :ets.lookup(@table, uri)
     :ets.insert(@table, {uri, keys, System.system_time(:millisecond) - 5_000})
 
-    Req.Test.stub(__MODULE__, fn conn -> Req.Test.transport_error(conn, :econnrefused) end)
+    parent = self()
 
-    assert {:ok, @keys} = JWKS.fetch_keys(jwks_uri: uri, cache_ttl: 1)
+    Req.Test.stub(__MODULE__, fn conn ->
+      send(parent, :outbound_fetch)
+      Req.Test.transport_error(conn, :econnrefused)
+    end)
+
+    assert {:ok, @keys} = JWKS.fetch_keys(jwks_uri: uri, cache_ttl: 1, refresh_cooldown: 0)
+    # The keys came from a failed refresh, not from a cache read that skipped it.
+    assert_received :outbound_fetch
   end
 
   test "a transport error fails closed when the cache is cold" do
@@ -170,9 +183,15 @@ defmodule ConduitMcp.OAuth.KeyProvider.JWKSTest do
     # then make the endpoint fail
     [{^uri, keys, _cached_at}] = :ets.lookup(@table, uri)
     :ets.insert(@table, {uri, keys, System.system_time(:millisecond) - 60_000})
-    stub_json(500, %{"error" => "down"})
+    parent = self()
 
-    assert {:ok, @keys} = JWKS.fetch_keys(jwks_uri: uri, cache_ttl: 1)
+    Req.Test.stub(__MODULE__, fn conn ->
+      send(parent, :outbound_fetch)
+      Plug.Conn.send_resp(conn, 500, JSON.encode!(%{"error" => "down"}))
+    end)
+
+    assert {:ok, @keys} = JWKS.fetch_keys(jwks_uri: uri, cache_ttl: 1, refresh_cooldown: 0)
+    assert_received :outbound_fetch
   end
 
   test "fails closed when stale cached keys exceed :stale_max_age" do
@@ -185,7 +204,12 @@ defmodule ConduitMcp.OAuth.KeyProvider.JWKSTest do
     stub_json(500, %{"error" => "down"})
 
     assert {:error, {:http_error, 500}} =
-             JWKS.fetch_keys(jwks_uri: uri, cache_ttl: 1, stale_max_age: 1_000)
+             JWKS.fetch_keys(
+               jwks_uri: uri,
+               cache_ttl: 1,
+               stale_max_age: 1_000,
+               refresh_cooldown: 0
+             )
   end
 
   test "fails when refresh fails and no cached keys exist" do
@@ -216,9 +240,11 @@ defmodule ConduitMcp.OAuth.KeyProvider.JWKSTest do
     stub_json(200, %{"keys" => @keys})
     assert {:ok, @keys} = JWKS.fetch_keys(jwks_uri: uri)
 
-    # Age the row well past :stale_max_age.
+    # Age the row well past :stale_max_age, and clear the cooldown the warm-up
+    # fetch started so the first task really fetches.
     [{^uri, keys, _at}] = :ets.lookup(@table, uri)
     :ets.insert(@table, {uri, keys, System.system_time(:millisecond) - 60_000})
+    :ets.delete(@table, {:last_refresh, uri})
 
     parent = self()
 
@@ -229,7 +255,10 @@ defmodule ConduitMcp.OAuth.KeyProvider.JWKSTest do
       Req.Test.transport_error(conn, :econnrefused)
     end)
 
-    config = [jwks_uri: uri, cache_ttl: 1, stale_max_age: 1_000]
+    # `refresh_cooldown: 0`: a task that ran only after the winner released
+    # the lock would then fetch again and trip `refute_received` below, so
+    # the assertion proves the other tasks were waiters, not serialised.
+    config = [jwks_uri: uri, cache_ttl: 1, stale_max_age: 1_000, refresh_cooldown: 0]
 
     results =
       1..4
@@ -241,6 +270,8 @@ defmodule ConduitMcp.OAuth.KeyProvider.JWKSTest do
       |> Enum.map(fn {:ok, result} -> result end)
 
     assert_receive :outbound_fetch
+    # The other three waited on the lock rather than fetching themselves.
+    refute_received :outbound_fetch
 
     # Winner and waiters must agree: nobody gets the over-age keys.
     refute Enum.any?(results, &match?({:ok, _}, &1)),
@@ -266,6 +297,180 @@ defmodule ConduitMcp.OAuth.KeyProvider.JWKSTest do
 
     # And the cooldown path must not extend the TTL of the cached row.
     assert [{^uri, @keys, ^cached_at}] = :ets.lookup(@table, uri)
+  end
+
+  test "an invented kid inside the cooldown window logs no warning" do
+    uri = "https://auth.example.com/jwks-cooldown-log"
+    stub_json(200, %{"keys" => @keys})
+    assert {:ok, @keys} = JWKS.fetch_keys(jwks_uri: uri)
+
+    Req.Test.stub(__MODULE__, fn _conn -> raise "must not refetch inside the cooldown" end)
+
+    log =
+      capture_log(fn ->
+        assert {:error, :not_found} =
+                 JWKS.fetch_key("invented", jwks_uri: uri, refresh_cooldown: 60_000)
+      end)
+
+    # No refresh was attempted, so nothing failed.
+    refute log =~ "[warning]"
+  end
+
+  test "past :stale_max_age inside the cooldown fails closed without logging a failed refresh" do
+    uri = "https://auth.example.com/jwks-cooldown-too-stale"
+    stub_json(200, %{"keys" => @keys})
+    assert {:ok, @keys} = JWKS.fetch_keys(jwks_uri: uri)
+
+    # The warm-up fetch started the cooldown; age the row past :stale_max_age.
+    [{^uri, keys, _at}] = :ets.lookup(@table, uri)
+    :ets.insert(@table, {uri, keys, System.system_time(:millisecond) - 60_000})
+
+    Req.Test.stub(__MODULE__, fn _conn -> raise "must not refetch inside the cooldown" end)
+
+    config = [jwks_uri: uri, cache_ttl: 1, stale_max_age: 1_000, refresh_cooldown: 60_000]
+
+    log = capture_log(fn -> assert {:error, :refresh_cooldown} = JWKS.fetch_keys(config) end)
+
+    # No refresh was attempted, so none failed: one `[error]` line per
+    # unauthenticated request would otherwise flood the log for the window.
+    refute log =~ "[error]"
+    refute log =~ "refresh failed"
+  end
+
+  test "a lapsed TTL with a failing IdP fetches once per cooldown, serving stale keys" do
+    # `authenticate` runs before `rate_limit`, so without the cooldown every
+    # request after the TTL lapses is one outbound fetch to a failing IdP.
+    uri = "https://auth.example.com/jwks-expired-failing"
+    stub_json(200, %{"keys" => @keys})
+    assert {:ok, @keys} = JWKS.fetch_keys(jwks_uri: uri)
+
+    [{^uri, keys, _at}] = :ets.lookup(@table, uri)
+    :ets.insert(@table, {uri, keys, System.system_time(:millisecond) - 60_000})
+    :ets.delete(@table, {:last_refresh, uri})
+
+    fetches = :counters.new(1, [])
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      :counters.add(fetches, 1, 1)
+      Plug.Conn.send_resp(conn, 503, "")
+    end)
+
+    config = [jwks_uri: uri, cache_ttl: 1, refresh_cooldown: 60_000]
+
+    for _ <- 1..50 do
+      assert {:ok, @keys} = JWKS.fetch_keys(config)
+    end
+
+    assert :counters.get(fetches, 1) == 1
+
+    # The cooldown serves through `:stale_max_age`, not around it.
+    assert {:error, _} = JWKS.fetch_keys(Keyword.put(config, :stale_max_age, 1_000))
+    assert :counters.get(fetches, 1) == 1
+  end
+
+  test "a cold cache with a failing IdP fetches once per cooldown" do
+    # Nothing is cached to serve, so without the cooldown every well-formed
+    # JWT drives another outbound fetch at the failing IdP, back to back.
+    uri = "https://auth.example.com/jwks-cold-cooldown"
+    fetches = :counters.new(1, [])
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      :counters.add(fetches, 1, 1)
+      Plug.Conn.send_resp(conn, 503, "")
+    end)
+
+    config = [jwks_uri: uri, refresh_cooldown: 60_000]
+
+    # The first-ever fetch has no cooldown to honour.
+    assert {:error, {:http_error, 503}} = JWKS.fetch_keys(config)
+
+    for _ <- 1..10 do
+      assert {:error, :refresh_cooldown} = JWKS.fetch_keys(config)
+    end
+
+    assert :counters.get(fetches, 1) == 1
+
+    # Once the cooldown has passed, the provider fetches again and recovers.
+    stub_json(200, %{"keys" => @keys})
+    assert {:ok, @keys} = JWKS.fetch_keys(Keyword.put(config, :refresh_cooldown, 0))
+  end
+
+  test "a request arriving mid-refresh waits for the new keys instead of serving stale" do
+    # The winner records `:last_refresh` before it fetches, so a cooldown
+    # check ahead of the lock check would hand this request the old key set.
+    uri = "https://auth.example.com/jwks-mid-refresh"
+    stub_json(200, %{"keys" => @keys})
+    assert {:ok, @keys} = JWKS.fetch_keys(jwks_uri: uri)
+
+    [{^uri, keys, _at}] = :ets.lookup(@table, uri)
+    :ets.insert(@table, {uri, keys, System.system_time(:millisecond) - 60_000})
+    :ets.delete(@table, {:last_refresh, uri})
+
+    rotated = [%{"kty" => "RSA", "kid" => "key-2", "n" => "def", "e" => "AQAB"}]
+    parent = self()
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      send(parent, {:fetching, self()})
+
+      receive do
+        :publish -> :ok
+      end
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(200, JSON.encode!(%{"keys" => rotated}))
+    end)
+
+    config = [jwks_uri: uri, cache_ttl: 5_000]
+    winner = Task.async(fn -> JWKS.fetch_keys(config) end)
+    assert_receive {:fetching, fetcher}
+
+    # Lock held, `:last_refresh` recorded, nothing published yet.
+    late = Task.async(fn -> JWKS.fetch_keys(config) end)
+    assert Task.yield(late, 100) == nil
+
+    send(fetcher, :publish)
+    assert {:ok, ^rotated} = Task.await(winner)
+    assert {:ok, ^rotated} = Task.await(late)
+  end
+
+  test "an unknown kid arriving mid-refresh waits for the new keys" do
+    # The winner records `:last_refresh` before it fetches, so a cooldown
+    # check ahead of the lock check would answer this kid from the old key
+    # set — a 401 for every new-kid token that lands mid-rotation.
+    uri = "https://auth.example.com/jwks-kid-mid-refresh"
+    stub_json(200, %{"keys" => @keys})
+    assert {:ok, @keys} = JWKS.fetch_keys(jwks_uri: uri)
+    :ets.delete(@table, {:last_refresh, uri})
+
+    rotated = [%{"kty" => "RSA", "kid" => "key-2", "n" => "def", "e" => "AQAB"}]
+    parent = self()
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      send(parent, {:fetching, self()})
+
+      receive do
+        :publish -> :ok
+      end
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(200, JSON.encode!(%{"keys" => rotated}))
+    end)
+
+    # The cached key-1 set is inside its TTL, so both calls reach
+    # `refresh_keys/1` through the unknown kid.
+    config = [jwks_uri: uri, refresh_cooldown: 60_000]
+    winner = Task.async(fn -> JWKS.fetch_key("key-2", config) end)
+    assert_receive {:fetching, fetcher}
+
+    # Lock held, `:last_refresh` recorded, nothing published yet.
+    late = Task.async(fn -> JWKS.fetch_key("key-2", config) end)
+    assert Task.yield(late, 100) == nil
+
+    send(fetcher, :publish)
+    assert {:ok, %{"kid" => "key-2"}} = Task.await(winner)
+    assert {:ok, %{"kid" => "key-2"}} = Task.await(late)
   end
 
   test "concurrent cold-cache requests produce exactly one outbound fetch" do
@@ -321,7 +526,7 @@ defmodule ConduitMcp.OAuth.KeyProvider.JWKSTest do
     fresh = [%{"kty" => "RSA", "kid" => "key-fresh", "n" => "ghi", "e" => "AQAB"}]
     stub_json(200, %{"keys" => fresh})
 
-    assert {:ok, ^fresh} = JWKS.fetch_keys(jwks_uri: uri, cache_ttl: 1)
+    assert {:ok, ^fresh} = JWKS.fetch_keys(jwks_uri: uri, cache_ttl: 1, refresh_cooldown: 0)
   end
 
   test "concurrent fetch_keys on one URI is race-safe (ETS cache-write/ensure_table)" do

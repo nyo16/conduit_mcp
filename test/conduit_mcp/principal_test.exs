@@ -4,6 +4,8 @@ defmodule ConduitMcp.PrincipalTest do
   # tests were extracted out of handler_test.exs, which no longer touches it.)
   use ExUnit.Case, async: false
 
+  doctest ConduitMcp.Principal
+
   import Plug.Test
   import Plug.Conn
 
@@ -92,8 +94,11 @@ defmodule ConduitMcp.PrincipalTest do
 
       assert is_binary(id_a)
       assert id_a == id_b
-      # The credential must not be echoed back in the identity.
+      # The credential must not be echoed back in the identity. The exact
+      # value is the documented format, and persisted task owners depend on
+      # it staying stable across releases.
       refute id_a =~ "shared-secret"
+      assert id_a == "static:0wRuzI3TJCrfYoAa"
     end
 
     test ":principal_id overrides the derived id" do
@@ -123,6 +128,27 @@ defmodule ConduitMcp.PrincipalTest do
       assert Principal.id(conn) == "42"
       assert Principal.scopes(conn) == ["read"]
       assert Principal.get(conn).user == %{id: "42", scopes: ["read"]}
+    end
+
+    test "verifiers returning a bare boolean get per-credential ids, not one shared id" do
+      # `{:ok, true}` is a common "credential is valid" verifier. `true` is an
+      # atom, so it used to derive the id "true" for every caller — merging all
+      # of them into one principal that shared tasks and a rate-limit bucket.
+      # With no identity in the return value, the credential digest decides.
+      opts = Auth.init(strategy: :function, verify: fn _token -> {:ok, true} end)
+
+      id_for = fn token ->
+        conn(:post, "/")
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> Auth.call(opts)
+        |> Principal.id()
+      end
+
+      alice = id_for.("alice-token")
+
+      assert is_binary(alice)
+      refute alice == id_for.("bob-token")
+      assert alice == id_for.("alice-token")
     end
 
     test "an unauthenticated conn has no principal" do
@@ -227,6 +253,15 @@ defmodule ConduitMcp.PrincipalTest do
         assert is_binary(Principal.rate_limit_key(conn))
       end
     end
+
+    test "a principal assigned without put/2 never yields a non-string id" do
+      for id <- [123, :svc, %{}, self()] do
+        conn = Plug.Conn.assign(conn(:post, "/"), Principal.assign_key(), %{id: id})
+
+        assert Principal.id(conn) == nil
+        assert Principal.rate_limit_key(conn) == "127.0.0.1"
+      end
+    end
   end
 
   describe "derive_id/1 namespacing" do
@@ -254,8 +289,7 @@ defmodule ConduitMcp.PrincipalTest do
       assert is_binary(client)
       refute user == client
 
-      assert user =~ "User"
-      assert user =~ "42"
+      assert user == "ConduitMcp.PrincipalTest.User:42"
     end
 
     test "a struct with no scalar identity still derives nil" do
@@ -284,6 +318,48 @@ defmodule ConduitMcp.PrincipalTest do
     end
   end
 
+  describe "client_bucket/1" do
+    test "an IPv4 address is its own bucket" do
+      assert Principal.client_bucket(%{remote_ip: {192, 0, 2, 7}}) == "192.0.2.7"
+    end
+
+    test "an IPv6 address buckets by its /64 prefix" do
+      assert Principal.client_bucket(%{remote_ip: {0, 0, 0, 0, 0, 0, 0, 1}}) == "::/64"
+
+      assert Principal.client_bucket(%{remote_ip: {0x2001, 0xDB8, 1, 2, 3, 4, 5, 6}}) ==
+               "2001:db8:1:2::/64"
+    end
+
+    test "addresses in the same /64 share a bucket; different /64s do not" do
+      a = Principal.client_bucket(%{remote_ip: {0x2001, 0xDB8, 1, 2, 0, 0, 0, 1}})
+      b = Principal.client_bucket(%{remote_ip: {0x2001, 0xDB8, 1, 2, 0xFFFF, 1, 2, 3}})
+      other = Principal.client_bucket(%{remote_ip: {0x2001, 0xDB8, 1, 3, 0, 0, 0, 1}})
+
+      assert a == b
+      refute a == other
+    end
+
+    test "an IPv4-mapped IPv6 address unwraps to the embedded IPv4 address" do
+      assert Principal.client_bucket(%{remote_ip: {0, 0, 0, 0, 0, 0xFFFF, 0xC000, 0x0201}}) ==
+               "192.0.2.1"
+    end
+
+    test "returns \"unknown\" for a malformed remote_ip" do
+      assert Principal.client_bucket(%{remote_ip: {1, 2, 3}}) == "unknown"
+      assert Principal.client_bucket(%{remote_ip: {0, 0, 0, 0, 0, 0, 0, 70_000}}) == "unknown"
+      assert Principal.client_bucket(%{remote_ip: {256, 0, 0, 1}}) == "unknown"
+      assert Principal.client_bucket(%{remote_ip: nil}) == "unknown"
+      assert Principal.client_bucket(%{}) == "unknown"
+    end
+
+    test "rate_limit_key/1 gives two anonymous callers in one /64 the same key" do
+      a = Map.put(conn(:post, "/"), :remote_ip, {0x2001, 0xDB8, 7, 8, 0, 0, 0, 1})
+      b = Map.put(conn(:post, "/"), :remote_ip, {0x2001, 0xDB8, 7, 8, 9, 9, 9, 9})
+
+      assert Principal.rate_limit_key(a) == Principal.rate_limit_key(b)
+    end
+  end
+
   describe "derive_id/1" do
     test "prefers id, then sub, in atom then string form" do
       assert Principal.derive_id(%{id: "a"}) == "a"
@@ -299,6 +375,14 @@ defmodule ConduitMcp.PrincipalTest do
       assert Principal.derive_id(%{authenticated: true}) == nil
       assert Principal.derive_id(%{id: %{nested: true}}) == nil
       assert Principal.derive_id(nil) == nil
+    end
+
+    test "status atoms are not identities" do
+      # A verifier's success marker says nothing about who the caller is.
+      for status <- [true, false, :ok] do
+        assert Principal.derive_id(status) == nil
+        assert Principal.derive_id(%{id: status}) == nil
+      end
     end
   end
 end

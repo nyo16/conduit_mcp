@@ -5,8 +5,9 @@ defmodule ConduitMcp.CancellationTest do
   alias ConduitMcp.Principal
 
   setup do
-    if :ets.whereis(:conduit_mcp_cancellations) != :undefined do
-      :ets.delete_all_objects(:conduit_mcp_cancellations)
+    for table <- [:conduit_mcp_cancellations, :conduit_mcp_in_flight],
+        :ets.whereis(table) != :undefined do
+      :ets.delete_all_objects(table)
     end
 
     previous = Application.get_env(:conduit_mcp, :cancellations_max_rows)
@@ -22,6 +23,19 @@ defmodule ConduitMcp.CancellationTest do
 
   defp restore(key, nil), do: Application.delete_env(:conduit_mcp, key)
   defp restore(key, value), do: Application.put_env(:conduit_mcp, key, value)
+
+  defp seed(scope, id, cancelled_at) do
+    :ets.insert(
+      :conduit_mcp_cancellations,
+      {{scope, id}, %{"reason" => nil, "cancelled_at" => cancelled_at}}
+    )
+  end
+
+  defp table_size, do: :ets.info(:conduit_mcp_cancellations, :size)
+
+  defp scope_count(scope) do
+    :ets.select_count(:conduit_mcp_cancellations, [{{{scope, :_}, :_}, [], [true]}])
+  end
 
   defp client_conn(scope_opts) do
     %Plug.Conn{}
@@ -49,10 +63,33 @@ defmodule ConduitMcp.CancellationTest do
   describe "scope/1" do
     test "prefers the session id, then the principal, then the client IP" do
       assert Cancellation.scope(client_conn(session_id: "sess-1", principal: "user-1")) ==
-               "sess-1"
+               "session:sess-1"
 
-      assert Cancellation.scope(client_conn(principal: "user-1")) == "user-1"
-      assert Cancellation.scope(client_conn(remote_ip: {203, 0, 113, 9})) == "203.0.113.9"
+      assert Cancellation.scope(client_conn(principal: "user-1")) == "principal:user-1"
+      assert Cancellation.scope(client_conn(remote_ip: {203, 0, 113, 9})) == "ip:203.0.113.9"
+    end
+
+    test "a principal id that bypassed Principal.put/2 falls back to the client IP" do
+      # `Principal.put/2` normalises ids to strings, but a custom plug can
+      # assign the principal map directly. `scope/1` runs in the handler's
+      # `after` block, so raising here turned every such request into a 500.
+      for id <- [123, %{"nested" => "x"}, :atom_id] do
+        conn =
+          client_conn(remote_ip: {203, 0, 113, 9})
+          |> Plug.Conn.assign(Principal.assign_key(), %{id: id})
+
+        assert Cancellation.scope(conn) == "ip:203.0.113.9"
+      end
+    end
+
+    test "an anonymous IPv6 client is scoped to its /64, not its address" do
+      # A host is routinely handed a whole /64 and can rotate through it at
+      # will, so a per-address scope would multiply the per-scope quota.
+      a = client_conn(remote_ip: {0x2001, 0xDB8, 1, 2, 0xA, 0xB, 0xC, 0xD})
+      b = client_conn(remote_ip: {0x2001, 0xDB8, 1, 2, 0xFFFF, 0, 0, 1})
+
+      assert Cancellation.scope(a) == "ip:2001:db8:1:2::/64"
+      assert Cancellation.scope(b) == Cancellation.scope(a)
     end
 
     test "falls back to a constant for a non-conn" do
@@ -84,6 +121,18 @@ defmodule ConduitMcp.CancellationTest do
       assert {:error, :invalid_request_id} = Cancellation.cancel([1, 2], nil, "s")
       assert {:error, :invalid_request_id} = Cancellation.cancel(1.5, nil, "s")
       assert :ets.info(:conduit_mcp_cancellations, :size) == 0
+    end
+
+    test "rejects a string id longer than 256 bytes" do
+      at_cap = String.duplicate("a", 256)
+
+      assert :ok = Cancellation.cancel(at_cap, nil, "s")
+      assert {:error, :invalid_request_id} = Cancellation.cancel(at_cap <> "a", nil, "s")
+      # Bytes, not characters: 129 two-byte characters are 258 bytes.
+      assert {:error, :invalid_request_id} =
+               Cancellation.cancel(String.duplicate("é", 129), nil, "s")
+
+      assert table_size() == 1
     end
 
     test "truncates and strips control characters from the reason" do
@@ -120,6 +169,18 @@ defmodule ConduitMcp.CancellationTest do
 
       assert Cancellation.cancelled?(a)
       refute Cancellation.cancelled?(b)
+    end
+
+    test "a principal whose id equals a client IP does not share that IP's quota" do
+      Application.put_env(:conduit_mcp, :cancellations_max_rows_per_scope, 1)
+
+      principal = client_conn(principal: "203.0.113.9", request_id: "1")
+      anonymous = client_conn(remote_ip: {203, 0, 113, 9}, request_id: "1")
+
+      assert :ok = Cancellation.cancel("1", nil, Cancellation.scope(principal))
+      assert :ok = Cancellation.cancel("2", nil, Cancellation.scope(anonymous))
+
+      refute Cancellation.cancelled?(anonymous)
     end
 
     test "clear/2 only clears the caller's own row" do
@@ -208,18 +269,72 @@ defmodule ConduitMcp.CancellationTest do
                Cancellation.cancel("v-over", nil, "victim")
     end
 
-    test "reclaim evicts the largest scope, not the caller" do
-      Application.put_env(:conduit_mcp, :cancellations_max_rows, 40)
+    test "reclaim evicts the largest scope, not the caller or a bystander" do
+      # max 100 -> batch of 5. The bystander's rows are the oldest in the table,
+      # so an "evict the globally oldest batch" shortcut would take them.
+      Application.put_env(:conduit_mcp, :cancellations_max_rows, 100)
       Application.put_env(:conduit_mcp, :cancellations_max_rows_per_scope, :infinity)
+      now = System.system_time(:millisecond)
 
-      for i <- 1..40, do: Cancellation.cancel("hog-#{i}", nil, "hog")
-      assert :ets.info(:conduit_mcp_cancellations, :size) == 40
+      seed("bystander", "b-1", now - 10_000)
+      seed("bystander", "b-2", now - 9_999)
+      for i <- 1..98, do: seed("hog", "hog-#{i}", now - 5_000 + i)
+      assert table_size() == 100
 
       assert :ok = Cancellation.cancel("small-1", nil, "small")
 
-      # The small scope's row survives; the hog paid for it.
+      assert scope_count("bystander") == 2
       assert Cancellation.cancelled?("small-1", "small")
-      assert :ets.select_count(:conduit_mcp_cancellations, [{{{"hog", :_}, :_}, [], [true]}]) < 40
+      assert scope_count("hog") == 98 - 5
+      # Oldest first within the hog scope.
+      for i <- 1..5, do: refute(Cancellation.cancelled?("hog-#{i}", "hog"))
+      assert Cancellation.cancelled?("hog-6", "hog")
+    end
+
+    test "reclaim spills into the next-largest scope when the largest is smaller than a batch" do
+      # max 100 -> batch of 5. The largest scope holds only 4 rows, so the
+      # fifth comes from the next largest, oldest first, and the third largest
+      # is untouched. Rows get newer as scopes get larger, so an age-only
+      # eviction would take the 1-row scopes instead.
+      Application.put_env(:conduit_mcp, :cancellations_max_rows, 100)
+      Application.put_env(:conduit_mcp, :cancellations_max_rows_per_scope, :infinity)
+      now = System.system_time(:millisecond)
+
+      for i <- 1..91, do: seed("single-#{i}", "id", now - 10_000 + i)
+      for i <- 1..2, do: seed("small", "small-#{i}", now - 7_000 + i)
+      for i <- 1..3, do: seed("mid", "mid-#{i}", now - 5_000 + i)
+      for i <- 1..4, do: seed("big", "big-#{i}", now - 1_000 + i)
+      assert table_size() == 100
+
+      assert :ok = Cancellation.cancel("mine", nil, "caller")
+
+      assert table_size() == 100 - 5 + 1
+      assert scope_count("big") == 0
+      refute Cancellation.cancelled?("mid-1", "mid")
+      assert Cancellation.cancelled?("mid-2", "mid")
+      assert Cancellation.cancelled?("mid-3", "mid")
+      assert scope_count("small") == 2
+      for i <- 1..91, do: assert(Cancellation.cancelled?("id", "single-#{i}"))
+      assert Cancellation.cancelled?("mine", "caller")
+    end
+
+    test "reclaim frees a full batch when every scope holds one row" do
+      # Many 1-row scopes is the cheap flood (one `initialize` per scope).
+      # Evicting from one scope only would free a single row per full scan.
+      Application.put_env(:conduit_mcp, :cancellations_max_rows, 100)
+      Application.put_env(:conduit_mcp, :cancellations_max_rows_per_scope, :infinity)
+      now = System.system_time(:millisecond)
+
+      # Insert newest first so table (key) order disagrees with age order.
+      for i <- 100..1//-1, do: seed("scope-#{i}", "id", now - 1_000 + i)
+      assert table_size() == 100
+
+      assert :ok = Cancellation.cancel("mine", nil, "caller")
+
+      assert table_size() == 100 - 5 + 1
+      for i <- 1..5, do: refute(Cancellation.cancelled?("id", "scope-#{i}"))
+      for i <- 6..100, do: assert(Cancellation.cancelled?("id", "scope-#{i}"))
+      assert Cancellation.cancelled?("mine", "caller")
     end
   end
 
@@ -249,6 +364,52 @@ defmodule ConduitMcp.CancellationTest do
     end
   end
 
+  describe "track/2, untrack/2 and in_flight?/2" do
+    test "a tracked id is in flight in its own scope only" do
+      assert :ok = Cancellation.track(7, "a")
+
+      assert Cancellation.in_flight?(7, "a")
+      assert Cancellation.in_flight?("7", "a")
+      refute Cancellation.in_flight?(7, "b")
+      refute Cancellation.in_flight?(70, "a")
+
+      assert :ok = Cancellation.untrack(7, "a")
+      refute Cancellation.in_flight?(7, "a")
+    end
+
+    test "concurrent duplicates of one id each hold a row" do
+      # One request finishing must not make its still-running namesake
+      # uncancellable.
+      parent = self()
+
+      other =
+        spawn_link(fn ->
+          Cancellation.track("dup", "s")
+          send(parent, :tracked)
+
+          receive do
+            :done -> :ok
+          end
+        end)
+
+      assert_receive :tracked
+      assert :ok = Cancellation.track("dup", "s")
+      assert :ok = Cancellation.untrack("dup", "s")
+
+      assert Cancellation.in_flight?("dup", "s")
+      send(other, :done)
+    end
+
+    test "ignores nil and over-long ids" do
+      assert :ok = Cancellation.track(nil, "s")
+      assert :ok = Cancellation.track(String.duplicate("a", 257), "s")
+
+      assert :ets.info(:conduit_mcp_in_flight, :size) == 0
+      refute Cancellation.in_flight?(nil, "s")
+      assert :ok = Cancellation.untrack(nil, "s")
+    end
+  end
+
   describe "cleanup/1" do
     test "removes entries older than ttl_ms" do
       Cancellation.cancel("fresh", nil, "s")
@@ -266,6 +427,42 @@ defmodule ConduitMcp.CancellationTest do
       assert Cancellation.cancelled?("fresh", "s")
       refute Cancellation.cancelled?("stale", "s")
     end
+
+    test "removes in-flight rows whose process died without untracking" do
+      # A stream process killed before the handler's `after` ran leaves its
+      # row behind; the janitor's pass is the only thing that removes it.
+      handler_id = "in-flight-cleanup-#{System.unique_integer([:positive])}"
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      :telemetry.attach(
+        handler_id,
+        [:conduit_mcp, :cancellation, :cleanup],
+        fn _event, m, _md, parent -> send(parent, {:cleanup, m}) end,
+        self()
+      )
+
+      {pid, ref} = spawn_monitor(fn -> Cancellation.track("leaked", "s") end)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+      assert :ok = Cancellation.track("live", "s")
+      assert Cancellation.in_flight?("leaked", "s")
+
+      # The return value stays the count of expired cancellation rows.
+      assert Cancellation.cleanup(30_000) == 0
+      assert_receive {:cleanup, %{removed: 0, in_flight_removed: 1}}
+
+      refute Cancellation.in_flight?("leaked", "s")
+      assert Cancellation.in_flight?("live", "s")
+    end
+
+    test "sweeping a dead process's row keeps a live process tracking the same id" do
+      {pid, ref} = spawn_monitor(fn -> Cancellation.track("shared", "s") end)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+      assert :ok = Cancellation.track("shared", "s")
+
+      Cancellation.cleanup(30_000)
+
+      assert :ets.lookup(:conduit_mcp_in_flight, {"s", "shared"}) == [{{"s", "shared"}, self()}]
+    end
   end
 
   describe "supervision" do
@@ -276,6 +473,11 @@ defmodule ConduitMcp.CancellationTest do
     test "the table is owned by the supervised Owner" do
       assert :ets.info(:conduit_mcp_cancellations, :owner) ==
                Process.whereis(Cancellation.Owner)
+    end
+
+    test "the in-flight table is owned by the supervised InFlightOwner" do
+      assert :ets.info(:conduit_mcp_in_flight, :owner) ==
+               Process.whereis(Cancellation.InFlightOwner)
     end
   end
 

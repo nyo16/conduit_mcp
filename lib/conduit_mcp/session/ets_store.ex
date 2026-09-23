@@ -9,11 +9,11 @@ defmodule ConduitMcp.Session.EtsStore do
 
   ## Ownership
 
-  The table is owned by a long-lived `Agent` (`#{inspect(__MODULE__)}.Owner`)
-  started from `ConduitMcp.Application`, so it outlives the short-lived
-  Bandit request process that happens to touch it first. Without a supervised
-  owner the table died with its creating request and every session created
-  before that point was silently lost — `Session.get/2` returned
+  The table is owned by a long-lived `ConduitMcp.EtsOwner` process
+  (`#{inspect(__MODULE__)}.Owner`) started from `ConduitMcp.Application`, so it
+  outlives the short-lived Bandit request process that happens to touch it
+  first. A table owned by a request process would die with that request,
+  taking every session with it — `Session.get/2` would return
   `{:error, :not_found}` for a session id the client had just been handed.
 
   `ensure_table/0` remains as a fallback for embedding contexts where the
@@ -65,7 +65,7 @@ defmodule ConduitMcp.Session.EtsStore do
   @table_opts [:named_table, :public, :set, read_concurrency: true, write_concurrency: :auto]
 
   # Sessions are created by unauthenticated `initialize` requests. The table
-  # is now supervised and therefore immortal, so the cap is the only thing
+  # is supervised and therefore immortal, so the cap is the only thing
   # bounding it between janitor sweeps.
   @default_max_rows 100_000
 
@@ -183,13 +183,12 @@ defmodule ConduitMcp.Session.EtsStore do
 
     Started under `ConduitMcp.Supervisor` by `ConduitMcp.Application`. This is
     the same pattern used by `ConduitMcp.Tasks.EtsStore.Owner`,
-    `ConduitMcp.Cancellation.Owner` and
-    `ConduitMcp.OAuth.KeyProvider.JWKS.Owner`; sessions were the one ETS
-    subsystem missing it.
+    `ConduitMcp.Cancellation.Owner`, `ConduitMcp.Transport.SSE.Owner` and
+    `ConduitMcp.OAuth.KeyProvider.JWKS.Owner`.
 
-    The Agent deliberately holds no state and answers no calls — reads and
-    writes go directly to the `:public` table from the calling process. Do not
-    turn it into a `handle_call` gateway.
+    The `ConduitMcp.EtsOwner` process deliberately holds no state and answers
+    no calls — reads and writes go directly to the `:public` table from the
+    calling process. Do not turn it into a `handle_call` gateway.
     """
 
     # Not a GenServer itself: the process is a `ConduitMcp.EtsOwner`

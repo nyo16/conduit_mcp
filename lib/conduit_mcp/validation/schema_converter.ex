@@ -32,6 +32,13 @@ defmodule ConduitMcp.Validation.SchemaConverter do
   - `min_length: value` -> `min_length: value`
   - `max_length: value` -> `max_length: value`
   - `validator: function` -> `validator: function`
+  - `type_coercion: boolean` -> kept as a marker; overrides the global
+    `:type_coercion` setting of `ConduitMcp.Validation` for this param (and the
+    fields of an object param)
+  - `additional_properties: boolean` -> kept as a marker; see Nested Objects
+
+  Any other option, or a recognised option with a value of the wrong shape
+  (`min: "5"`), raises `ArgumentError` when the tool is compiled.
 
   ## Nested Objects
 
@@ -189,11 +196,10 @@ defmodule ConduitMcp.Validation.SchemaConverter do
     [{:validator, validator_fn} | acc]
   end
 
-  # Type coercion options
-  defp convert_validation_opt({:type_coercion, true}, acc) do
-    # NimbleOptions doesn't have explicit type coercion flag
-    # We handle this in the validation module
-    acc
+  # Per-param override of the global `:type_coercion` setting. Consumed by
+  # `ConduitMcp.Validation`, stripped before the schema reaches NimbleOptions.
+  defp convert_validation_opt({:type_coercion, value}, acc) when is_boolean(value) do
+    [{:type_coercion, value} | acc]
   end
 
   # Selects between strict and pass-through semantics for an object's
@@ -206,18 +212,31 @@ defmodule ConduitMcp.Validation.SchemaConverter do
   # A silently dropped constraint is a security control that vanished:
   # `field(:name, :string, min_lenght: 3)` used to emit a compile-time warning
   # and validate *nothing*. Warnings scroll past; this does not.
-  @recognised_validation_opts [
-    :required,
-    :enum,
-    :default,
-    :min,
-    :max,
-    :min_length,
-    :max_length,
-    :validator,
-    :type_coercion,
-    :additional_properties
-  ]
+  #
+  # Every clause above guards the value's shape, so a recognised key reaching
+  # this point carries a bad value (`min: "5"`). Telling the developer the key
+  # is unknown and suggesting the very key they wrote would send them looking
+  # for a typo that is not there.
+  @expected_values %{
+    required: "a boolean",
+    enum: "a list",
+    min: "a number",
+    max: "a number",
+    min_length: "a non-negative integer",
+    max_length: "a non-negative integer",
+    validator: "a 1-arity function or a {module, function} tuple",
+    type_coercion: "a boolean",
+    additional_properties: "a boolean"
+  }
+
+  # `:default` accepts any value, so it has no expected shape to report.
+  @recognised_validation_opts [:default | Map.keys(@expected_values)]
+
+  defp convert_validation_opt({key, value}, _acc) when is_map_key(@expected_values, key) do
+    raise ArgumentError,
+          "invalid value for #{inspect(key)} validation option: " <>
+            "expected #{Map.fetch!(@expected_values, key)}, got: #{inspect(value)}"
+  end
 
   defp convert_validation_opt({key, value}, _acc) do
     raise ArgumentError, unknown_option_message(key, value)
@@ -237,8 +256,8 @@ defmodule ConduitMcp.Validation.SchemaConverter do
 
     Recognised options: #{recognised}.#{suggestion}
 
-    A typo used to be logged as a warning and the constraint silently dropped, \
-    which means the validation you declared did not run.
+    Validation options are checked when the tool is compiled: an unrecognised \
+    option would otherwise be ignored, and the validation you declared would not run.
     """
   end
 
@@ -290,7 +309,8 @@ defmodule ConduitMcp.Validation.SchemaConverter do
     :min_length,
     :max_length,
     :enum,
-    :additional_properties
+    :additional_properties,
+    :type_coercion
   ]
 
   @doc """
@@ -299,9 +319,10 @@ defmodule ConduitMcp.Validation.SchemaConverter do
 
   The markers carry constraints NimbleOptions has no native option for
   (`enum`, `min`/`max`, length limits, custom validators) plus the
-  `additional_properties` knob. They ride alongside the real options in the
-  *full* schema and must be removed before it reaches NimbleOptions, which
-  rejects unknown option keys — including inside a nested `keys:` schema.
+  `additional_properties` and `type_coercion` knobs. They ride alongside the
+  real options in the *full* schema and must be removed before it reaches
+  NimbleOptions, which rejects unknown option keys — including inside a nested
+  `keys:` schema.
 
   Single source of truth. Used by `ConduitMcp.Validation`,
   `ConduitMcp.DSL.SchemaBuilder`, and `ConduitMcp.Endpoint`.

@@ -8,6 +8,17 @@ defmodule ConduitMcp.Plugs.OAuthTest do
 
   @auth_event [:conduit_mcp, :auth, :verify]
 
+  defmodule FailingKeyProvider do
+    @moduledoc false
+    @behaviour ConduitMcp.OAuth.KeyProvider
+
+    @impl true
+    def fetch_keys(_config), do: {:error, {:http_error, 503}}
+
+    @impl true
+    def fetch_key(_kid, _config), do: {:error, {:http_error, 503}}
+  end
+
   # Generate a test RSA key pair for signing JWTs
   @rsa_key JOSE.JWK.generate_key({:rsa, 2048})
   @rsa_key_map @rsa_key |> JOSE.JWK.to_map() |> elem(1) |> Map.put("kid", "test-key")
@@ -167,6 +178,53 @@ defmodule ConduitMcp.Plugs.OAuthTest do
 
       assert result.halted
       assert result.status == 401
+    end
+
+    test "a hostile header alg is reported as :alg_not_allowed, never echoed into telemetry" do
+      # The header is attacker-controlled and telemetry metadata ships verbatim
+      # to metrics backends, dashboards and logs. The reason must be one atom
+      # from the documented set, not `{:alg_not_allowed, "<script>"}`.
+      ref = TelemetryTestHelper.attach_event_handlers(self(), [@auth_event])
+
+      encode = &Base.url_encode64(JSON.encode!(&1), padding: false)
+      header = encode.(%{"typ" => "JWT", "alg" => "<script>", "kid" => "test-key"})
+      payload = encode.(%{"iss" => "https://auth.example.com", "sub" => "user-123"})
+      token = "#{header}.#{payload}.#{Base.url_encode64("sig", padding: false)}"
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(@oauth_opts)
+
+      assert result.status == 401
+
+      assert_receive {@auth_event, ^ref, _measurements,
+                      %{status: :error, reason: :alg_not_allowed} = metadata}
+
+      refute inspect(metadata) =~ "script"
+    end
+
+    test "a key provider's own error term is reported as :key_unavailable" do
+      # Provider errors are open-ended terms (`{:http_error, 503}`, a
+      # `%Req.TransportError{}` naming the host); telemetry gets the fixed atom.
+      ref = TelemetryTestHelper.attach_event_handlers(self(), [@auth_event])
+
+      opts =
+        OAuth.init(
+          issuer: "https://auth.example.com",
+          audience: "https://mcp.example.com",
+          key_provider: __MODULE__.FailingKeyProvider
+        )
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{sign_token(%{})}")
+        |> OAuth.call(opts)
+
+      assert result.status == 401
+
+      assert_receive {@auth_event, ^ref, _measurements,
+                      %{status: :error, reason: :key_unavailable}}
     end
 
     test "explicit :algorithms option restricts accepted algs" do
@@ -741,6 +799,106 @@ defmodule ConduitMcp.Plugs.OAuthTest do
 
       refute result.halted
       assert ConduitMcp.Principal.id(result) == "tenant_id:acme"
+    end
+  end
+
+  describe "failure telemetry reasons" do
+    defp hand_built_token(header) do
+      encode = &Base.url_encode64(JSON.encode!(&1), padding: false)
+      payload = %{"iss" => "https://auth.example.com", "exp" => System.system_time(:second) + 60}
+      "#{encode.(header)}.#{encode.(payload)}.#{Base.url_encode64("sig", padding: false)}"
+    end
+
+    defp hs_token(secret) do
+      signer = Joken.Signer.create("HS256", secret, %{"kid" => "test-key"})
+      {:ok, token, _} = Joken.encode_and_sign(%{"sub" => "u"}, signer)
+      token
+    end
+
+    defp opts_with(overrides) do
+      [issuer: "https://auth.example.com", audience: "https://mcp.example.com"]
+      |> Keyword.merge(overrides)
+      |> OAuth.init()
+    end
+
+    defp static_keys(keys), do: {ConduitMcp.OAuth.KeyProvider.Static, keys: keys}
+
+    @tag :capture_log
+    test "the rejection paths emit exactly the documented reason atoms" do
+      forger = JOSE.JWK.generate_key({:rsa, 2048}) |> JOSE.JWK.to_map() |> elem(1)
+      forged_signer = Joken.Signer.create("RS256", Map.put(forger, "kid", "test-key"))
+      {:ok, forged, _} = Joken.encode_and_sign(%{"sub" => "u"}, forged_signer)
+
+      unknown_kid_signer = Joken.Signer.create("RS256", @rsa_key_map, %{"kid" => "unknown"})
+      {:ok, unknown_kid, _} = Joken.encode_and_sign(%{"sub" => "u"}, unknown_kid_signer)
+
+      hs_allowed = [algorithms: ["RS256", "HS256"]]
+      bad_oct = %{"kty" => "oct", "k" => "!!not base64!!", "kid" => "test-key"}
+
+      cases = [
+        {@oauth_opts, "invalid.token.here"},
+        {@oauth_opts, "not-a-jwt"},
+        {@oauth_opts, sign_token(%{"iss" => "https://wrong-issuer.com"})},
+        {@oauth_opts, sign_token(%{"aud" => "https://wrong-audience.com"})},
+        {@oauth_opts, sign_token(%{"exp" => System.system_time(:second) - 60})},
+        {@oauth_opts, sign_token(%{"nbf" => System.system_time(:second) + 3600})},
+        {@oauth_opts, sign_token(%{"sub" => nil})},
+        {@oauth_opts, forged},
+        {@oauth_opts, hs_token("shared-secret")},
+        {@oauth_opts, hand_built_token(%{"alg" => "<script>", "kid" => "test-key"})},
+        {@oauth_opts, hand_built_token(%{"kid" => "test-key"})},
+        {@oauth_opts, unknown_kid},
+        {opts_with(key_provider: __MODULE__.FailingKeyProvider), sign_token(%{})},
+        {opts_with(key_provider: static_keys([%{"kid" => "test-key"}])), sign_token(%{})},
+        {opts_with(
+           [{:key_provider, static_keys([Map.put(@rsa_public_key, "alg", "RS256")])}] ++
+             hs_allowed
+         ), hs_token("attacker")},
+        {opts_with([{:key_provider, static_keys([bad_oct])}] ++ hs_allowed), hs_token("s")}
+      ]
+
+      emitted =
+        MapSet.new(cases, fn {opts, token} ->
+          ref = TelemetryTestHelper.attach_event_handlers(self(), [@auth_event])
+
+          result =
+            conn(:get, "/")
+            |> put_req_header("authorization", "Bearer #{token}")
+            |> OAuth.call(opts)
+
+          assert result.status == 401, "accepted: #{token}"
+          assert_receive {@auth_event, ^ref, _measurements, %{status: :error, reason: reason}}
+          TelemetryTestHelper.detach(ref)
+          reason
+        end)
+
+      # Every emitted reason is documented, and every documented reason except
+      # the `:verification_failed` fallback has a producer.
+      documented = MapSet.new(OAuth.__telemetry_reasons__())
+      assert emitted == MapSet.delete(documented, :verification_failed)
+    end
+
+    test "a reason no clause names still maps to a documented atom, never raises" do
+      # A future `{:error, reason}` producer must yield a 401, not a
+      # FunctionClauseError (a 500 on an unauthenticated request), and must not
+      # leak its term into metrics.
+      for reason <- [:some_future_reason, {:new_check, "Bearer secret"}, %{detail: "x"}] do
+        assert OAuth.__telemetry_reason__(reason) == :verification_failed
+      end
+
+      assert :verification_failed in OAuth.__telemetry_reasons__()
+    end
+
+    test "the moduledoc's Telemetry table lists exactly the reason set" do
+      {:docs_v1, _, _, _, %{"en" => moduledoc}, _, _} = Code.fetch_docs(OAuth)
+
+      table =
+        ~r/^\s*\| `:(\w+)` \|/m
+        |> Regex.scan(moduledoc, capture: :all_but_first)
+        |> List.flatten()
+        |> MapSet.new()
+
+      assert table == MapSet.new(OAuth.__telemetry_reasons__(), &Atom.to_string/1)
     end
   end
 end

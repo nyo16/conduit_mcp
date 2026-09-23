@@ -9,12 +9,16 @@ defmodule ConduitMcp.Application do
   that keep them bounded:
 
     * `ConduitMcp.Cancellation.Owner` — always started.
+    * `ConduitMcp.Cancellation.InFlightOwner` — always started; owns the
+      in-flight table (one row per request being handled) that gates which
+      cancellations are recorded.
     * `ConduitMcp.Cancellation.Janitor` — always started; sweeps cancellation
-      rows whose request never cleared them. Disable with
+      rows whose request never cleared them, and in-flight rows whose process
+      died without untracking. Disable with
       `config :conduit_mcp, :cancellation_janitor, false`.
     * `ConduitMcp.Session.EtsStore.Owner` — always started.
-    * `ConduitMcp.Transport.SSE.Owner` — always started; owns the
-      concurrent-stream counter behind `Transport.SSE`'s `:max_connections`.
+    * `ConduitMcp.Transport.SSE.Owner` — always started; owns the slot table
+      (one row per live stream) behind `Transport.SSE`'s `:max_connections`.
     * `ConduitMcp.Session.Janitor` — always started against
       `ConduitMcp.Session.EtsStore`, under the name
       `ConduitMcp.Session.Janitor.Default` so it cannot collide with a janitor
@@ -57,12 +61,17 @@ defmodule ConduitMcp.Application do
     Supervisor.start_link(children, opts)
   end
 
-  # Own the cancellation and session ETS tables from long-lived processes so
-  # concurrent Bandit request handlers don't race on `:ets.new/2` and — more
-  # importantly — so the tables survive the exit of whichever request process
-  # happened to touch them first.
+  # Own the cancellation, in-flight and session ETS tables from long-lived
+  # processes so concurrent Bandit request handlers don't race on
+  # `:ets.new/2` and — more importantly — so the tables survive the exit of
+  # whichever request process happened to touch them first.
   defp always_started do
-    [Cancellation.Owner, Session.EtsStore.Owner, ConduitMcp.Transport.SSE.Owner]
+    [
+      Cancellation.Owner,
+      Cancellation.InFlightOwner,
+      Session.EtsStore.Owner,
+      ConduitMcp.Transport.SSE.Owner
+    ]
   end
 
   # The session table is created by unauthenticated `initialize` requests and,
@@ -87,7 +96,8 @@ defmodule ConduitMcp.Application do
   # `notifications/cancelled` is reachable unauthenticated, so a row whose
   # request crashed before `Cancellation.clear/2` ran would linger forever.
   # The row cap alone would then turn into a denial of service against
-  # legitimate cancellations.
+  # legitimate cancellations. The same pass drops in-flight rows of request
+  # processes killed before `Cancellation.untrack/2` ran.
   defp cancellation_janitor do
     defaults = [
       store: Cancellation,

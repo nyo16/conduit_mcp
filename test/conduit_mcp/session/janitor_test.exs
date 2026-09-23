@@ -170,7 +170,8 @@ defmodule ConduitMcp.Session.JanitorTest do
       GenServer.stop(pid)
     end
 
-    test "an unloaded store module still gets swept" do
+    @tag :tmp_dir
+    test "an unloaded store module still gets swept", %{tmp_dir: tmp_dir} do
       # `function_exported?/3` is false for a module that is merely not loaded,
       # which under interactive code loading (dev, test, `mix run`, any release
       # not built with `:embedded`) is the normal state at boot. Without
@@ -178,26 +179,44 @@ defmodule ConduitMcp.Session.JanitorTest do
       # on every tick for the life of the node, leaving the table it was added
       # to bound growing unbounded — discovered as an OOM, not as a failure.
       #
-      # Asserting the row is actually gone, not just that no warning appeared:
+      # The store is a throwaway module compiled here, written to a code path
+      # and then unloaded, so the janitor is the one that has to load it.
+      # Unloading a production module instead would leave it unloaded for
+      # every test that runs after this one.
+      store = Module.concat(__MODULE__, "UnloadedStore#{System.unique_integer([:positive])}")
+      recipient = :"janitor_unloaded_#{System.unique_integer([:positive])}"
+      Process.register(self(), recipient)
+
+      [{^store, beam}] =
+        Code.compile_string("""
+        defmodule #{inspect(store)} do
+          def cleanup(ttl) do
+            send(#{inspect(recipient)}, {:swept, ttl})
+            1
+          end
+        end
+        """)
+
+      File.write!(Path.join(tmp_dir, "#{store}.beam"), beam)
+      Code.prepend_path(tmp_dir)
+
+      on_exit(fn ->
+        Code.delete_path(tmp_dir)
+        :code.purge(store)
+        :code.delete(store)
+      end)
+
+      :code.purge(store)
+      :code.delete(store)
+      refute :erlang.module_loaded(store)
+
+      # Asserting the sweep actually ran, not just that no warning appeared:
       # the absence of a log line does not prove a sweep happened.
-      ConduitMcp.Cancellation.cancel("stale-unloaded", nil, "s")
-      assert ConduitMcp.Cancellation.cancelled?("stale-unloaded", "s")
-
-      :ets.insert(
-        :conduit_mcp_cancellations,
-        {{"s", "stale-unloaded"},
-         %{"reason" => nil, "cancelled_at" => System.system_time(:millisecond) - 60_000}}
-      )
-
-      :code.purge(ConduitMcp.Cancellation)
-      :code.delete(ConduitMcp.Cancellation)
-      refute :erlang.function_exported(ConduitMcp.Cancellation, :cleanup, 1)
-
       log =
         ExUnit.CaptureLog.capture_log(fn ->
           {:ok, pid} =
             Janitor.start_link(
-              store: ConduitMcp.Cancellation,
+              store: store,
               ttl: 1_000,
               interval: 60_000,
               name: :"janitor_load_#{System.unique_integer([:positive])}"
@@ -208,8 +227,8 @@ defmodule ConduitMcp.Session.JanitorTest do
           GenServer.stop(pid)
         end)
 
+      assert_received {:swept, 1_000}
       refute log =~ "does not implement"
-      refute ConduitMcp.Cancellation.cancelled?("stale-unloaded", "s")
     end
   end
 end

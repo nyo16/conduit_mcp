@@ -2,13 +2,15 @@ defmodule ConduitMcp.EtsOwner do
   @moduledoc """
   Shared implementation for ConduitMCP's supervised ETS table owners.
 
-  Five subsystems keep state in a `:public`, `:named_table` ETS table that must
-  outlive the short-lived Bandit request process that happens to touch it
+  Five subsystems keep state in `:public`, `:named_table` ETS tables that must
+  outlive the short-lived Bandit request process that happens to touch them
   first: `ConduitMcp.Session.EtsStore`, `ConduitMcp.Tasks.EtsStore`,
-  `ConduitMcp.Cancellation`, `ConduitMcp.Transport.SSE`'s connection counter,
-  and `ConduitMcp.OAuth.KeyProvider.JWKS`'s cache. Each has an `Owner` process
-  started by `ConduitMcp.Application` whose only job is to create the table and
-  then idle, so the table's lifetime is the application's.
+  `ConduitMcp.Cancellation` (its cancellation flags and its in-flight
+  requests, one table each), `ConduitMcp.Transport.SSE`'s slot table (one row
+  per live stream), and `ConduitMcp.OAuth.KeyProvider.JWKS`'s cache. Each
+  table has an owner process started by `ConduitMcp.Application` whose only
+  job is to create it and then idle, so the table's lifetime is the
+  application's.
 
   The process holds no state beyond what it needs to re-claim, and answers no
   calls - reads and writes go directly to the `:public` table from the calling
@@ -32,10 +34,11 @@ defmodule ConduitMcp.EtsOwner do
   `ConduitMcp.Supervisor`, and with it the consumer's application, over a
   cosmetic ownership question.
 
-  So a lost race logs and retries every #{1_000}ms instead. The retry matters:
-  the racer is usually a request or janitor process that exits within seconds,
-  freeing the name - a one-shot degrade would idle forever owning nothing while
-  the table's lifetime silently became one request's.
+  So a lost race logs and retries every second instead (`start_link/4`'s
+  `:reclaim_interval`, default 1000 ms). The retry matters: the racer is
+  usually a request or janitor process that exits within seconds, freeing the
+  name - a one-shot degrade would idle forever owning nothing while the table's
+  lifetime silently became one request's.
 
   ## Why only *that* ArgumentError is tolerated
 
@@ -55,19 +58,35 @@ defmodule ConduitMcp.EtsOwner do
   # `keyword()`, which would make every call site unreachable to dialyzer.
   @type table_opts :: [atom() | tuple()]
 
-  @reclaim_interval 1_000
+  @default_reclaim_interval 1_000
 
   @doc """
   Starts a process named `owner` that creates and then owns `table`.
+
+  ## Options
+
+    * `:reclaim_interval` — milliseconds between claim attempts after a lost
+      race. Defaults to `#{@default_reclaim_interval}`.
   """
-  @spec start_link(module(), atom(), table_opts()) :: GenServer.on_start()
-  def start_link(owner, table, table_opts) do
-    GenServer.start_link(__MODULE__, {owner, table, table_opts}, name: owner)
+  @spec start_link(module(), atom(), table_opts(), keyword()) :: GenServer.on_start()
+  def start_link(owner, table, table_opts, opts \\ []) do
+    opts = Keyword.validate!(opts, reclaim_interval: @default_reclaim_interval)
+
+    GenServer.start_link(
+      __MODULE__,
+      {owner, table, table_opts, opts[:reclaim_interval]},
+      name: owner
+    )
   end
 
   @impl true
-  def init({owner, table, table_opts}) do
-    state = %{owner: owner, table: table, table_opts: table_opts}
+  def init({owner, table, table_opts, reclaim_interval}) do
+    state = %{
+      owner: owner,
+      table: table,
+      table_opts: table_opts,
+      reclaim_interval: reclaim_interval
+    }
 
     case claim(state) do
       :ok ->
@@ -78,10 +97,10 @@ defmodule ConduitMcp.EtsOwner do
           "#{inspect(owner)} could not claim #{inspect(table)}: the name is already " <>
             "taken, so the table belongs to another process and will not survive it. " <>
             "This happens when something called ensure_table/0 between the owner's " <>
-            "exit and its supervised restart. Retrying every #{@reclaim_interval}ms."
+            "exit and its supervised restart. Retrying every #{reclaim_interval}ms."
         )
 
-        Process.send_after(self(), :reclaim, @reclaim_interval)
+        Process.send_after(self(), :reclaim, reclaim_interval)
         {:ok, state}
     end
   end
@@ -94,7 +113,7 @@ defmodule ConduitMcp.EtsOwner do
         {:noreply, state}
 
       :taken ->
-        Process.send_after(self(), :reclaim, @reclaim_interval)
+        Process.send_after(self(), :reclaim, state.reclaim_interval)
         {:noreply, state}
     end
   end

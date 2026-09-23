@@ -8,9 +8,20 @@ defmodule ConduitMcp.Plugs.OriginValidation do
   |---|---|
   | `nil` (unset) | **Fails closed**: any request carrying an `Origin` is rejected |
   | `"*"` | All origins allowed — the explicit opt-out |
-  | a list of strings | Only those origins are allowed |
-  | a bare string | Only that origin is allowed |
+  | a list of strings | Only those origins are allowed (exact match) |
+  | a bare string | Only that origin is allowed (exact match) |
   | a `Regex` | Origins matching the pattern are allowed |
+
+  `ConduitMcp.Transport.StreamableHTTP` and `ConduitMcp.Transport.SSE` check
+  the shape at `init/1` and raise `ArgumentError` for anything else. When this
+  plug is used on its own, an unsupported value fails closed.
+
+  > #### Anchor a `Regex` allowlist {: .warning}
+  >
+  > The pattern is tested with `Regex.match?/2`, which matches anywhere in the
+  > origin. `~r/https:\\/\\/example\\.com/` therefore also allows
+  > `https://example.com.evil.test`. Anchor both ends:
+  > `~r/\\Ahttps:\\/\\/example\\.com\\z/`.
 
   Other rules:
 
@@ -21,13 +32,13 @@ defmodule ConduitMcp.Plugs.OriginValidation do
 
   ## Why an unset allowlist fails closed
 
-  It used to log a startup warning and allow everything. A warning does not
-  stop a request: a page on `https://evil.example` could POST to a loopback
-  MCP server and, because the response also carried `access-control-allow-origin: *`,
-  read the reply. Defaulting to "no browser origin is trusted" is the only
-  default that is safe for a server bound to loopback on a developer machine.
+  A warning does not stop a request: a page on `https://evil.example` could
+  POST to a loopback MCP server and, if the response carried
+  `access-control-allow-origin: *`, read the reply. "No browser origin is
+  trusted" is the only default that is safe for a server bound to loopback on
+  a developer machine.
 
-  Pass `allowed_origins: "*"` to restore the old behaviour explicitly.
+  Pass `allowed_origins: "*"` to allow every origin explicitly.
 
   ## Why missing `Origin` still passes — and what that does not cover
 
@@ -97,13 +108,7 @@ defmodule ConduitMcp.Plugs.OriginValidation do
   defp origin_allowed?(allowed, origin) when is_binary(allowed), do: allowed == origin
   defp origin_allowed?(%Regex{} = allowed, origin), do: Regex.match?(allowed, origin)
 
-  defp origin_allowed?(allowed, _origin) do
-    Logger.error(
-      "ConduitMcp.Plugs.OriginValidation: unsupported :allowed_origins value " <>
-        "#{inspect(allowed)}. Expected a list of strings, a string, a Regex, or \"*\"; " <>
-        "failing closed."
-    )
-
-    false
-  end
+  # Unsupported shape. The transports reject it in `init/1`; a standalone use
+  # of this plug fails closed.
+  defp origin_allowed?(_allowed, _origin), do: false
 end

@@ -10,11 +10,11 @@ defmodule ConduitMcp.Reflect do
       `rescue` turns a client mistake into a misleading
       "Internal server error".
     * **Size.** A 1 MB string sits comfortably inside the transports'
-      `length: 1_000_000` parser cap and is reflected in full into both the
-      error message and the log line.
-    * **Control characters.** `"tools/call\\x00\\x01\\x02"` round-trips
-      verbatim today, so a hostile value reaches the operator's log with
-      terminal escapes and NULs intact.
+      `length: 1_000_000` parser cap, and an unclamped echo reflects it in
+      full into both the error message and the log line.
+    * **Control characters.** An unfiltered echo of
+      `"tools/call\\x00\\x01\\x02"` reaches the operator's log with terminal
+      escapes and NULs intact.
 
   `text/2` applies `to_string/1`, strips control characters (C0/C1, DEL,
   zero-width and bidi controls, and the Unicode line separators — keeping
@@ -102,11 +102,13 @@ defmodule ConduitMcp.Reflect do
   defp stringify(value) do
     to_string(value)
   rescue
-    # `Protocol.UndefinedError` alone was not enough. Every exception reachable
+    # `Protocol.UndefinedError` alone is not enough. Every exception reachable
     # here must land on `inspect/2`, because the two call paths that matter -
-    # `notifications/cancelled` (handler.ex:69-73) and `Logger.debug` in
-    # `Transport.Shared.dispatch_post/2` - have no rescue of their own, so a
-    # raise here leaves the client with a bare 500 and no JSON-RPC reply.
+    # `notifications/cancelled` (reached from `ConduitMcp.Handler`'s
+    # handle_notification/3, outside the request-path rescue) and
+    # `Logger.debug` in `Transport.Shared.dispatch_post/2` - have no rescue of
+    # their own, so a raise here leaves the client with a bare 500 and no
+    # JSON-RPC reply.
     _ in [Protocol.UndefinedError, ArgumentError, UnicodeConversionError] ->
       inspect(value, limit: 10, printable_limit: 256)
   end

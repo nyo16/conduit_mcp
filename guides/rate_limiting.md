@@ -59,7 +59,7 @@ rate_limit: [
 | `:enabled` | `true` | Toggle on/off |
 | `:scale` | `60_000` | Time window in ms |
 | `:limit` | `60` | Max requests per window |
-| `:key_func` | IP-based | `(Plug.Conn.t()) -> String.t()` |
+| `:key_func` | client bucket | `(Plug.Conn.t()) -> String.t()`; default is the IPv4 address or IPv6 `/64` (see [Anonymous clients](#anonymous-clients)) |
 
 ## Message Rate Limiting
 
@@ -82,7 +82,7 @@ message_rate_limit: [
 | `:enabled` | `true` | Toggle on/off |
 | `:scale` | `300_000` | Time window in ms (5 min) |
 | `:limit` | `50` | Max messages per window |
-| `:key_func` | principal-aware | Uses `ConduitMcp.Principal.id/1` if authenticated, falls back to client IP |
+| `:key_func` | principal-aware | Uses `ConduitMcp.Principal.id/1` if authenticated, falls back to the client bucket (IPv4 address or IPv6 `/64`) |
 | `:excluded_methods` | `[]` | Methods to skip (e.g., `["initialize", "ping"]`) |
 
 **Behaviors:**
@@ -96,10 +96,10 @@ message_rate_limit: [
 
 The message rate limiter already does this out of the box: its default key is
 `"msg:user:" <> ConduitMcp.Principal.id(conn)` for authenticated requests and
-the client IP otherwise. Two OAuth subjects behind the same proxy therefore
-get distinct buckets with no configuration.
+`"msg:" <>` the client bucket otherwise. Two OAuth subjects behind the same
+proxy therefore get distinct buckets with no configuration.
 
-The HTTP rate limiter keys on the client IP by default, because it runs to
+The HTTP rate limiter keys on the client bucket by default, because it runs to
 bound raw connections — including unauthenticated ones. Key it on the
 principal when you want per-user HTTP limits:
 
@@ -112,10 +112,62 @@ rate_limit: [
 ```
 
 `rate_limit_key/1` returns `"user:" <> id` when authenticated and the client
-IP otherwise. Do not hand-roll `conn.remote_ip |> :inet.ntoa() |> to_string()`:
+bucket otherwise. Do not hand-roll `conn.remote_ip |> :inet.ntoa() |> to_string()`:
 `:inet.ntoa/1` returns `{:error, :einval}` for a malformed address and
 `to_string/1` then raises, killing the request process instead of returning
 429.
+
+## Anonymous clients
+
+Unauthenticated callers are keyed on `ConduitMcp.Principal.client_bucket/1`,
+not on their exact address:
+
+| Client address | Bucket |
+|----------------|--------|
+| IPv4 `192.0.2.7` | `"192.0.2.7"` |
+| IPv6 `2001:db8:1:2:a:b:c:d` | `"2001:db8:1:2::/64"` |
+| IPv4-mapped IPv6 `::ffff:192.0.2.1` | `"192.0.2.1"` |
+| malformed `remote_ip` | `"unknown"` |
+
+An ISP or hosting provider typically allocates a whole `/64` to one subscriber
+or host, and the host chooses the low 64 bits itself (privacy extensions rotate
+them automatically). Keying on the full IPv6 address would let a single client
+take a fresh bucket for every request, so every address in a `/64` shares one.
+A dual-stack socket reports IPv4 peers as IPv4-mapped IPv6 addresses; those
+unwrap to the IPv4 address so one IPv4 client gets one bucket regardless of the
+socket family, and IPv4 clients are not all merged under `::ffff:0:0/64`.
+
+The same bucket is the cancellation scope of anonymous requests (see
+`ConduitMcp.Cancellation`), so rotating addresses within a `/64` cannot
+multiply the per-scope quota on recorded cancellations either.
+
+`ConduitMcp.Principal.client_ip/1` still returns the precise address for
+logging and display. To key the HTTP rate limiter on it instead, pass it as a
+remote capture (required by `Plug.Router.forward/2`, which escapes the options
+at compile time):
+
+```elixir
+rate_limit: [
+  backend: MyApp.RateLimiter,
+  key_func: &ConduitMcp.Principal.client_ip/1
+]
+```
+
+For the message rate limiter, keep the `"msg:"` prefix so the two limiters do
+not share buckets:
+
+```elixir
+defmodule MyApp.RateKeys do
+  def message(conn) do
+    case ConduitMcp.Principal.id(conn) do
+      nil -> "msg:" <> ConduitMcp.Principal.client_ip(conn)
+      id -> "msg:user:" <> id
+    end
+  end
+end
+
+message_rate_limit: [backend: MyApp.RateLimiter, key_func: &MyApp.RateKeys.message/1]
+```
 
 ## Configuration in Endpoint Mode
 

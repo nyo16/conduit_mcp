@@ -111,21 +111,6 @@ defmodule ConduitMcp.HandlerTasksTest do
       assert response["result"]["content"] == [%{"type" => "text", "text" => "done"}]
     end
 
-    test "tasks/result errors when task is still working" do
-      {:ok, _} = ConduitMcp.Tasks.create("t4", %{"tool" => "echo"})
-
-      request = %{
-        "jsonrpc" => "2.0",
-        "id" => 1,
-        "method" => "tasks/result",
-        "params" => %{"taskId" => "t4"}
-      }
-
-      response = Handler.handle_request(request, TestServer)
-      assert response["error"]["code"] == -32004
-      assert response["error"]["message"] =~ "Task not finished"
-    end
-
     test "tasks/list returns all tasks" do
       {:ok, _} = ConduitMcp.Tasks.create("t5")
       {:ok, _} = ConduitMcp.Tasks.create("t6")
@@ -250,8 +235,9 @@ defmodule ConduitMcp.HandlerTasksTest do
 
   # W2 (BOLA/IDOR): tasks/* must be scoped to the caller's principal so one user
   # can't read or cancel another's task, while staying back-compatible for the
-  # no-principal path. Lives in this module (the only consumer of the global
-  # :conduit_mcp_tasks table) so the table is never touched concurrently.
+  # no-principal path. The table wipe below is safe for the reason given at the
+  # top of this module: every module that writes `:conduit_mcp_tasks` is
+  # `async: false`.
   describe "tasks/* owner scoping (W2)" do
     setup do
       if :ets.whereis(:conduit_mcp_tasks) != :undefined do

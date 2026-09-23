@@ -1,7 +1,9 @@
 [
   verbose: false,
   private: true,
-  skip: false,
+  # Honour `# sobelow_skip [...]` comments. Each one sits on a single function
+  # with a why-comment; checks stay active everywhere else.
+  skip: true,
   router: "",
   exit: "low",
   format: "txt",

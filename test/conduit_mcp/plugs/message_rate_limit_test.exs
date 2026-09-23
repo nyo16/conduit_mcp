@@ -435,6 +435,73 @@ defmodule ConduitMcp.Plugs.MessageRateLimitTest do
     end
   end
 
+  describe "call/2 with a client method that is not a plain string" do
+    defmodule DenyingBackend do
+      @moduledoc false
+      # Always denies, so every request reaches the deny path on the first hit
+      # without sharing a bucket with any other test.
+      def hit(_key, _scale, _limit), do: {:deny, 1_000}
+    end
+
+    defp method_conn(method) do
+      conn(
+        :post,
+        "/",
+        JSON.encode!(%{"jsonrpc" => "2.0", "method" => method, "id" => 1})
+      )
+      |> put_req_header("content-type", "application/json")
+      |> Plug.Parsers.call(Plug.Parsers.init(parsers: [:json], json_decoder: JSON))
+    end
+
+    test "a non-string method is denied with 429 and reported as a nil method" do
+      ref =
+        TelemetryTestHelper.attach_event_handlers(self(), [
+          [:conduit_mcp, :message_rate_limit, :check]
+        ])
+
+      opts = MessageRateLimit.init(backend: DenyingBackend, key_func: fn _conn -> "k" end)
+
+      for method <- [%{}, [1, 2], 42] do
+        result = MessageRateLimit.call(method_conn(method), opts)
+
+        assert result.halted
+        assert result.status == 429
+
+        assert_receive {[:conduit_mcp, :message_rate_limit, :check], ^ref, _measurements,
+                        %{status: :deny, method: nil}}
+      end
+    end
+
+    defmodule FixedDenyBackend do
+      @moduledoc false
+      # Denies with the wait the calling test put in its process dictionary.
+      def hit(_key, _scale, _limit), do: {:deny, Process.get(:deny_ms)}
+    end
+
+    test "Retry-After rounds the backend's wait up to whole seconds, at least 1" do
+      opts = MessageRateLimit.init(backend: FixedDenyBackend, key_func: fn _conn -> "k" end)
+
+      for {ms, expected} <- [{19, "1"}, {1_000, "1"}, {1_001, "2"}, {1_500, "2"}, {60_000, "60"}] do
+        Process.put(:deny_ms, ms)
+        result = MessageRateLimit.call(method_conn("tools/call"), opts)
+        assert get_resp_header(result, "retry-after") == [expected], "wait #{ms} ms"
+      end
+    end
+
+    test "a method carrying a newline cannot forge a log line" do
+      opts = MessageRateLimit.init(backend: DenyingBackend, key_func: fn _conn -> "k" end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert MessageRateLimit.call(method_conn("x\n[error] FORGED"), opts).status == 429
+        end)
+
+      assert log =~ "Message rate limit exceeded"
+      assert log =~ "FORGED"
+      refute log =~ "\n[error] FORGED"
+    end
+  end
+
   describe "default_key_func" do
     defp message_conn(remote_ip) do
       conn(

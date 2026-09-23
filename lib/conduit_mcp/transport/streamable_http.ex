@@ -28,12 +28,19 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   - `:rate_limit` — HTTP-level rate limit configuration. See `ConduitMcp.Plugs.RateLimit`.
   - `:message_rate_limit` — per-message rate limit configuration. See
     `ConduitMcp.Plugs.MessageRateLimit`.
-  - `:session` — session-store configuration. Enables `Mcp-Session-Id`
-    handling. See `ConduitMcp.Session`. Add `require_session: true` to reject
-    non-`initialize` POSTs that omit the `Mcp-Session-Id` header (HTTP 400),
-    per the MCP specification's session requirements.
+  - `:session` — session-store configuration, a keyword list. **Sessions are
+    off unless configured**: omitting `:session` (or passing `session: false`)
+    means no `Mcp-Session-Id` is issued or checked. Pass `session: []` to
+    enable them with `ConduitMcp.Session.EtsStore`, or `session: [store: MyStore]`
+    for another store. See `ConduitMcp.Session`. Add `require_session: true` to
+    reject non-`initialize` POSTs that omit the `Mcp-Session-Id` header (HTTP
+    400), per the MCP specification's session requirements. A `:session` that
+    is not a keyword list, `false` or `nil` (`true`, a map) raises
+    `ArgumentError` at `init/1`.
   - `:allowed_origins` — allowlist for the `Origin` header. Accepts a list of
-    strings, a bare string, a `Regex`, or `"*"`.
+    strings, a bare string, a `Regex`, or `"*"`; any other value raises
+    `ArgumentError` at `init/1`. A `Regex` is matched unanchored, so anchor it:
+    `~r/\\Ahttps:\\/\\/example\\.com\\z/`.
     **Unset fails closed**: any request carrying an `Origin` is rejected with
     403, because a warning does not stop a browser from reaching a loopback
     server. Requests *without* an `Origin` always pass — native MCP clients
@@ -91,29 +98,37 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
 
   # Overrides the default from `use ConduitMcp.Transport.Shared`.
   def __transport_private__(opts) do
-    %{session_config: Keyword.get(opts, :session)}
+    %{session_config: validate_session_config!(Keyword.get(opts, :session))}
+  end
+
+  # Only a keyword list turns sessions on, so accepting any other value would
+  # silently mean "no sessions" - and no `require_session`.
+  defp validate_session_config!(config) when config in [nil, false], do: config
+
+  defp validate_session_config!(config) when is_list(config) do
+    if Keyword.keyword?(config), do: config, else: raise_session_config!(config)
+  end
+
+  defp validate_session_config!(config), do: raise_session_config!(config)
+
+  defp raise_session_config!(config) do
+    raise ArgumentError,
+          ":session must be a keyword list (session: [] enables sessions with " <>
+            "ConduitMcp.Session.EtsStore), false, or nil; got #{inspect(config)}"
   end
 
   # --- transport-specific plugs ----------------------------------------
 
+  # Sessions are on exactly when `:session` is a keyword list; `init/1` has
+  # already rejected anything but that, `nil` or `false`. Matches
+  # `create_session_for_initialize/2`.
   defp validate_session(conn, _opts) do
     session_config = conn.private[:session_config]
 
-    cond do
-      # Sessions disabled
-      session_config == false ->
-        conn
-
-      # No session config (default: sessions optional, don't enforce)
-      is_nil(session_config) ->
-        conn
-
-      # POST requests need session validation (except initialize)
-      conn.method == "POST" ->
-        validate_session_header(conn, session_config)
-
-      true ->
-        conn
+    if is_list(session_config) and conn.method == "POST" do
+      validate_session_header(conn, session_config)
+    else
+      conn
     end
   end
 
@@ -190,10 +205,13 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
 
   defp initialize_response?(_response_map), do: false
 
+  # An unconfigured `:session` means no sessions. Issuing them by default gave
+  # every unauthenticated client a way to fill the session table with one
+  # `initialize` per row.
   defp create_session_for_initialize(conn, response_map) do
     session_config = conn.private[:session_config]
 
-    if initialize_response?(response_map) and session_config != false do
+    if is_list(session_config) and initialize_response?(response_map) do
       create_session(conn, response_map, session_config)
     else
       {:ok, conn}
@@ -201,11 +219,7 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   end
 
   defp create_session(conn, response_map, session_config) do
-    store =
-      case session_config do
-        config when is_list(config) -> Keyword.get(config, :store, Session.EtsStore)
-        _ -> Session.EtsStore
-      end
+    store = Keyword.get(session_config, :store, Session.EtsStore)
 
     session_id = Session.generate_id()
     protocol_version = get_in(response_map, ["result", "protocolVersion"])

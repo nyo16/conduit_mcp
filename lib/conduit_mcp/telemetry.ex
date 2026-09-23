@@ -23,8 +23,9 @@ defmodule ConduitMcp.Telemetry do
 
   **Metadata:**
 
-    * `:method` (String.t) - The MCP method that was called
-      (e.g., `"initialize"`, `"tools/list"`, `"tools/call"`)
+    * `:method` (String.t | nil) - The MCP method that was called
+      (e.g., `"initialize"`, `"tools/list"`, `"tools/call"`); `nil` when the
+      request's `"method"` is missing or not a string
     * `:server_module` (module) - The MCP server module handling the request
     * `:status` (:ok | :error) - Whether the request succeeded or failed
 
@@ -57,7 +58,8 @@ defmodule ConduitMcp.Telemetry do
 
   **Metadata:**
 
-    * `:tool_name` (String.t) - Name of the tool that was executed
+    * `:tool_name` (String.t | nil) - Name of the tool that was executed;
+      `nil` when the client's `"name"` is missing or not a string
     * `:server_module` (module) - The MCP server module
     * `:status` (:ok | :error) - Whether the tool executed successfully
 
@@ -88,7 +90,8 @@ defmodule ConduitMcp.Telemetry do
 
   **Metadata:**
 
-    * `:uri` (String.t) - URI of the resource that was read
+    * `:uri` (String.t | nil) - URI of the resource that was read; `nil` when
+      the client's `"uri"` is missing or not a string
     * `:server_module` (module) - The MCP server module
     * `:status` (:ok | :error) - Whether the read succeeded or failed
 
@@ -116,7 +119,8 @@ defmodule ConduitMcp.Telemetry do
 
   **Metadata:**
 
-    * `:prompt_name` (String.t) - Name of the prompt that was retrieved
+    * `:prompt_name` (String.t | nil) - Name of the prompt that was retrieved;
+      `nil` when the client's `"name"` is missing or not a string
     * `:server_module` (module) - The MCP server module
     * `:status` (:ok | :error) - Whether the prompt retrieval succeeded
 
@@ -204,9 +208,13 @@ defmodule ConduitMcp.Telemetry do
 
   **Metadata:**
 
-    * `:strategy` (:bearer_token | :api_key | :function) - Auth strategy used
+    * `:strategy` (:bearer_token | :api_key | :function | :oauth) - Auth strategy used
+      (the deprecated `:custom` strategy reports `:function`)
     * `:status` (:ok | :error) - Whether authentication succeeded
-    * `:reason` (any) - Failure reason (only present when status is :error)
+    * `:reason` (atom) - Failure reason, only present when status is `:error`. Always an
+      atom, never verifier or token text: `:invalid_credential` / `:invalid_return` from
+      `ConduitMcp.Plugs.Auth`; for `:oauth`, one of the set in the "Telemetry" section of
+      `ConduitMcp.Plugs.OAuth`
 
   **Example:**
 
@@ -518,14 +526,21 @@ defmodule ConduitMcp.Telemetry do
     :telemetry.detach("conduit-mcp-default-logger")
   end
 
-  # Private: Default event handler for logging
+  # Private: Default event handlers for logging.
+  #
+  # `method`, `tool_name`, `uri` and `prompt_name` come from the client's
+  # JSON-RPC body, so they go through `ConduitMcp.Reflect.text/2` rather than
+  # bare interpolation: a map or tuple would raise `Protocol.UndefinedError`,
+  # and `:telemetry` detaches a handler that raises - from every event it is
+  # attached to - so one request would silence the whole default logger. A
+  # `\n` would forge a log line. `Reflect.text/2` renders `nil` as `""`.
   defp handle_event([:conduit_mcp, :request, :stop], measurements, metadata, _config) do
     duration_ms = System.convert_time_unit(measurements.duration, :native, :millisecond)
 
     require Logger
 
     Logger.debug(
-      "MCP request completed: method=#{metadata.method} status=#{metadata.status} duration=#{duration_ms}ms"
+      "MCP request completed: method=#{ConduitMcp.Reflect.text(metadata.method)} status=#{metadata.status} duration=#{duration_ms}ms"
     )
   end
 
@@ -535,7 +550,7 @@ defmodule ConduitMcp.Telemetry do
     require Logger
 
     Logger.debug(
-      "Tool executed: tool=#{metadata.tool_name} status=#{metadata.status} duration=#{duration_ms}ms"
+      "Tool executed: tool=#{ConduitMcp.Reflect.text(metadata.tool_name)} status=#{metadata.status} duration=#{duration_ms}ms"
     )
   end
 
@@ -545,7 +560,7 @@ defmodule ConduitMcp.Telemetry do
     require Logger
 
     Logger.debug(
-      "Resource read: uri=#{metadata.uri} status=#{metadata.status} duration=#{duration_ms}ms"
+      "Resource read: uri=#{ConduitMcp.Reflect.text(metadata.uri)} status=#{metadata.status} duration=#{duration_ms}ms"
     )
   end
 
@@ -555,7 +570,7 @@ defmodule ConduitMcp.Telemetry do
     require Logger
 
     Logger.debug(
-      "Prompt retrieved: prompt=#{metadata.prompt_name} status=#{metadata.status} duration=#{duration_ms}ms"
+      "Prompt retrieved: prompt=#{ConduitMcp.Reflect.text(metadata.prompt_name)} status=#{metadata.status} duration=#{duration_ms}ms"
     )
   end
 
@@ -586,7 +601,7 @@ defmodule ConduitMcp.Telemetry do
 
     Logger.log(
       level,
-      "Message rate limit check: key=#{metadata.key} method=#{metadata.method} status=#{metadata.status} duration=#{duration_ms}ms"
+      "Message rate limit check: key=#{metadata.key} method=#{ConduitMcp.Reflect.text(metadata.method)} status=#{metadata.status} duration=#{duration_ms}ms"
     )
   end
 

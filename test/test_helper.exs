@@ -11,4 +11,8 @@
 # siblings, silently. That is deliberate here - the four `refute_receive` sites
 # each sit behind a hard barrier (a `Task.await` or a prior `assert_receive`),
 # so they do not need the longer window and paying it would add 2 s to the run.
-ExUnit.start(assert_receive_timeout: 500, refute_receive_timeout: 100)
+#
+# `capture_log: true` buffers each test's log output and prints it only when
+# that test fails, so a passing run is quiet. Tests that assert on log text
+# still use `ExUnit.CaptureLog`, which captures independently of this flag.
+ExUnit.start(capture_log: true, assert_receive_timeout: 500, refute_receive_timeout: 100)

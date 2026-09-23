@@ -574,4 +574,64 @@ defmodule ConduitMcp.Plugs.AuthTest do
       assert log =~ "Invalid verify function return"
     end
   end
+
+  describe ":principal_id" do
+    test "is rejected at init for the per-user :function and :custom strategies" do
+      # One configured id for a verifier that tells users apart would merge
+      # every user into a single principal: shared tasks, shared rate limit.
+      for strategy <- [:function, :custom] do
+        assert_raise ArgumentError, ~r/:principal_id/, fn ->
+          Auth.init(strategy: strategy, verify: fn _ -> {:ok, %{id: "u"}} end, principal_id: "x")
+        end
+      end
+    end
+
+    test "is rejected at init when a :verify function, not a static secret, authenticates" do
+      # `do_verify/2` runs `:verify` whenever the strategy's static secret is
+      # unset, so the strategy name alone does not make the credential static.
+      verify = fn _ -> {:ok, %{id: "u"}} end
+
+      for opts <- [
+            [verify: verify, principal_id: "svc"],
+            [strategy: :bearer_token, verify: verify, principal_id: "svc"],
+            [strategy: :api_key, verify: verify, principal_id: "svc"]
+          ] do
+        assert_raise ArgumentError, ~r/:principal_id/, fn -> Auth.init(opts) end
+      end
+    end
+
+    test "names the static credential for :bearer_token and :api_key" do
+      bearer = Auth.init(strategy: :bearer_token, token: "t", principal_id: "ci-bot")
+      api_key = Auth.init(strategy: :api_key, api_key: "k", principal_id: "svc-1")
+
+      assert conn(:get, "/")
+             |> put_req_header("authorization", "Bearer t")
+             |> Auth.call(bearer)
+             |> ConduitMcp.Principal.id() == "ci-bot"
+
+      assert conn(:get, "/")
+             |> put_req_header("x-api-key", "k")
+             |> Auth.call(api_key)
+             |> ConduitMcp.Principal.id() == "svc-1"
+    end
+  end
+
+  describe "static secrets" do
+    test "an empty or non-string :token / :api_key is a boot-time error" do
+      # `secure_compare("", "")` is true, so an empty configured secret would
+      # authenticate a request carrying an empty header.
+      for opts <- [
+            [strategy: :bearer_token, token: ""],
+            [strategy: :api_key, api_key: ""],
+            [strategy: :bearer_token, token: 123],
+            [strategy: :api_key, api_key: :secret]
+          ] do
+        assert_raise ArgumentError, ~r/non-empty string/, fn -> Auth.init(opts) end
+      end
+    end
+
+    test "an unset static secret still leaves :verify in charge" do
+      assert %{token: nil} = Auth.init(strategy: :bearer_token, verify: fn _ -> {:ok, %{}} end)
+    end
+  end
 end

@@ -288,5 +288,53 @@ defmodule ConduitMcp.TelemetryTest do
     test "returns error when detaching non-existent handlers" do
       assert {:error, :not_found} = ConduitMcp.Telemetry.detach_default_handlers()
     end
+
+    # The default handlers log at :debug, so the level is raised for this
+    # process only: the handler runs in the emitting process, which is the test
+    # process because `Handler.handle_request/2` is called directly.
+    test "a non-string resource uri neither raises in nor detaches the default logger" do
+      :ok = ConduitMcp.Telemetry.attach_default_handlers()
+      Logger.put_process_level(self(), :debug)
+
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "resources/read",
+        "params" => %{"uri" => %{}}
+      }
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
+          assert %{"error" => %{"code" => -32_602}} = Handler.handle_request(request, TestServer)
+        end)
+
+      assert "conduit-mcp-default-logger" in default_logger_ids([:conduit_mcp, :resource, :read])
+      assert "conduit-mcp-default-logger" in default_logger_ids([:conduit_mcp, :request, :stop])
+      assert log =~ "Resource read: uri= status=error"
+    end
+
+    test "client-sourced metadata cannot forge a log line" do
+      :ok = ConduitMcp.Telemetry.attach_default_handlers()
+      Logger.put_process_level(self(), :debug)
+
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tools/call",
+        "params" => %{"name" => "nope\n[error] FORGED", "arguments" => %{}}
+      }
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
+          Handler.handle_request(request, TestServer)
+        end)
+
+      assert log =~ "Tool executed: tool=nope[error] FORGED status=error"
+      refute log =~ "\n[error] FORGED"
+    end
+  end
+
+  defp default_logger_ids(event) do
+    event |> :telemetry.list_handlers() |> Enum.map(& &1.id)
   end
 end

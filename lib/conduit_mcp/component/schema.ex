@@ -41,6 +41,9 @@ defmodule ConduitMcp.Component.Schema do
   - `min: n` / `max: n` — Numeric constraints
   - `min_length: n` / `max_length: n` — String length constraints
   - `validator: fn` — Custom validator function
+  - `type_coercion: bool` — Overrides the global `:type_coercion` setting of
+    `ConduitMcp.Validation` for this field. The nested fields of an `:object`
+    inherit it unless they set their own.
   - `additional_properties: bool` — For `:object`: whether keys the block did
     not declare are accepted. Defaults to `false` when the field declares
     nested fields and `true` when it does not, and drives
@@ -239,8 +242,8 @@ defmodule ConduitMcp.Component.Schema do
       # Hide any enclosing object's field scope for the duration of the block.
       # Without this, a bare `field` inside an `:array` block nested in an
       # `:object` block would find the parent's scope open and silently land
-      # there as a sibling of the array (RC6, one level down) instead of being
-      # rejected by `__push_field__/3`.
+      # there as a sibling of the array instead of being rejected by
+      # `__push_field__/3`.
       parent_nested = ConduitMcp.Component.Schema.__hide_nested_scope__(__MODULE__)
       Module.put_attribute(__MODULE__, :__component_array_items, nil)
 

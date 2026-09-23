@@ -1,6 +1,7 @@
 defmodule ConduitMcp.HandlerTest do
   use ExUnit.Case, async: true
 
+  alias ConduitMcp.Cancellation
   alias ConduitMcp.Handler
   alias ConduitMcp.Protocol
   alias ConduitMcp.TestServer
@@ -319,6 +320,31 @@ defmodule ConduitMcp.HandlerTest do
     end
   end
 
+  # A tool that blocks until released, so a test can cancel it while it runs.
+  # It reports what `Cancellation.cancelled?/1` saw once released.
+  defmodule BlockingServer do
+    use ConduitMcp.Server, dsl: false
+
+    @impl true
+    def handle_call_tool(conn, "block", _params) do
+      send(conn.assigns.test_pid, {:blocked, self()})
+
+      receive do
+        :release ->
+          cancelled = to_string(ConduitMcp.Cancellation.cancelled?(conn))
+          {:ok, %{"content" => [%{"type" => "text", "text" => cancelled}]}}
+      end
+    end
+  end
+
+  defp cancel_notification(request_id, reason \\ nil) do
+    %{
+      "jsonrpc" => "2.0",
+      "method" => "notifications/cancelled",
+      "params" => %{"requestId" => request_id, "reason" => reason}
+    }
+  end
+
   describe "handle_request/2 with notifications" do
     test "handles notifications/initialized" do
       notification = %{
@@ -359,6 +385,10 @@ defmodule ConduitMcp.HandlerTest do
       caller = Plug.Conn.put_private(%Plug.Conn{}, :mcp_session_id, session <> "-a")
       other = Plug.Conn.put_private(%Plug.Conn{}, :mcp_session_id, session <> "-b")
 
+      # The same id in flight for both clients, as the handler tracks it.
+      :ok = Cancellation.track(request_id, Cancellation.scope(caller))
+      :ok = Cancellation.track(request_id, Cancellation.scope(other))
+
       assert :ok = Handler.handle_request(notification, TestServer, caller)
 
       scope = ConduitMcp.Cancellation.scope(caller)
@@ -367,6 +397,98 @@ defmodule ConduitMcp.HandlerTest do
 
       # The whole point of scoping: another client's identical id is untouched.
       refute ConduitMcp.Cancellation.cancelled?(request_id, ConduitMcp.Cancellation.scope(other))
+
+      Cancellation.untrack(request_id, Cancellation.scope(caller))
+      Cancellation.untrack(request_id, Cancellation.scope(other))
+    end
+
+    test "notifications/cancelled for an id not in flight is ignored without a row" do
+      # MCP lets a receiver ignore a cancellation for an unknown or completed
+      # request. Recording it anyway let an unauthenticated client fill its
+      # quota with ids that name nothing.
+      conn = Plug.Conn.put_private(%Plug.Conn{}, :mcp_session_id, "idle-#{unique()}")
+
+      assert :ok = Handler.handle_request(cancel_notification("nothing"), TestServer, conn)
+      refute Cancellation.cancelled?("nothing", Cancellation.scope(conn))
+    end
+
+    test "notifications/cancelled with a requestId over 256 bytes is invalid_params" do
+      conn = Plug.Conn.put_private(%Plug.Conn{}, :mcp_session_id, "long-#{unique()}")
+      scope = Cancellation.scope(conn)
+      request_id = String.duplicate("x", 257)
+
+      # In flight, so only the id check can be what refuses it: validation
+      # runs before the in-flight gate.
+      row = {{scope, request_id}, self()}
+      :ets.insert(:conduit_mcp_in_flight, row)
+      on_exit(fn -> :ets.delete_object(:conduit_mcp_in_flight, row) end)
+
+      response = Handler.handle_request(cancel_notification(request_id), TestServer, conn)
+
+      assert %{"id" => nil, "error" => error} = response
+      assert error["code"] == Protocol.invalid_params()
+      assert error["message"] =~ "at most 256 bytes"
+      refute Cancellation.cancelled?(request_id, scope)
+    end
+
+    test "a cancel for a request in flight reaches the running tool, and nothing outlives it" do
+      conn =
+        %Plug.Conn{}
+        |> Plug.Conn.put_private(:mcp_session_id, "in-flight-#{unique()}")
+        |> Plug.Conn.assign(:test_pid, self())
+
+      scope = Cancellation.scope(conn)
+
+      call = %{
+        "jsonrpc" => "2.0",
+        "id" => "block-1",
+        "method" => "tools/call",
+        "params" => %{"name" => "block", "arguments" => %{}}
+      }
+
+      task = Task.async(fn -> Handler.handle_request(call, BlockingServer, conn) end)
+      assert_receive {:blocked, tool_pid}
+
+      assert Cancellation.in_flight?("block-1", scope)
+      assert :ok = Handler.handle_request(cancel_notification("block-1"), BlockingServer, conn)
+
+      send(tool_pid, :release)
+      response = Task.await(task)
+
+      assert [%{"text" => "true"}] = response["result"]["content"]
+      refute Cancellation.in_flight?("block-1", scope)
+      refute Cancellation.cancelled?("block-1", scope)
+    end
+
+    test "a request finishing leaves its concurrent namesake in the same scope cancellable" do
+      # Clients reuse ids. The first request's untrack must remove only its own
+      # in-flight row, or the second can no longer be cancelled.
+      conn =
+        %Plug.Conn{}
+        |> Plug.Conn.put_private(:mcp_session_id, "dup-#{unique()}")
+        |> Plug.Conn.assign(:test_pid, self())
+
+      call = %{
+        "jsonrpc" => "2.0",
+        "id" => "dup-1",
+        "method" => "tools/call",
+        "params" => %{"name" => "block", "arguments" => %{}}
+      }
+
+      first = Task.async(fn -> Handler.handle_request(call, BlockingServer, conn) end)
+      assert_receive {:blocked, first_tool}
+      second = Task.async(fn -> Handler.handle_request(call, BlockingServer, conn) end)
+      assert_receive {:blocked, second_tool}
+
+      send(first_tool, :release)
+      assert [%{"text" => "false"}] = Task.await(first)["result"]["content"]
+
+      assert Cancellation.in_flight?("dup-1", Cancellation.scope(conn))
+      assert :ok = Handler.handle_request(cancel_notification("dup-1"), BlockingServer, conn)
+
+      send(second_tool, :release)
+      assert [%{"text" => "true"}] = Task.await(second)["result"]["content"]
+      refute Cancellation.in_flight?("dup-1", Cancellation.scope(conn))
     end
 
     test "notifications/cancelled with a non-scalar requestId returns invalid_params" do
@@ -403,7 +525,45 @@ defmodule ConduitMcp.HandlerTest do
       assert_receive {[:conduit_mcp, :request, :stop], ^ref, _measurements,
                       %{method: "notifications/cancelled", status: :error}}
     end
+
+    test "notifications/cancelled past the per-scope quota answers -32000 server_error" do
+      # Sends until the quota rejects rather than hard-coding its size, so the
+      # test does not touch the global config and stays async-safe; the
+      # unique session keeps every row in a scope no other test uses.
+      session = "quota-#{System.unique_integer([:positive])}"
+      conn = Plug.Conn.put_private(%Plug.Conn{}, :mcp_session_id, session)
+      scope = ConduitMcp.Cancellation.scope(conn)
+
+      notification = fn i ->
+        %{
+          "jsonrpc" => "2.0",
+          "method" => "notifications/cancelled",
+          "params" => %{"requestId" => "q-#{i}"}
+        }
+      end
+
+      {sent, rejection} =
+        Enum.reduce_while(1..10_000, {0, nil}, fn i, _acc ->
+          # Cancellations are recorded only for requests in flight.
+          :ok = Cancellation.track("q-#{i}", scope)
+
+          case Handler.handle_request(notification.(i), TestServer, conn) do
+            :ok -> {:cont, {i, nil}}
+            response -> {:halt, {i, response}}
+          end
+        end)
+
+      for i <- 1..sent//1, do: Cancellation.untrack("q-#{i}", scope)
+
+      on_exit(fn -> for i <- 1..sent//1, do: ConduitMcp.Cancellation.clear("q-#{i}", scope) end)
+
+      assert %{"id" => nil, "error" => error} = rejection
+      assert error["code"] == Protocol.server_error()
+      assert error["message"] =~ "Too many outstanding cancellations"
+    end
   end
+
+  defp unique, do: System.unique_integer([:positive])
 
   describe "handle_request/2 with invalid requests" do
     test "handles invalid JSON-RPC format" do
