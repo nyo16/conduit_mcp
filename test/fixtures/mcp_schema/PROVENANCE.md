@@ -13,3 +13,16 @@ Vendored unmodified for golden tests.
 | `2026-07-28/schema.json` | `schema/2026-07-28/schema.json` | `ef70b61f99b6d2e5e3b46863822eab08dff6a45bedc7a08914e0e5b133f40203` |
 
 Source URL pattern: `https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/<commit>/schema/<version>/schema.json`
+
+## Tasks extension (`io.modelcontextprotocol/tasks`)
+
+- Upstream: https://github.com/modelcontextprotocol/ext-tasks
+- Commit: `899c1bbc869567670093face3591b39c28ce3219` (default branch `main`)
+- Fetched: 2026-10-17
+- License: Apache-2.0
+
+| Local file | Upstream path | sha256 |
+|---|---|---|
+| `ext-tasks-2026-07-28/schema.json` | `schema/2026-07-28/schema.json` | `bf30afb7ac251e3e22c037b7a685f60ef6603031b5484c0d08b1fa0bbe86d460` |
+
+Source URL pattern: `https://raw.githubusercontent.com/modelcontextprotocol/ext-tasks/<commit>/schema/<version>/schema.json`

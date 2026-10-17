@@ -89,5 +89,7 @@ defmodule ConduitMcp.Handler.Tools do
   defp maybe_add_meta({:input_required, _input_requests, _request_state} = result, _params),
     do: result
 
+  defp maybe_add_meta({:task, _task} = result, _params), do: result
+
   defp maybe_add_meta({:error, _code, _message, _data} = error, _params), do: error
 end

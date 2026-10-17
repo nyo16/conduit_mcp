@@ -26,10 +26,11 @@ defmodule ConduitMcp.Plugs.HeaderValidation do
      version is supported.
   3. `Mcp-Method` is present, single, and equal to the body `method` — else
      `-32020`.
-  4. On `tools/call`, `prompts/get` and `resources/read` only: `Mcp-Name` is
-     present, single, and — after decoding the `=?base64?…?=` sentinel —
-     equal to `params.name` (`params.uri` for `resources/read`) — else
-     `-32020`.
+  4. On `tools/call`, `prompts/get`, `resources/read` and the tasks
+     extension's `tasks/get|update|cancel` only: `Mcp-Name` is present,
+     single, and — after decoding the `=?base64?…?=` sentinel — equal to
+     `params.name` (`params.uri` for `resources/read`, `params.taskId` for
+     `tasks/*`) — else `-32020`.
   5. On `tools/call`: for every parameter of the called tool annotated with
      `"x-mcp-header": "Name"`, `Mcp-Param-Name` must be present and match the
      argument (integers compare numerically, `42` equals `42.0`) when the

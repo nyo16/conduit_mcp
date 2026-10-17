@@ -2,9 +2,10 @@ defmodule ConduitMcp.EtsOwner do
   @moduledoc """
   Shared implementation for ConduitMCP's supervised ETS table owners.
 
-  Five subsystems keep state in `:public`, `:named_table` ETS tables that must
+  Six subsystems keep state in `:public`, `:named_table` ETS tables that must
   outlive the short-lived Bandit request process that happens to touch them
   first: `ConduitMcp.Session.EtsStore`, `ConduitMcp.Tasks.EtsStore`,
+  `ConduitMcp.Ext.Tasks.EtsStore` (when the tasks extension is enabled),
   `ConduitMcp.Cancellation` (its cancellation flags and its in-flight
   requests, one table each), `ConduitMcp.Transport.SSE`'s slot table (one row
   per live stream), and `ConduitMcp.OAuth.KeyProvider.JWKS`'s cache. Each

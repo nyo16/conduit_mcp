@@ -35,6 +35,14 @@ defmodule ConduitMcp.Protocol.Modern do
   and the `serverInfo` `_meta`, but never `ttlMs`/`cacheScope`, on any
   method (an interim result must not be cached).
 
+  ## Tasks
+
+  `{:task, task}` — a task created for a `tools/call` by the
+  `io.modelcontextprotocol/tasks` extension (`ConduitMcp.Ext.Tasks`) —
+  becomes a `CreateTaskResult`: the `Task` fields with
+  `"resultType" => "task"` and the `serverInfo` `_meta`, never
+  `ttlMs`/`cacheScope`.
+
   ## Errors
 
   Error responses keep the legacy shape. One code is rewritten: `-32002`
@@ -85,9 +93,9 @@ defmodule ConduitMcp.Protocol.Modern do
     * `:server_info` — `%{"name" => ..., "version" => ...}`, put into the
       result's `_meta`; omitted when absent.
     * `:cache` — a `t:cache/0` overriding the configured default for this
-      response (cacheable methods only).
+      response (cacheable methods only); `nil` means the default.
   """
-  @type option :: {:server_info, map()} | {:cache, cache()}
+  @type option :: {:server_info, map()} | {:cache, cache() | nil}
 
   @doc """
   Builds the modern JSON-RPC response to `method` request `id`.
@@ -126,6 +134,15 @@ defmodule ConduitMcp.Protocol.Modern do
         "inputRequests" => input_requests,
         "requestState" => request_state
       }
+      |> put_meta(Keyword.get(opts, :server_info))
+
+    Protocol.success_response(id, result)
+  end
+
+  def to_response(id, _method, {:task, task}, opts) when is_map(task) do
+    result =
+      task
+      |> Map.put("resultType", "task")
       |> put_meta(Keyword.get(opts, :server_info))
 
     Protocol.success_response(id, result)

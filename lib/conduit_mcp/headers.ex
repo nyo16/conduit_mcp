@@ -7,8 +7,10 @@ defmodule ConduitMcp.Headers do
   intermediaries can route requests without parsing the body:
 
     * `Mcp-Method` — the request `method`, on every request.
-    * `Mcp-Name` — `params.name` for `tools/call` and `prompts/get`, and
-      `params.uri` for `resources/read`.
+    * `Mcp-Name` — `params.name` for `tools/call` and `prompts/get`,
+      `params.uri` for `resources/read`, and `params.taskId` for the tasks
+      extension's `tasks/get`, `tasks/update` and `tasks/cancel`
+      ([ext-tasks routing headers](https://github.com/modelcontextprotocol/ext-tasks/blob/main/specification/2026-07-28/tasks.md#streamable-http-routing-headers)).
     * `Mcp-Param-{Name}` — tool arguments whose `inputSchema` property carries
       an `"x-mcp-header": "{Name}"` annotation.
 
@@ -36,7 +38,14 @@ defmodule ConduitMcp.Headers do
   @sentinel_suffix "?="
   @max_safe_integer 9_007_199_254_740_991
   @allowed_types ["string", "integer", "boolean"]
-  @name_methods %{"tools/call" => "name", "prompts/get" => "name", "resources/read" => "uri"}
+  @name_methods %{
+    "tools/call" => "name",
+    "prompts/get" => "name",
+    "resources/read" => "uri",
+    "tasks/get" => "taskId",
+    "tasks/update" => "taskId",
+    "tasks/cancel" => "taskId"
+  }
 
   @typedoc "An `x-mcp-header` annotation reachable from the schema root."
   @type header_param :: %{header: String.t(), path: [String.t()], type: String.t()}
@@ -99,9 +108,11 @@ defmodule ConduitMcp.Headers do
   @doc """
   Returns the `Mcp-Name` header for a request, or `nil` when none applies.
 
-  Only `tools/call` and `prompts/get` (from `params["name"]`) and
-  `resources/read` (from `params["uri"]`) carry the header, and only when that
-  param is a string. The value is encoded with `encode_value/1`.
+  Only `tools/call` and `prompts/get` (from `params["name"]`),
+  `resources/read` (from `params["uri"]`) and the tasks extension's
+  `tasks/get|update|cancel` (from `params["taskId"]`) carry the header, and
+  only when that param is a string. The value is encoded with
+  `encode_value/1`.
   """
   @spec name_header(String.t(), map()) :: {String.t(), String.t()} | nil
   def name_header(method, params) when is_map(params) do
@@ -122,8 +133,8 @@ defmodule ConduitMcp.Headers do
   def name_header_required?(method), do: Map.has_key?(@name_methods, method)
 
   @doc """
-  The `params` key `Mcp-Name` mirrors for `method` (`"name"` or `"uri"`), or
-  `nil` when the method carries no `Mcp-Name`.
+  The `params` key `Mcp-Name` mirrors for `method` (`"name"`, `"uri"` or
+  `"taskId"`), or `nil` when the method carries no `Mcp-Name`.
   """
   @spec name_param(String.t()) :: String.t() | nil
   def name_param(method), do: Map.get(@name_methods, method)

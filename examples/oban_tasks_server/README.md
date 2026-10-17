@@ -11,6 +11,31 @@ This is the production-shape companion to
 in-memory ETS + `Task.Supervisor` and has zero extra dependencies. Use
 that one for prototyping; use this one when you need durability.
 
+## Two protocol eras
+
+The same tools serve both eras:
+
+- **Modern (`2026-07-28`) — the tasks extension.** A client that sends
+  per-request `_meta` and declares
+  `clientCapabilities.extensions["io.modelcontextprotocol/tasks"]` gets a
+  `CreateTaskResult` (`resultType: "task"`) from `slow_render` /
+  `ask_then_render`. The tool returns `{:task, attrs}`; ConduitMCP stores
+  the task in `Examples.ObanTasks.ExtStore` (SQLite, compare-and-swap on a
+  `version` column) *before* answering, and the `:start` function enqueues
+  the Oban job. The worker reports through `ConduitMcp.Ext.Tasks`
+  (`progress/2`, `complete/2`, `require_input/3`, `cancelled?/1`). Clients
+  poll `tasks/get`, answer `inputRequests` with `tasks/update`, and cancel
+  with `tasks/cancel` (the task id doubles as the `Mcp-Name` header). A
+  modern client that does not declare the extension gets `-32021`. The
+  extension is experimental; enable it with
+  `config :conduit_mcp, :ext_tasks, store: Examples.ObanTasks.ExtStore`
+  (already in `config/config.exs`).
+- **Legacy (`2025-11-25`) — frozen reference.** Everything below this
+  section: `ConduitMcp.Tasks` rows in `Examples.ObanTasks.Store`,
+  `_meta.task.id`, `tasks/get|result|cancel|list`, and the
+  `provide_render_input` tool. `ConduitMcp.Tasks` is frozen and legacy-only;
+  keep this path for `2025-11-25` deployments.
+
 ## What it shows
 
 - **Pluggable task storage.** `examples/oban_tasks_server` registers
@@ -43,7 +68,7 @@ that one for prototyping; use this one when you need durability.
 | `ping` | Sync round-trip — proves the server is alive. |
 | `slow_render` | `task_support :supported`. Enqueues an Oban job. Updates `progress` from `0` to `100` over `duration_ms` ms, then `status: "completed"`. |
 | `ask_then_render` | `task_support :supported`. Pauses immediately with `status: "input_required"` and an elicitation schema in `metadata.elicit.schema`. Resumes once `provide_render_input` is called. |
-| `provide_render_input` | Stages `script` text under `metadata.input` and flips status back to `working` so the snoozed worker resumes. |
+| `provide_render_input` | Legacy only. Stages `script` text under `metadata.input` and flips status back to `working` so the snoozed worker resumes. (Modern clients answer the task's `inputRequests` with `tasks/update`.) |
 
 ## Prerequisites
 
@@ -347,6 +372,12 @@ just keep calling `ConduitMcp.Tasks.get/1`, `.cancel/1`, `.list/1`, etc.
 To switch back to the in-memory ETS store, delete that config line — the
 default takes over and `examples/async_tasks_server/` is the worked
 example for that path.
+
+The modern tasks extension has its own store behaviour,
+`ConduitMcp.Ext.Tasks.Store` (no `list`; owner-scoped; atomic updates),
+selected with `config :conduit_mcp, :ext_tasks, store: ...`; this example's
+is `Examples.ObanTasks.ExtStore`. Without `:store` the in-memory
+`ConduitMcp.Ext.Tasks.EtsStore` is used.
 
 ## Known limits
 

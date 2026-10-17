@@ -145,6 +145,9 @@ if Code.ensure_loaded?(PromEx) do
     - `{prefix}_session_cleanup_removed_total` - Sum of expired sessions evicted
       - Tags: `store`
     - `{prefix}_tasks_cleanup_removed_total` - Sum of terminal tasks evicted
+    - `{prefix}_ext_tasks_cleanup_removed_total` - Sum of expired
+      tasks-extension tasks evicted
+      - Tags: `store`
 
     ### MRTR Metrics
 
@@ -569,8 +572,8 @@ if Code.ensure_loaded?(PromEx) do
       )
     end
 
-    # Janitor metrics from [:conduit_mcp, :session, :cleanup] and
-    # [:conduit_mcp, :tasks, :cleanup].
+    # Janitor metrics from [:conduit_mcp, :session, :cleanup],
+    # [:conduit_mcp, :tasks, :cleanup] and [:conduit_mcp, :ext_tasks, :cleanup].
     defp cleanup_metrics(metric_prefix) do
       Event.build(
         :conduit_mcp_cleanup_metrics,
@@ -588,6 +591,14 @@ if Code.ensure_loaded?(PromEx) do
             event_name: [:conduit_mcp, :tasks, :cleanup],
             description: "Terminal MCP tasks evicted",
             measurement: :removed
+          ),
+          sum(
+            metric_prefix ++ [:ext_tasks, :cleanup, :removed, :total],
+            event_name: [:conduit_mcp, :ext_tasks, :cleanup],
+            description: "Expired MCP tasks-extension tasks evicted",
+            measurement: :removed,
+            tags: [:store],
+            tag_values: &extract_store_tag/1
           )
         ]
       )

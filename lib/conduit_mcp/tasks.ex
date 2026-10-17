@@ -2,6 +2,14 @@ defmodule ConduitMcp.Tasks do
   @moduledoc """
   Task management for long-running MCP operations (experimental).
 
+  > #### Frozen, legacy era only {: .info}
+  >
+  > This module serves the `2025-11-25` tasks methods (`tasks/get`,
+  > `tasks/cancel`, `tasks/result`, `tasks/list`) to legacy-era clients
+  > only. It is frozen: no new features, and it goes away with the legacy
+  > era. For the `2026-07-28` tasks extension
+  > (`io.modelcontextprotocol/tasks`) see `ConduitMcp.Ext.Tasks`.
+
   Tasks provide a durable state machine for operations that may take time to
   complete. Clients can poll for status, cancel in-flight operations, and
   receive results asynchronously.

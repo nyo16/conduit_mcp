@@ -13,6 +13,8 @@ defmodule ConduitMcp.Capabilities do
       and only when the base set advertises `resources` at all.
     * `completions: %{}` — `handle_complete/3`.
     * `logging: %{}` — `handle_set_log_level/2`.
+    * `extensions: %{"io.modelcontextprotocol/tasks" => %{}}` — modern era
+      only, while `ConduitMcp.Ext.Tasks` is enabled.
 
   Used for both the legacy `initialize` reply and the modern
   `server/discover` result (`ConduitMcp.Discover`). The two eras differ in
@@ -29,6 +31,8 @@ defmodule ConduitMcp.Capabilities do
       `toolsListChanged`/`promptsListChanged`/`resourcesListChanged`/
       `resourceSubscriptions` filters deliver whatever the server pushes
       with `ConduitMcp.notify_tools_changed/0` and friends.
+
+  The tasks extension is advertised on the modern era only.
   """
 
   alias ConduitMcp.ServerMeta
@@ -40,7 +44,8 @@ defmodule ConduitMcp.Capabilities do
 
   Options:
 
-    * `:era` — `:legacy` (default) or `:modern`; see the moduledoc.
+    * `:era` — `:legacy` (default) or `:modern`; see the moduledoc. Modern
+      may add the tasks extension.
 
   ## Examples
 
@@ -67,6 +72,7 @@ defmodule ConduitMcp.Capabilities do
     |> put_change_notifications(server_module, era)
     |> maybe_put_completions(server_module)
     |> maybe_put_logging(server_module)
+    |> maybe_put_tasks_extension(Keyword.get(opts, :era, :legacy))
   end
 
   defp base(server_module) do
@@ -125,4 +131,19 @@ defmodule ConduitMcp.Capabilities do
       caps
     end
   end
+
+  defp maybe_put_tasks_extension(caps, :modern) do
+    if ConduitMcp.Ext.Tasks.enabled?() do
+      Map.update(
+        caps,
+        "extensions",
+        %{ConduitMcp.Ext.Tasks.extension() => %{}},
+        &Map.put(&1, ConduitMcp.Ext.Tasks.extension(), %{})
+      )
+    else
+      caps
+    end
+  end
+
+  defp maybe_put_tasks_extension(caps, _era), do: caps
 end
