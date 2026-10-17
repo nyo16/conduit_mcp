@@ -26,6 +26,7 @@ defmodule ConduitMcp.Client.Connection.Requests do
 
   alias ConduitMcp.Client.Connection.Data
   alias ConduitMcp.Client.Error
+  alias ConduitMcp.Client.OAuth.Challenge
   alias ConduitMcp.Client.Telemetry
 
   @unsupported_protocol_version ConduitMcp.Errors.unsupported_protocol_version()
@@ -135,7 +136,9 @@ defmodule ConduitMcp.Client.Connection.Requests do
       info = if Keyword.get(opts, :progress, false), do: %{progress_token: id}, else: %{}
       info = Map.put(info, :extensions, Keyword.get(opts, :extensions, %{}))
 
-      case Data.send_request(data, id, method, params, info, mref, []) do
+      wire_opts = Keyword.take(opts, [:headers, :max_deadline])
+
+      case Data.send_request(data, id, method, params, info, mref, wire_opts) do
         {:ok, handle, data} ->
           entry = %{
             mref: mref,
@@ -205,11 +208,44 @@ defmodule ConduitMcp.Client.Connection.Requests do
       {entry, data} ->
         case outcome do
           :ok -> :ok
+          {:error, %Error{} = error} -> reply(entry.mref, {:error, error})
           {:error, reason} -> reply(entry.mref, {:error, Error.new(:transport, reason)})
         end
 
         {data, [cancel_timer(id)]}
     end
+  end
+
+  @doc """
+  The server refused request `id` with HTTP 401 or 403: answer `kind:
+  :auth`, with the status and the parsed `WWW-Authenticate` challenges in
+  `data`. `:unknown` when `id` is not a caller's request.
+  """
+  @spec unauthorized(pos_integer(), map(), Data.t()) :: result() | :unknown
+  def unauthorized(id, info, data) do
+    case pop(data, id) do
+      {nil, _data} ->
+        :unknown
+
+      {entry, data} ->
+        reply(entry.mref, {:error, auth_error(info)})
+        {data, [cancel_timer(id)]}
+    end
+  end
+
+  @doc "The `kind: :auth` error for an HTTP 401/403 (`%{status:, challenges:}`)."
+  @spec auth_error(map()) :: Error.t()
+  def auth_error(%{status: status} = info) do
+    challenges = Map.get(info, :challenges, [])
+
+    reason =
+      cond do
+        status == 401 -> :unauthorized
+        Enum.any?(challenges, &Challenge.insufficient_scope?/1) -> :insufficient_scope
+        true -> :forbidden
+      end
+
+    Error.new(:auth, reason, %{status: status, challenges: challenges})
   end
 
   @doc "The deadline of request `id` passed: cancel it and answer `:timeout`."

@@ -7,6 +7,7 @@ defmodule ConduitMcp.Client.Connection.Handshake do
 
   alias ConduitMcp.Client.Cache
   alias ConduitMcp.Client.Connection.Data
+  alias ConduitMcp.Client.Connection.Listen
   alias ConduitMcp.Client.Connection.Requests
   alias ConduitMcp.Client.Connection.ServerRequests
   alias ConduitMcp.Client.DiscoverResult
@@ -256,8 +257,36 @@ defmodule ConduitMcp.Client.Connection.Handshake do
 
   defp ready(data) do
     data = Data.set_session(%{data | handshake: nil})
-    {:next_state, :ready, data}
+    {data, actions} = Listen.on_ready(data)
+    {:next_state, :ready, data, actions}
   end
+
+  @doc """
+  The `initialize` request failed without an answer: an invalid answer
+  (`kind: :protocol`, for example an invalid session id) closes; anything
+  else reconnects.
+  """
+  @spec initialize_failed(pos_integer(), term(), Data.t()) :: result()
+  def initialize_failed(id, %Error{kind: kind} = error, %Data{handshake: %{id: id}} = data)
+      when kind in [:protocol, :auth],
+      do: close(error, data)
+
+  def initialize_failed(id, reason, %Data{handshake: %{id: id}} = data),
+    do: reconnect(reason, data)
+
+  def initialize_failed(_id, _reason, _data), do: :keep_state_and_data
+
+  @doc """
+  A legacy session expired (HTTP 404 to a request that carried its id):
+  initialize a new session without failing the requests in flight; the
+  transport re-sends the expired ones once it is ready. Several 404s of
+  one session renew it once.
+  """
+  @spec session_expired(atom(), Data.t()) :: result()
+  def session_expired(:ready, %Data{era: :legacy} = data),
+    do: begin_initialize(%{data | reason: :session_expired}, false)
+
+  def session_expired(_state, _data), do: :keep_state_and_data
 
   @doc """
   Something failed that a new connection may fix: fail every pending request
@@ -324,14 +353,14 @@ defmodule ConduitMcp.Client.Connection.Handshake do
       | reason: reason,
         handshake: nil,
         internal: %{},
-        health_id: nil,
-        health_misses: 0
+        health: {nil, 0}
     }
 
     {data, actions} = Requests.fail_all(data, error)
     {data, stop_actions} = ServerRequests.stop_all(data)
+    {data, listen_actions} = Listen.reset(data, error)
     Cache.mark_all_stale(data.cache)
-    {Data.close_transport(data, reason), actions ++ stop_actions}
+    {Data.close_transport(data, reason), actions ++ stop_actions ++ listen_actions}
   end
 
   @doc "A `state_timeout` fired in `state`."
@@ -379,8 +408,8 @@ defmodule ConduitMcp.Client.Connection.Handshake do
       ),
       do: initialize_result(message, data)
 
-  def internal_response(id, :health, _message, _state, %Data{health_id: id} = data),
-    do: {:keep_state, %{data | health_id: nil, health_misses: 0}}
+  def internal_response(id, :health, _message, _state, %Data{health: {id, _misses}} = data),
+    do: {:keep_state, %{data | health: {nil, 0}}}
 
   # The answer to a `tasks/cancel` sent for a dead caller (`TaskWatch`).
   def internal_response(_id, :task_cancel, _message, _state, data), do: {:keep_state, data}
@@ -419,20 +448,15 @@ defmodule ConduitMcp.Client.Connection.Handshake do
   @spec health_tick(Data.t()) :: result()
   def health_tick(data) do
     data =
-      case data.health_id do
-        nil ->
+      case data.health do
+        {nil, _misses} ->
           data
 
-        id ->
-          %{
-            data
-            | health_id: nil,
-              health_misses: data.health_misses + 1,
-              internal: Map.delete(data.internal, id)
-          }
+        {id, misses} ->
+          %{data | health: {nil, misses + 1}, internal: Map.delete(data.internal, id)}
       end
 
-    if data.health_misses >= 2 do
+    if elem(data.health, 1) >= 2 do
       reconnect(:health_check_failed, data)
     else
       send_health_check(data)
@@ -445,7 +469,8 @@ defmodule ConduitMcp.Client.Connection.Handshake do
 
     case Data.send_request(data, id, method, %{}, %{}, nil, []) do
       {:ok, _handle, data} ->
-        data = %{data | health_id: id, internal: Map.put(data.internal, id, :health)}
+        {_id, misses} = data.health
+        data = %{data | health: {id, misses}, internal: Map.put(data.internal, id, :health)}
         {:keep_state, data, [health_timer(data)]}
 
       {:error, reason, data} ->

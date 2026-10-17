@@ -65,7 +65,8 @@ defmodule ConduitMcp.Client.Request do
     :reset_timeout_on_progress,
     :max_total_timeout,
     :assigns,
-    :extensions
+    :extensions,
+    :headers
   ]
 
   @typedoc """
@@ -122,6 +123,10 @@ defmodule ConduitMcp.Client.Request do
     * `:extensions` - extension capabilities to declare in this request's
       modern `clientCapabilities` (for example
       `%{"io.modelcontextprotocol/tasks" => %{}}`).
+    * `:headers` - extra HTTP headers for a modern request over an `:http`
+      transport, as lowercase `{name, value}` string pairs (the
+      `Mcp-Param-*` headers of `ConduitMcp.Headers.param_headers/2`);
+      ignored by other transports.
 
   ## Example
 
@@ -282,6 +287,7 @@ defmodule ConduitMcp.Client.Request do
     reset? = Keyword.get(opts, :reset_timeout_on_progress, false)
     assigns = Keyword.get(opts, :assigns)
     extensions = Keyword.get(opts, :extensions, %{})
+    headers = Keyword.get(opts, :headers, [])
 
     for {key, value} <- [timeout: timeout, max_total_timeout: max_total],
         not (is_integer(value) and value > 0) do
@@ -301,6 +307,14 @@ defmodule ConduitMcp.Client.Request do
       raise ArgumentError, ":extensions must be a map, got: #{inspect(extensions)}"
     end
 
+    unless is_list(headers) and
+             Enum.all?(
+               headers,
+               &match?({name, value} when is_binary(name) and is_binary(value), &1)
+             ) do
+      raise ArgumentError, ":headers must be a list of {name, value} strings"
+    end
+
     %{
       timeout: timeout,
       deadline: now + timeout,
@@ -308,7 +322,8 @@ defmodule ConduitMcp.Client.Request do
       reset?: reset? == true,
       on_progress: on_progress,
       assigns: assigns,
-      extensions: extensions
+      extensions: extensions,
+      headers: headers
     }
   end
 
@@ -320,7 +335,8 @@ defmodule ConduitMcp.Client.Request do
       reset_on_progress: settings.reset?,
       progress: settings.on_progress != nil or settings.reset?,
       assigns: settings.assigns,
-      extensions: settings.extensions
+      extensions: settings.extensions,
+      headers: settings.headers
     ]
   end
 

@@ -19,6 +19,9 @@ defmodule ConduitMcp.Client.Transport do
        raises an `ArgumentError` naming it in `child_spec/1` or
        `start_link/1` instead of failing the connection later. It returns
        the options `c:init/2` will get (with defaults filled in).
+       `c:child_specs/2` (optional) - processes the client supervisor starts
+       before the connection and keeps across connection attempts (an HTTP
+       pool), stopped with the client.
     1. `c:init/2` - once per connection attempt. Validates options and builds
        the state; no I/O. The first call happens while the client starts, so
        an `{:error, reason}` there fails `ConduitMcp.Client.start_link/1`.
@@ -59,8 +62,18 @@ defmodule ConduitMcp.Client.Transport do
       as `{:error, {:transport_error, reason}}`, so the connection can apply
       `ConduitMcp.Client.Negotiation.classify_probe/3`.
 
-  `wire_opts` is a keyword list; the keys defined today are `:probe` (see
-  above). Unknown keys must be ignored.
+  `wire_opts` is a keyword list; unknown keys must be ignored. The keys
+  defined today:
+
+    * `:probe` - see above.
+    * `:max_deadline` - the absolute (`System.monotonic_time(:millisecond)`)
+      time after which the connection will certainly have cancelled a
+      caller's request; a transport may bound its own work by it.
+    * `:headers` - extra `{name, value}` HTTP headers for a modern request
+      (the `Mcp-Param-*` headers computed by the caller).
+    * `:listen` - the request is a modern `subscriptions/listen`: its answer
+      is a long-lived stream of notifications tagged with its id, ended by
+      the server's result or by `c:cancel/4`; it has no deadline.
 
   ## Cancellation (`c:cancel/4`)
 
@@ -89,6 +102,15 @@ defmodule ConduitMcp.Client.Transport do
       request; `related` is the id of the client request it belongs to, or
       `nil`. The connection answers it through `c:respond/2`, which a
       transport emitting this event must implement.
+    * `{:unauthorized, id, %{status: 401 | 403, challenges: list}}` - the
+      server refused request `id` for want of credentials or scope (HTTP);
+      the connection fails it with `kind: :auth`. `challenges` are
+      `ConduitMcp.Client.OAuth.Challenge` structs.
+    * `{:session_expired, id}` - the server no longer knows the legacy
+      session request `id` was sent in (HTTP 404). The connection
+      initializes a new session without failing anything; the transport
+      re-sends `id` itself (once) when `c:set_session/2` reports the new
+      session.
     * `{:closed, reason}` - the transport can no longer carry messages; the
       connection fails every pending request and reconnects.
 
@@ -119,6 +141,8 @@ defmodule ConduitMcp.Client.Transport do
           | {:exchange_done, id(), :ok | {:error, term()}}
           | {:notification, method :: String.t(), params :: map()}
           | {:server_request, id :: term(), message :: map(), related :: id() | nil}
+          | {:unauthorized, id(), %{status: 401 | 403, challenges: list()}}
+          | {:session_expired, id()}
           | {:closed, reason :: term()}
 
   @doc "The transport family; see the moduledoc."
@@ -129,6 +153,13 @@ defmodule ConduitMcp.Client.Transport do
   error message names the offending key.
   """
   @callback validate_options(opts :: keyword()) :: {:ok, keyword()} | {:error, String.t()}
+
+  @doc """
+  Child specs the client's supervisor starts before the connection (and
+  stops with the client), given the validated options and the client's
+  name. Called once per client start.
+  """
+  @callback child_specs(opts :: keyword(), key :: term()) :: [Supervisor.child_spec()]
 
   @doc "Validates `opts` and builds the transport state. Must not block."
   @callback init(opts :: keyword(), init_context()) :: {:ok, state()} | {:error, term()}
@@ -167,5 +198,5 @@ defmodule ConduitMcp.Client.Transport do
   @doc "Releases everything the transport holds. Bounded by the connection's shutdown."
   @callback close(state(), reason :: term()) :: :ok
 
-  @optional_callbacks respond: 2, set_session: 2, validate_options: 1
+  @optional_callbacks respond: 2, set_session: 2, validate_options: 1, child_specs: 2
 end

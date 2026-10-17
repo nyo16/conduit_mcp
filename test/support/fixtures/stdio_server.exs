@@ -20,10 +20,19 @@
 #   never_answer_discover  never answer server/discover (a silent legacy server)
 #   slow:MS                wait MS milliseconds before every reply
 #   huge_line              answer tools/call with 20 MB and no newline
+#
+# A modern `subscriptions/listen` is served in every mode: the fixture writes
+# the acknowledgment, then relays what `ConduitMcp.Subscriptions` publishes
+# (tagged with `_meta.subscriptionId`) from a separate process, until the
+# client sends `notifications/cancelled` for the listen.
 
 defmodule ConduitMcp.Test.StdioServerScript do
   alias ConduitMcp.Handler
+  alias ConduitMcp.Notifications
   alias ConduitMcp.StreamSpec
+  alias ConduitMcp.Subscriptions
+
+  @subscription_id "io.modelcontextprotocol/subscriptionId"
 
   def main(argv) do
     # stdout carries the protocol: logs go to stderr.
@@ -58,7 +67,8 @@ defmodule ConduitMcp.Test.StdioServerScript do
       mode: parse_mode(List.first(rest) || "normal"),
       server: server,
       conn: conn,
-      answered: 0
+      answered: 0,
+      listens: %{}
     })
   end
 
@@ -99,14 +109,56 @@ defmodule ConduitMcp.Test.StdioServerScript do
         IO.binwrite(:stdio, :binary.copy("x", 20_000_000))
         state
 
+      message["method"] == "notifications/cancelled" and
+          Map.has_key?(state.listens, message["params"]["requestId"]) ->
+        {relay, listens} = Map.pop(state.listens, message["params"]["requestId"])
+        Process.exit(relay, :kill)
+        %{state | listens: listens}
+
       true ->
         case Handler.dispatch(message, state.server, state.conn) do
           {:reply, response} -> reply(response, state)
+          {:stream, %StreamSpec{kind: :listen} = spec} -> listen(spec, state)
           {:stream, spec} -> reply(StreamSpec.run(spec), state)
           :noreply -> state
         end
     end
   end
+
+  defp listen(%StreamSpec{request_id: id, subscription: filter}, state) do
+    started = self()
+
+    relay =
+      spawn(fn ->
+        ref = make_ref()
+        :ok = Subscriptions.subscribe(filter.topics, ref)
+        write(tag(Notifications.subscriptions_acknowledged_notification(filter.ack), id))
+        send(started, :listening)
+        relay(ref, id)
+      end)
+
+    receive do
+      :listening -> :ok
+    end
+
+    %{state | listens: Map.put(state.listens, id, relay)}
+  end
+
+  defp relay(ref, id) do
+    receive do
+      {Subscriptions, ^ref, notification} ->
+        write(tag(notification, id))
+        relay(ref, id)
+    end
+  end
+
+  defp tag(message, id) do
+    params = Map.get(message, "params") || %{}
+    meta = Map.get(params, "_meta") || %{}
+    Map.put(message, "params", Map.put(params, "_meta", Map.put(meta, @subscription_id, id)))
+  end
+
+  defp write(message), do: IO.binwrite(:stdio, [JSON.encode!(message), ?\n])
 
   defp reply(response, state) do
     case state.mode do

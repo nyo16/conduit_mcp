@@ -90,12 +90,35 @@ defmodule ConduitMcp.Client.Connection do
   marks the matching `ConduitMcp.Client.Cache` list stale and, if it was
   ever fetched, refreshes it (at most two refreshes per burst).
 
+  ## Change notifications and resource subscriptions
+
+  Modern servers send change notifications only on a `subscriptions/listen`
+  stream. The connection opens one itself once the client has a consumer
+  (a cached list, a notification subscriber, or a handler taking
+  notifications) for a kind the server advertises `listChanged` for, or a
+  resource subscription (`ConduitMcp.Client.subscribe/2`), with the union
+  of those as its filter. Notifications are routed only for a live listen,
+  with its `subscriptionId` removed. A filter change opens a new listen
+  and closes the old one once the new one is acknowledged; a listen that
+  ends is reopened after the backoff, and one that dropped also marks the
+  cache stale. At most four listens exist at once. Legacy servers get
+  `resources/subscribe` instead. Resource subscriptions survive reconnects:
+  each new session or listen carries them again.
+
   ## Cache
 
   The connection owns and is the only writer of the client's
   `ConduitMcp.Client.Cache` table, but never fetches lists itself: a
   refresh runs in a task under the client's `Task.Supervisor` and reports
   back. Losing the connection marks every cached list stale.
+
+  ## HTTP outcomes
+
+  A transport may report a request refused for credentials (`{:unauthorized,
+  id, info}`: the caller gets `kind: :auth`) or a legacy session the server
+  no longer knows (`{:session_expired, id}`): the connection then runs a new
+  `initialize` without failing the requests in flight, and the transport
+  re-sends the expired ones once (`ConduitMcp.Client.Transport`).
 
   ## Server-to-client requests (legacy)
 
@@ -134,6 +157,7 @@ defmodule ConduitMcp.Client.Connection do
   alias ConduitMcp.Client.Connection.Data
   alias ConduitMcp.Client.Connection.Handshake
   alias ConduitMcp.Client.Connection.Inbound
+  alias ConduitMcp.Client.Connection.Listen
   alias ConduitMcp.Client.Connection.Notifier
   alias ConduitMcp.Client.Connection.Refresh
   alias ConduitMcp.Client.Connection.Requests
@@ -215,7 +239,8 @@ defmodule ConduitMcp.Client.Connection do
   def handle_event(:info, {ref, answer} = message, state, data) when is_reference(ref) do
     case Data.job(data, ref) do
       {:server_request, id} -> result(ServerRequests.reply(id, ref, answer, data))
-      {:refresh, kind} -> {:keep_state, Refresh.done(kind, ref, answer, data)}
+      # A list written to the cache may give the modern listen a new filter.
+      {:refresh, kind} -> sync(Refresh.done(kind, ref, answer, data), state)
       :error -> transport_info(message, state, data)
     end
   end
@@ -230,6 +255,8 @@ defmodule ConduitMcp.Client.Connection do
 
   def handle_event({:timeout, {:server_request, id}}, id, _state, data),
     do: result(ServerRequests.timeout(id, data))
+
+  def handle_event({:timeout, :listen}, nil, state, data), do: result(Listen.timer(data, state))
 
   def handle_event({:timeout, :health}, nil, :ready, data), do: Handshake.health_tick(data)
   def handle_event({:timeout, :health}, nil, _state, _data), do: :keep_state_and_data
@@ -278,36 +305,92 @@ defmodule ConduitMcp.Client.Connection do
 
   defp transport_event({:response, id, message}, state, data) do
     case Map.fetch(data.internal, id) do
-      {:ok, purpose} ->
-        data = %{data | internal: Map.delete(data.internal, id)}
-        Handshake.internal_response(id, purpose, message, state, data)
-
-      :error ->
-        response(id, message, state, data)
+      {:ok, purpose} -> internal_outcome(id, purpose, {:response, message}, state, data)
+      :error -> response(id, message, state, data)
     end
   end
 
-  defp transport_event({:exchange_done, id, outcome}, _state, data) do
+  defp transport_event({:exchange_done, id, outcome}, state, data) do
     case {Map.fetch(data.internal, id), outcome} do
-      {{:ok, :discover}, {:error, reason}} ->
-        Handshake.discover_failed(id, reason, %{data | internal: Map.delete(data.internal, id)})
-
-      {{:ok, _purpose}, _outcome} ->
-        :keep_state_and_data
-
-      {:error, _} ->
-        result(Requests.exchange_done(id, outcome, data))
+      {{:ok, purpose}, {:error, _reason}} -> internal_outcome(id, purpose, outcome, state, data)
+      {{:ok, _purpose}, :ok} -> :keep_state_and_data
+      {:error, _} -> result(Requests.exchange_done(id, outcome, data))
     end
   end
 
-  defp transport_event({:notification, method, params}, _state, data),
-    do: result(Inbound.notification(method, params, data))
+  # HTTP 401/403: the request fails with `kind: :auth` (the OAuth phase
+  # hooks in here).
+  defp transport_event({:unauthorized, id, info}, state, data) do
+    case Requests.unauthorized(id, info, data) do
+      :unknown ->
+        case Map.fetch(data.internal, id) do
+          {:ok, purpose} ->
+            error = Requests.auth_error(info)
+            internal_outcome(id, purpose, {:error, error}, state, data)
+
+          :error ->
+            :keep_state_and_data
+        end
+
+      result ->
+        result(result)
+    end
+  end
+
+  # A legacy session ended (HTTP 404): renew it; the transport re-sends the
+  # request once the new session is ready.
+  defp transport_event({:session_expired, _id}, state, data),
+    do: Handshake.session_expired(state, data)
+
+  defp transport_event({:notification, method, params}, state, data) do
+    params = if is_map(params), do: params, else: %{}
+
+    case Listen.notification(method, params, data, state) do
+      {:route, params, data, actions} ->
+        {data, more} = Inbound.notification(method, params, data)
+        {:keep_state, data, actions ++ more}
+
+      {:handled, data, actions} ->
+        {:keep_state, data, actions}
+    end
+  end
 
   defp transport_event({:server_request, id, message, related}, _state, data),
     do: result(ServerRequests.start(id, message, related, data))
 
   defp transport_event({:closed, reason}, state, data),
     do: Handshake.transport_closed(state, reason, data)
+
+  # The answer to one of the connection's own requests.
+  defp internal_outcome(id, :listen, outcome, _state, data),
+    do: result(Listen.ended(id, outcome, data))
+
+  defp internal_outcome(id, purpose, outcome, _state, data)
+       when purpose == :resubscribe or (is_tuple(purpose) and elem(purpose, 0) == :resource) do
+    data = %{data | internal: Map.delete(data.internal, id)}
+    {:keep_state, Listen.legacy_done(purpose, outcome, data)}
+  end
+
+  defp internal_outcome(id, purpose, {:response, message}, state, data) do
+    data = %{data | internal: Map.delete(data.internal, id)}
+    Handshake.internal_response(id, purpose, message, state, data)
+  end
+
+  # A pinned discover refused with HTTP 401/403 (a probe reports the status
+  # to `ConduitMcp.Client.Negotiation` instead).
+  defp internal_outcome(id, :discover, {:error, %Error{kind: :auth} = error}, _state, data),
+    do: Handshake.close(error, %{data | internal: Map.delete(data.internal, id)})
+
+  defp internal_outcome(id, :discover, {:error, reason}, _state, data),
+    do: Handshake.discover_failed(id, reason, %{data | internal: Map.delete(data.internal, id)})
+
+  defp internal_outcome(id, :initialize, {:error, reason}, _state, data),
+    do: Handshake.initialize_failed(id, reason, %{data | internal: Map.delete(data.internal, id)})
+
+  # A health check or a dead caller's `tasks/cancel` that failed: a missed
+  # health check is counted by its timer.
+  defp internal_outcome(id, _purpose, {:error, _reason}, _state, data),
+    do: {:keep_state, %{data | internal: Map.delete(data.internal, id)}}
 
   defp response(id, message, state, data) do
     case Requests.response(id, message, state, data) do
@@ -348,7 +431,7 @@ defmodule ConduitMcp.Client.Connection do
          :unknown <- TaskWatch.down(ref, state, data) do
       transport_info(message, state, data)
     else
-      %Data{} = data -> {:keep_state, data}
+      %Data{} = data -> sync(data, state)
       result -> result(result)
     end
   end
@@ -364,9 +447,11 @@ defmodule ConduitMcp.Client.Connection do
 
   defp control(:close, mref, :closed, _data), do: reply(mref, :ok)
 
+  # Answered after the teardown, so a legacy session's DELETE has been sent
+  # when `ConduitMcp.Client.close/1` returns.
   defp control(:close, mref, _state, data) do
-    Requests.reply(mref, :ok)
     {data, actions} = Handshake.user_close(data)
+    Requests.reply(mref, :ok)
     {:next_state, :closed, data, actions}
   end
 
@@ -376,15 +461,24 @@ defmodule ConduitMcp.Client.Connection do
     {:next_state, :connecting, data, actions}
   end
 
-  defp control({:subscribe, pid}, mref, _state, data) do
+  defp control({:subscribe, pid}, mref, state, data) do
     Requests.reply(mref, :ok)
-    {:keep_state, Inbound.subscribe(pid, data)}
+    sync(Inbound.subscribe(pid, data), state)
   end
 
-  defp control({:unsubscribe, pid}, mref, _state, data) do
+  defp control({:unsubscribe, pid}, mref, state, data) do
     Requests.reply(mref, :ok)
-    {:keep_state, Inbound.unsubscribe(pid, data)}
+    sync(Inbound.unsubscribe(pid, data), state)
   end
+
+  defp control({:resource_subscription, op, uri}, mref, :ready, data),
+    do: result(Listen.change(op, uri, mref, data))
+
+  defp control({:resource_subscription, _op, _uri}, mref, :closed, data),
+    do: reply(mref, {:error, Requests.closed_error(data)})
+
+  defp control({:resource_subscription, _op, _uri}, _mref, _state, _data),
+    do: {:keep_state_and_data, [:postpone]}
 
   defp control({:refresh, kind, opts}, mref, _state, data),
     do: {:keep_state, Refresh.demand(kind, mref, opts, data)}
@@ -408,6 +502,12 @@ defmodule ConduitMcp.Client.Connection do
   end
 
   defp result({data, actions}), do: {:keep_state, data, actions}
+
+  # The modern listen filter follows the client's consumers.
+  defp sync(%Data{} = data, state) do
+    {data, actions} = Listen.sync(data, state)
+    {:keep_state, data, actions}
+  end
 
   # --- shutdown ----------------------------------------------------------------
 
