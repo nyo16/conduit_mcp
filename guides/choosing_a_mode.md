@@ -13,6 +13,11 @@ ConduitMCP offers three ways to build MCP servers. Each mode gives you a differe
 | **Response helpers** | `text/1`, `json/1`, `error/1` | Build maps yourself | `text/1`, `json/1`, `error/1` |
 | **Rate limiting** | Transport option | Transport option | Declarative in `use` opts |
 | **Params format** | String-keyed maps | String-keyed maps | Atom-keyed maps |
+| **Completions** | `complete` in `prompt`/`resource` blocks | `handle_complete/3` | Not supported |
+| **`Mcp-Param-*` headers** | `param ..., header:` (checked at compile time) | `"x-mcp-header"` in your schema (invalid ones logged, then skipped) | `field ..., header:` (checked at compile time) |
+| **Cache hints** | `cache ttl_ms:, scope:` | `__cache_hints__/0`, else the global default | `cache:` component option |
+| **Instructions** | `use ConduitMcp.Server, instructions:` | `use ConduitMcp.Server, dsl: false, instructions:` | `use ConduitMcp.Endpoint, instructions:` |
+| **MRTR, tasks** | Handler return value | Callback return value | `execute/2` return value |
 | **Best for** | Quick setup, small servers | Maximum control, custom schemas | Larger servers, team projects |
 
 ## When to Use Each
@@ -83,3 +88,7 @@ end
 ## Mixing Modes
 
 The three modes are **independent alternatives** — you pick one per server module. However, you can have multiple server modules in the same application, each using a different mode.
+
+## Protocol Eras
+
+Every mode serves both protocol eras from the same module: modern (`2026-07-28`, per-request `_meta`, no sessions) and legacy (`2025-11-25`/`2025-06-18`, `initialize`). Callbacks don't change. The modern-only features — [MRTR](mrtr.md), [Subscriptions](subscriptions.md), the [Tasks Extension](tasks_extension.md), cache hints, streamed tool responses — work the same way in each mode. See [Protocol Eras](protocol_eras.md).
