@@ -10,7 +10,22 @@ if Code.ensure_loaded?(PromEx) do
         metrics = PromEx.event_metrics(opts)
 
         assert is_list(metrics)
-        assert length(metrics) == 10
+        assert length(metrics) == 11
+      end
+
+      # Tool names and notification methods come from the server, and client
+      # names may be per tenant: none may become a label.
+      test "client metrics are tagged with closed sets only" do
+        group =
+          Enum.find(
+            PromEx.event_metrics(otp_app: :test_app),
+            &(&1.group_name == :conduit_mcp_client_metrics)
+          )
+
+        for metric <- group.metrics do
+          assert metric.tags -- [:method, :status, :error_kind, :is_error, :to, :reason] == [],
+                 inspect(metric.name)
+        end
       end
 
       # The plugin used to skip rate limiting, cancellation and the janitors,

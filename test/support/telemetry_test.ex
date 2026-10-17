@@ -27,6 +27,13 @@ defmodule ConduitMcp.TelemetryTestHelper do
   events emitted from a spawned process must attach from that process,
   or filter on a correlation value in the metadata instead.
 
+  `attach_event_handlers/3` with `match:` is the variant for events emitted
+  from another process (for example a `ConduitMcp.Client.Connection`): it
+  forwards an event from any process whose metadata contains every
+  key/value of `match`. Use a value unique to the test, such as a client
+  name built with `make_ref()`, so concurrent tests cannot satisfy each
+  other's assertions.
+
   `detach/1` remains as an explicit cleanup hook for tests that don't
   want to rely on `on_exit` ordering.
   """
@@ -41,8 +48,26 @@ defmodule ConduitMcp.TelemetryTestHelper do
   handler set for `detach/1`.
   """
   def attach_event_handlers(pid, events) do
-    ref = make_ref()
     emitter = self()
+    attach(pid, events, fn _metadata -> self() == emitter end)
+  end
+
+  @doc """
+  Attaches forwarding handlers for `events`, sending to `pid` every
+  emission, from any process, whose metadata matches `opts[:match]` (a map
+  of key => value that must all be equal). Returns the `ref` as
+  `attach_event_handlers/2` does.
+  """
+  def attach_event_handlers(pid, events, opts) do
+    match = Keyword.fetch!(opts, :match)
+
+    attach(pid, events, fn metadata ->
+      Enum.all?(match, fn {key, value} -> Map.fetch(metadata, key) == {:ok, value} end)
+    end)
+  end
+
+  defp attach(pid, events, forward?) do
+    ref = make_ref()
 
     # `System.unique_integer/1`, not `:erlang.phash2(ref)`: phash2 is a 27-bit
     # hash, and a collision between two live handler sets makes
@@ -62,7 +87,7 @@ defmodule ConduitMcp.TelemetryTestHelper do
             event,
             fn event_name, measurements, metadata, _config ->
               # Runs inline in the emitting process.
-              if self() == emitter do
+              if forward?.(metadata) do
                 send(pid, {event_name, ref, measurements, metadata})
               end
 

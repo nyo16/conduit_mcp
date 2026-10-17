@@ -37,6 +37,11 @@ defmodule ConduitMcp.Application do
   Reads and writes go directly to ETS from the calling process — the owners
   are not `handle_call` gateways and must not become ones.
 
+  It also starts `ConduitMcp.Client.Registry`, a passive unique `Registry`
+  (partitioned by scheduler) in which every `ConduitMcp.Client` registers
+  its processes under tuple keys of its `:name`. The application starts no
+  client processes: you supervise `{ConduitMcp.Client, opts}` yourself.
+
   `start/2` also seeds the validation config into `:persistent_term` for O(1)
   reads on every request, and, when `config :conduit_mcp, :mrtr_keys` is set,
   validates that keyring with `ConduitMcp.MRTR.State.validate_keys!/1` so a
@@ -79,14 +84,18 @@ defmodule ConduitMcp.Application do
   # Own the cancellation, in-flight and session ETS tables from long-lived
   # processes so concurrent Bandit request handlers don't race on
   # `:ets.new/2` and — more importantly — so the tables survive the exit of
-  # whichever request process happened to touch them first.
+  # whichever request process happened to touch them first. The client
+  # registry is passive: clients register in it, so names of any term need no
+  # atoms (`ConduitMcp.Client.Registry` keys).
   defp always_started do
     [
       Cancellation.Owner,
       Cancellation.InFlightOwner,
       Session.EtsStore.Owner,
       ConduitMcp.Transport.SSE.Owner,
-      ConduitMcp.Transport.SSEStream.Owner
+      ConduitMcp.Transport.SSEStream.Owner,
+      {Registry,
+       keys: :unique, name: ConduitMcp.Client.Registry, partitions: System.schedulers_online()}
     ]
   end
 
