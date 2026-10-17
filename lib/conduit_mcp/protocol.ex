@@ -142,6 +142,19 @@ defmodule ConduitMcp.Protocol do
   end
 
   @doc """
+  Validates if a message is a JSON-RPC 2.0 response: an `id`, no `method`, and
+  exactly one of `result` and `error`.
+  """
+  @spec valid_response?(term()) :: boolean()
+  def valid_response?(message) do
+    is_map(message) and
+      Map.get(message, "jsonrpc") == "2.0" and
+      Map.has_key?(message, "id") and
+      not Map.has_key?(message, "method") and
+      Map.has_key?(message, "result") != Map.has_key?(message, "error")
+  end
+
+  @doc """
   Creates a success response.
   """
   def success_response(id, result) do

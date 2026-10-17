@@ -229,9 +229,72 @@ defmodule ConduitMcp.Telemetry do
         nil
       )
 
+  ### Cancellation Events
+
+  #### `[:conduit_mcp, :request, :cancelled]`
+
+  Emitted when a `notifications/cancelled` is recorded for a request in flight
+  in the caller's scope (see `ConduitMcp.Cancellation`).
+
+  **Measurements:**
+
+    * `:count` (integer) - Always `1`
+
+  **Metadata:**
+
+    * `:request_id` (String.t | integer) - The cancelled request's JSON-RPC id
+    * `:scope` (String.t) - The caller's cancellation scope (`"session:..."`,
+      `"principal:..."` or `"ip:..."`)
+    * `:reason` (String.t | nil) - The client's reason, clamped and stripped of
+      control characters. Client-supplied: never use it as a metric tag.
+
+  #### `[:conduit_mcp, :cancellation, :cleanup]`
+
+  Emitted on every `ConduitMcp.Cancellation.cleanup/1` pass.
+
+  **Measurements:**
+
+    * `:removed` (integer) - Expired cancellation rows deleted
+    * `:in_flight_removed` (integer) - In-flight rows of dead request
+      processes deleted
+
+  **Metadata:** none (`%{}`).
+
+  ### Janitor Events
+
+  Emitted after each periodic sweep of the tables `ConduitMcp.Application`
+  owns.
+
+  #### `[:conduit_mcp, :session, :cleanup]`
+
+  From `ConduitMcp.Session.Janitor` sweeping expired sessions.
+
+  **Measurements:** `:removed` (integer) - Sessions evicted.
+
+  **Metadata:** `:store` (module) - The session store swept.
+
+  #### `[:conduit_mcp, :cancellation, :janitor]`
+
+  From the cancellation janitor (a `ConduitMcp.Session.Janitor` over
+  `ConduitMcp.Cancellation`). Its `:removed` is the same count the run's
+  `[:conduit_mcp, :cancellation, :cleanup]` reports, so count runs with it
+  rather than summing both.
+
+  **Measurements:** `:removed` (integer) - Cancellation rows evicted.
+
+  **Metadata:** `:store` (module) - `ConduitMcp.Cancellation`.
+
+  #### `[:conduit_mcp, :tasks, :cleanup]`
+
+  From `ConduitMcp.Tasks.Janitor` sweeping terminal tasks.
+
+  **Measurements:** `:removed` (integer) - Tasks evicted.
+
+  **Metadata:** none (`%{}`).
+
   ## Common Use Cases
 
-  ### Logging All MCP Activity
+  ### Logging Request Activity
 
       defmodule MyApp.MCPTelemetry do
         require Logger
@@ -470,7 +533,12 @@ defmodule ConduitMcp.Telemetry do
         [:conduit_mcp, :prompt, :get],
         [:conduit_mcp, :rate_limit, :check],
         [:conduit_mcp, :message_rate_limit, :check],
-        [:conduit_mcp, :auth, :verify]
+        [:conduit_mcp, :auth, :verify],
+        [:conduit_mcp, :request, :cancelled],
+        [:conduit_mcp, :cancellation, :cleanup],
+        [:conduit_mcp, :cancellation, :janitor],
+        [:conduit_mcp, :session, :cleanup],
+        [:conduit_mcp, :tasks, :cleanup]
       ]
   """
   @spec events() :: [[:conduit_mcp, ...]]
@@ -482,7 +550,12 @@ defmodule ConduitMcp.Telemetry do
       [:conduit_mcp, :prompt, :get],
       [:conduit_mcp, :rate_limit, :check],
       [:conduit_mcp, :message_rate_limit, :check],
-      [:conduit_mcp, :auth, :verify]
+      [:conduit_mcp, :auth, :verify],
+      [:conduit_mcp, :request, :cancelled],
+      [:conduit_mcp, :cancellation, :cleanup],
+      [:conduit_mcp, :cancellation, :janitor],
+      [:conduit_mcp, :session, :cleanup],
+      [:conduit_mcp, :tasks, :cleanup]
     ]
   end
 
@@ -615,6 +688,36 @@ defmodule ConduitMcp.Telemetry do
     Logger.log(
       level,
       "Auth verification: strategy=#{metadata.strategy} status=#{metadata.status} duration=#{duration_ms}ms"
+    )
+  end
+
+  # The client's `reason` is not logged: it is free text from the request.
+  defp handle_event([:conduit_mcp, :request, :cancelled], _measurements, metadata, _config) do
+    require Logger
+
+    Logger.debug(
+      "Request cancelled: request_id=#{ConduitMcp.Reflect.text(metadata.request_id, 64)} scope=#{ConduitMcp.Reflect.text(metadata.scope)}"
+    )
+  end
+
+  defp handle_event([:conduit_mcp, :cancellation, :cleanup], measurements, _metadata, _config) do
+    require Logger
+
+    Logger.debug(
+      "Cancellation cleanup: removed=#{measurements.removed} in_flight_removed=#{measurements.in_flight_removed}"
+    )
+  end
+
+  defp handle_event([:conduit_mcp, scope, event], measurements, metadata, _config)
+       when {scope, event} in [
+              {:cancellation, :janitor},
+              {:session, :cleanup},
+              {:tasks, :cleanup}
+            ] do
+    require Logger
+
+    Logger.debug(
+      "Janitor run: #{scope}.#{event} removed=#{measurements.removed} store=#{inspect(metadata[:store])}"
     )
   end
 end

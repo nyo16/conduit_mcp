@@ -124,13 +124,47 @@ defmodule ConduitMcp.Handler.Common do
     {:error, Errors.invalid_params(), "Unknown #{kind}: #{ConduitMcp.Reflect.text(name)}", nil}
   end
 
+  # Insufficient scope is the one method error that a transport must also
+  # surface at the HTTP layer: MCP authorization (RFC 6750 §3.1) answers it
+  # with 403 and `WWW-Authenticate: Bearer error="insufficient_scope",
+  # scope="..."`, which is what lets an OAuth client step up. The signal
+  # stays inside the neutral result rather than widening `Handler.result()`:
+  # the error's `data` carries the RFC 6750 challenge parameters, and
+  # `insufficient_scope/1` recognises the shaped JSON-RPC error by its code
+  # plus that `data` — never by message text. Any era's response shaper that
+  # keeps `data` (as `ConduitMcp.Protocol.Legacy` does) carries it through,
+  # so a caller of `ConduitMcp.Handler.handle_request/3` that is not a
+  # transport still gets an ordinary JSON-RPC error, and a later era's
+  # transport reuses `insufficient_scope/1` unchanged.
+  @server_error Errors.server_error()
+
   @doc """
   The error for a principal lacking `required_scope`.
+
+  `data` is `%{"error" => "insufficient_scope", "scope" => required_scope}`;
+  see `insufficient_scope/1`.
   """
   @spec insufficient_scope_error(String.t()) :: Handler.result()
   def insufficient_scope_error(required_scope) do
-    {:error, Errors.server_error(), "Insufficient scope. Required: #{required_scope}", nil}
+    {:error, @server_error, "Insufficient scope. Required: #{required_scope}",
+     %{"error" => "insufficient_scope", "scope" => required_scope}}
   end
+
+  @doc """
+  Recognises a JSON-RPC response built from `insufficient_scope_error/1` and
+  returns the scopes it requires, for the transport's 403 challenge.
+  """
+  @spec insufficient_scope(map()) :: {:ok, [String.t()]} | :error
+  def insufficient_scope(%{
+        "error" => %{
+          "code" => @server_error,
+          "data" => %{"error" => "insufficient_scope", "scope" => scope}
+        }
+      })
+      when is_binary(scope),
+      do: {:ok, String.split(scope, " ", trim: true)}
+
+  def insufficient_scope(_response), do: :error
 
   @doc """
   The error for a missing or non-string resource `uri`.

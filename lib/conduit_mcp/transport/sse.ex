@@ -22,7 +22,8 @@ defmodule ConduitMcp.Transport.SSE do
 
   - **No sessions.** `Mcp-Session-Id` is defined by the Streamable HTTP
     transport in the MCP specification; SSE predates it and has no session
-    concept, so `:session` is not an option here.
+    concept, so `:session` is not an option here, and there is no
+    `DELETE /` to end one (`DELETE` falls through to the 404 catch-all).
   - **A long-lived GET stream.** `GET /sse` holds one process, socket and
     `Plug.Conn` for the life of the connection, bounded by
     `:max_connections` and `:max_connection_lifetime`.
@@ -34,9 +35,16 @@ defmodule ConduitMcp.Transport.SSE do
     CORS headers are emitted at all**, so a page on another origin cannot read
     the response. Set it (e.g. `"https://myapp.example"`, or `"*"`) to opt in.
   - `:cors_methods` - CORS allow-methods header (default: "GET, POST, OPTIONS";
-    only emitted when `:cors_origin` is set)
+    only emitted when `:cors_origin` is set). Unlike
+    `ConduitMcp.Transport.StreamableHTTP`, no `DELETE`: there is no session
+    to end.
   - `:cors_headers` - CORS allow-headers header (default:
-    "content-type, authorization"; only emitted when `:cors_origin` is set)
+    "content-type, authorization, mcp-session-id, mcp-protocol-version, mcp-method, mcp-name";
+    only emitted when `:cors_origin` is set). `Mcp-Param-*` names must be
+    listed here explicitly: `access-control-allow-headers` has no wildcard
+    that holds for credentialed requests. Whenever `:cors_origin` is set,
+    `access-control-expose-headers: mcp-session-id, mcp-protocol-version` is
+    emitted too.
   - `:auth` - Authentication plug configuration (optional). Supports every
     strategy `ConduitMcp.Plugs.Auth` does, plus `:oauth`.
   - `:base_url` - Public base URL advertised in the SSE `endpoint` event

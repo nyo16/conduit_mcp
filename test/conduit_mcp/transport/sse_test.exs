@@ -64,10 +64,16 @@ defmodule ConduitMcp.Transport.SSETest do
         |> SSE.call(opts)
 
       assert get_resp_header(conn, "access-control-allow-origin") == ["*"]
+      # No DELETE: this transport has no session to terminate.
       assert get_resp_header(conn, "access-control-allow-methods") == ["GET, POST, OPTIONS"]
 
       assert get_resp_header(conn, "access-control-allow-headers") == [
-               "content-type, authorization"
+               "content-type, authorization, mcp-session-id, mcp-protocol-version, " <>
+                 "mcp-method, mcp-name"
+             ]
+
+      assert get_resp_header(conn, "access-control-expose-headers") == [
+               "mcp-session-id, mcp-protocol-version"
              ]
     end
 
@@ -531,7 +537,7 @@ defmodule ConduitMcp.Transport.SSETest do
       assert response["result"]["content"] == [%{"type" => "text", "text" => "Hello"}]
     end
 
-    test "handles notifications with 204 status" do
+    test "answers notifications with 202 and no body" do
       request_body =
         JSON.encode!(%{
           "jsonrpc" => "2.0",
@@ -543,7 +549,7 @@ defmodule ConduitMcp.Transport.SSETest do
         |> put_req_header("content-type", "application/json")
         |> SSE.call(@opts)
 
-      assert conn.status == 204
+      assert conn.status == 202
       assert conn.resp_body == ""
     end
 

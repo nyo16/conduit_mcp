@@ -247,17 +247,96 @@ defmodule ConduitMcp.TelemetryTest do
   end
 
   describe "Telemetry.events/0" do
-    test "returns all event names" do
+    # The one source-scanning test in the suite, because it guards doc drift:
+    # `events/0` is what `attach_default_handlers/0`, the moduledoc and PromEx
+    # are kept in step with, and it once listed 7 of the 12 events emitted.
+    @lib Path.expand("../../lib", __DIR__)
+    @literal_call ~r/:telemetry\.(?:execute|span)\(\s*\[([^\]]*)\]/
+    @variable_call ~r/:telemetry\.(?:execute|span)\(\s*([a-z_]\w*)/
+    # `ConduitMcp.Session.Janitor` emits a configurable event: its default and
+    # every `telemetry_event:` passed to it are the names it can emit.
+    @configured_event ~r/(?:@default_event|telemetry_event:)\s*\[([^\]]*)\]/
+
+    defp lib_sources do
+      for path <- Path.wildcard(Path.join(@lib, "**/*.ex")),
+          do: {Path.relative_to(path, @lib), File.read!(path)}
+    end
+
+    defp scan_event_lists(regex, source) do
+      for [list] <- Regex.scan(regex, source, capture: :all_but_first) do
+        list
+        |> String.split(",", trim: true)
+        |> Enum.map(&(&1 |> String.trim() |> String.trim_leading(":")))
+        |> Enum.map(&String.to_existing_atom/1)
+      end
+    end
+
+    test "lists exactly the events emitted under lib/" do
+      sources = lib_sources()
+
+      # An emit through a variable is only allowed where the variable's
+      # possible values are themselves literal in the source (scanned below).
+      variable_emits =
+        for {path, source} <- sources,
+            [var] <- Regex.scan(@variable_call, source, capture: :all_but_first),
+            do: {path, var}
+
+      assert variable_emits == [{"conduit_mcp/session/janitor.ex", "event"}]
+
+      emitted =
+        for {_path, source} <- sources,
+            regex <- [@literal_call, @configured_event],
+            event <- scan_event_lists(regex, source),
+            into: MapSet.new(),
+            do: event
+
       events = ConduitMcp.Telemetry.events()
 
-      assert [:conduit_mcp, :request, :stop] in events
-      assert [:conduit_mcp, :tool, :execute] in events
-      assert [:conduit_mcp, :resource, :read] in events
-      assert [:conduit_mcp, :prompt, :get] in events
-      assert [:conduit_mcp, :rate_limit, :check] in events
-      assert [:conduit_mcp, :message_rate_limit, :check] in events
-      assert [:conduit_mcp, :auth, :verify] in events
-      assert length(events) == 7
+      assert MapSet.new(events) == emitted
+      assert length(events) == MapSet.size(emitted), "events/0 lists an event twice"
+    end
+  end
+
+  describe "default handlers on every event" do
+    setup do
+      on_exit(fn -> ConduitMcp.Telemetry.detach_default_handlers() end)
+      :ok
+    end
+
+    # `:telemetry` detaches a handler that raises, from every event it is
+    # attached to; an event in `events/0` without a matching `handle_event/4`
+    # clause would silence the whole default logger on its first emission.
+    test "the default logger survives each event's real measurements" do
+      :ok = ConduitMcp.Telemetry.attach_default_handlers()
+      Logger.put_process_level(self(), :debug)
+
+      ExUnit.CaptureLog.capture_log([level: :debug], fn ->
+        :telemetry.execute([:conduit_mcp, :request, :cancelled], %{count: 1}, %{
+          request_id: 1,
+          scope: "anon",
+          reason: "user\nforged"
+        })
+
+        :telemetry.execute(
+          [:conduit_mcp, :cancellation, :cleanup],
+          %{removed: 1, in_flight_removed: 2},
+          %{}
+        )
+
+        :telemetry.execute([:conduit_mcp, :cancellation, :janitor], %{removed: 1}, %{
+          store: ConduitMcp.Cancellation
+        })
+
+        :telemetry.execute([:conduit_mcp, :session, :cleanup], %{removed: 3}, %{
+          store: ConduitMcp.Session.EtsStore
+        })
+
+        :telemetry.execute([:conduit_mcp, :tasks, :cleanup], %{removed: 0}, %{})
+      end)
+
+      for event <- ConduitMcp.Telemetry.events() do
+        assert "conduit-mcp-default-logger" in default_logger_ids(event), inspect(event)
+      end
     end
   end
 

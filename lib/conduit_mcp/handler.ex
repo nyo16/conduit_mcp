@@ -85,7 +85,10 @@ defmodule ConduitMcp.Handler do
   Emits telemetry events for monitoring and metrics.
 
   Returns a response map for a request, and `:ok` for a notification that was
-  handled or ignored.
+  handled or ignored, or for a JSON-RPC response: the server sends no
+  requests of its own, so a response answers nothing and is dropped.
+  `ConduitMcp.Transport.Shared.dispatch_post/2` answers `:ok` with
+  `202 Accepted` and no body.
 
   A notification has no id to correlate, so JSON-RPC says a failed one is
   dropped. `notifications/cancelled` is the exception: in these cases it

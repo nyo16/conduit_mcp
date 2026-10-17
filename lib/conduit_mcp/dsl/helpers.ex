@@ -11,7 +11,9 @@ defmodule ConduitMcp.DSL.Helpers do
   - `json/1` - Returns JSON-encoded text content
   - `raw/1` - Returns raw data directly (bypasses MCP content wrapping)
   - `error/1` or `error/2` - Returns an error response
-  - `image/1` - Returns an image content response
+  - `image/2` - Returns an image content response (base64 data + MIME type)
+  - `image/1` - Returns a link to an image URL, or image content for base64
+    PNG/JPEG/GIF/WebP data
 
   ## Prompt Message Helpers
 
@@ -267,7 +269,44 @@ defmodule ConduitMcp.DSL.Helpers do
   end
 
   @doc """
-  Creates an image content response.
+  Creates an image content response from base64-encoded `data` and its
+  `mime_type`, the two fields MCP's `ImageContent` requires.
+
+  ## Example
+
+      handle fn _conn, _params ->
+        png = MyCharts.render_png() |> Base.encode64()
+        image(png, "image/png")
+      end
+  """
+  defmacro image(data, mime_type) do
+    quote do
+      {:ok,
+       %{
+         "content" => [
+           %{
+             "type" => "image",
+             "data" => unquote(data),
+             "mimeType" => unquote(mime_type)
+           }
+         ]
+       }}
+    end
+  end
+
+  @doc """
+  Creates an image response from either a URL or base64 image data.
+
+  MCP's `ImageContent` requires base64 `data` **and** a `mimeType`, so:
+
+    * a URL (anything with a URI scheme, e.g. `"https://..."`) becomes a
+      `resource_link` content block whose `uri` and `name` are the URL — a
+      URL cannot go in `data`, and a link is how a tool result points at
+      content it does not embed;
+    * base64 PNG, JPEG, GIF or WebP data becomes `ImageContent`, with the
+      `mimeType` read from the image's leading bytes;
+    * anything else raises `ArgumentError` naming `image/2`, which takes the
+      MIME type explicitly.
 
   ## Example
 
@@ -276,19 +315,51 @@ defmodule ConduitMcp.DSL.Helpers do
         image(image_url)
       end
   """
-  defmacro image(url) do
+  defmacro image(url_or_data) do
     quote do
-      {:ok,
-       %{
-         "content" => [
-           %{
-             "type" => "image",
-             "data" => unquote(url)
-           }
-         ]
-       }}
+      {:ok, %{"content" => [ConduitMcp.DSL.Helpers.__image_content__(unquote(url_or_data))]}}
     end
   end
+
+  @doc false
+  # The content block behind `image/1`; see its doc for the three outcomes.
+  @spec __image_content__(term()) :: map()
+  def __image_content__(url_or_data) when is_binary(url_or_data) do
+    case URI.new(url_or_data) do
+      {:ok, %URI{scheme: scheme}} when is_binary(scheme) ->
+        %{"type" => "resource_link", "uri" => url_or_data, "name" => url_or_data}
+
+      _ ->
+        %{"type" => "image", "data" => url_or_data, "mimeType" => sniff_image_type!(url_or_data)}
+    end
+  end
+
+  def __image_content__(other) do
+    raise ArgumentError,
+          "image/1 expects a URL or base64 image data, got: " <>
+            inspect(other, limit: 5, printable_limit: 40)
+  end
+
+  # 24 base64 characters decode to the 18 leading bytes, enough for every
+  # signature below.
+  defp sniff_image_type!(data) do
+    with <<prefix::binary-size(24), _::binary>> <- data,
+         {:ok, bytes} <- Base.decode64(prefix),
+         {:ok, mime_type} <- image_signature(bytes) do
+      mime_type
+    else
+      _ ->
+        raise ArgumentError,
+              "image/1 could not tell the image type of its data (PNG, JPEG, GIF and WebP " <>
+                "are recognised); use image(data, mime_type)"
+    end
+  end
+
+  defp image_signature(<<0x89, "PNG", 0x0D, 0x0A, 0x1A, 0x0A, _::binary>>), do: {:ok, "image/png"}
+  defp image_signature(<<0xFF, 0xD8, 0xFF, _::binary>>), do: {:ok, "image/jpeg"}
+  defp image_signature(<<"GIF8", v, "a", _::binary>>) when v in ~c"79", do: {:ok, "image/gif"}
+  defp image_signature(<<"RIFF", _::binary-size(4), "WEBP", _::binary>>), do: {:ok, "image/webp"}
+  defp image_signature(_bytes), do: :error
 
   @doc """
   Creates an audio content response.
