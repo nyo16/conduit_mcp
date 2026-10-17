@@ -214,6 +214,16 @@ if Code.ensure_loaded?(PromEx) do
       - Tags: `kind`
     - `{prefix}_client_hook_exception_total` - Counter of failed hook runs
       - Tags: `kind`, `reason`
+    - `{prefix}_client_hub_server_failed_total` - Counter of hub server
+      clients that exited
+      - Tags: `reason`
+    - `{prefix}_client_hub_server_restarted_total` - Counter of hub servers
+      started again after a failure
+    - `{prefix}_client_hub_collision_total` - Counter of exposed tool names
+      left out because several tools mangled to them
+    - `{prefix}_client_adapter_strict_fallback_total` - Counter of OpenAI
+      tools sent non-strict because their schema has no strict form
+      - Tags: `api`, `reason`
 
     ### Subscription Metrics
 
@@ -833,6 +843,34 @@ if Code.ensure_loaded?(PromEx) do
             measurement: fn _measurements -> 1 end,
             tags: [:kind, :reason],
             tag_values: &extract_client_tags/1
+          ),
+          counter(
+            metric_prefix ++ [:client, :hub, :server_failed, :total],
+            event_name: [:conduit_mcp, :client, :hub, :server_failed],
+            description: "MCP hub server clients that exited",
+            measurement: fn _measurements -> 1 end,
+            tags: [:reason],
+            tag_values: &extract_client_tags/1
+          ),
+          counter(
+            metric_prefix ++ [:client, :hub, :server_restarted, :total],
+            event_name: [:conduit_mcp, :client, :hub, :server_restarted],
+            description: "MCP hub servers started again after a failure",
+            measurement: fn _measurements -> 1 end
+          ),
+          counter(
+            metric_prefix ++ [:client, :hub, :collision, :total],
+            event_name: [:conduit_mcp, :client, :hub, :collision],
+            description: "MCP hub exposed tool names left out after a collision",
+            measurement: fn _measurements -> 1 end
+          ),
+          counter(
+            metric_prefix ++ [:client, :adapter, :strict_fallback, :total],
+            event_name: [:conduit_mcp, :client, :adapter, :strict_fallback],
+            description: "OpenAI tools sent non-strict by the MCP client adapters",
+            measurement: fn _measurements -> 1 end,
+            tags: [:api, :reason],
+            tag_values: &extract_client_tags/1
           )
         ]
       )
@@ -889,7 +927,8 @@ if Code.ensure_loaded?(PromEx) do
       :target,
       :decision,
       :source,
-      :approval
+      :approval,
+      :api
     ]
 
     defp extract_client_tags(metadata) do

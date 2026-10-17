@@ -450,6 +450,34 @@ defmodule ConduitMcp.TelemetryTest do
             reason: :raise
           })
         )
+
+        hub = %{hub: {MyApp.Hub, "tenant\nforged"}, server_id: "github"}
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :hub, :server_failed],
+          %{count: 1, delay: 250},
+          Map.merge(hub, %{attempt: 2, reason: :killed})
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :hub, :server_restarted],
+          %{count: 1},
+          Map.put(hub, :attempt, 2)
+        )
+
+        :telemetry.execute([:conduit_mcp, :client, :hub, :collision], %{count: 2}, %{
+          hub: hub.hub,
+          exposed_name: "github__a_b",
+          colliders: [{"github", "a_b"}, {"github", "a_b"}]
+        })
+
+        :telemetry.execute([:conduit_mcp, :client, :adapter, :strict_fallback], %{count: 1}, %{
+          client: hub.hub,
+          provider: :openai,
+          api: :chat,
+          tool_name: "github__search",
+          reason: :unsupported_keyword
+        })
       end)
 
       for event <- ConduitMcp.Telemetry.events() do

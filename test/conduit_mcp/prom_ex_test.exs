@@ -25,7 +25,7 @@ if Code.ensure_loaded?(PromEx) do
 
         closed =
           [:method, :status, :error_kind, :is_error, :to, :reason, :kind] ++
-            [:target, :decision, :source, :approval]
+            [:target, :decision, :source, :approval, :api]
 
         for metric <- group.metrics do
           assert metric.tags -- closed == [], inspect(metric.name)
@@ -53,6 +53,20 @@ if Code.ensure_loaded?(PromEx) do
                  reason: "ask_rule",
                  approval: "once"
                }
+
+        fallback =
+          Enum.find(
+            group.metrics,
+            &(&1.event_name == [:conduit_mcp, :client, :adapter, :strict_fallback])
+          )
+
+        assert fallback.tag_values.(%{
+                 client: {MyApp.Hub, "tenant"},
+                 provider: :openai,
+                 api: :chat,
+                 tool_name: "github__search",
+                 reason: :max_depth
+               }) == %{api: "chat", reason: "max_depth"}
       end
 
       # The plugin used to skip rate limiting, cancellation and the janitors,

@@ -9,7 +9,8 @@ defmodule ConduitMcp.Client.Adapters.OpenAI do
       # report.fallbacks -> emit [:conduit_mcp, :client, :adapter, :strict_fallback]
 
       {calls, rejected} = OpenAI.tool_calls(response, toolset, report.null_paths)
-      # run each %ToolCall{} through the client pipeline, then:
+      # run each %ToolCall{} through the client pipeline (or let
+      # ConduitMcp.Client.Adapters.execute_tool_calls/4 do all of this), then:
       outputs = Enum.map(outcomes, fn {call, outcome} ->
         OpenAI.tool_output(call.call_id, outcome, api: :responses)
       end)
@@ -230,37 +231,41 @@ defmodule ConduitMcp.Client.Adapters.OpenAI do
   """
   @spec tool_calls(map() | [map()], ToolSet.t(), %{optional(String.t()) => [null_path()]}) ::
           {[ToolCall.t()], [map()]}
-  def tool_calls(response, toolset, null_paths_by_tool \\ %{})
+  def tool_calls(response, %ToolSet{} = toolset, null_paths_by_tool \\ %{}),
+    do: response |> __tool_calls__(toolset, null_paths_by_tool) |> Content.split_calls()
 
-  def tool_calls(%{"choices" => [%{"message" => message} | _]}, toolset, null_paths),
-    do: tool_calls(message, toolset, null_paths)
+  @doc false
+  # `tool_calls/3` in the model's order, one `{:call, %ToolCall{}}` or
+  # `{:rejected, output}` per function call, for
+  # `ConduitMcp.Client.Adapters.execute_tool_calls/4`.
+  @spec __tool_calls__(map() | [map()], ToolSet.t(), %{optional(String.t()) => [null_path()]}) ::
+          [Content.parsed()]
+  def __tool_calls__(%{"choices" => [%{"message" => message} | _]}, toolset, null_paths),
+    do: __tool_calls__(message, toolset, null_paths)
 
-  def tool_calls(%{"choices" => _}, _toolset, _null_paths), do: {[], []}
+  def __tool_calls__(%{"choices" => _}, _toolset, _null_paths), do: []
 
-  def tool_calls(%{"output" => items}, toolset, null_paths) when is_list(items),
-    do: tool_calls(items, toolset, null_paths)
+  def __tool_calls__(%{"output" => items}, toolset, null_paths) when is_list(items),
+    do: __tool_calls__(items, toolset, null_paths)
 
-  def tool_calls(%{"tool_calls" => calls}, toolset, null_paths) when is_list(calls),
-    do: tool_calls(calls, toolset, null_paths)
+  def __tool_calls__(%{"tool_calls" => calls}, toolset, null_paths) when is_list(calls),
+    do: __tool_calls__(calls, toolset, null_paths)
 
-  def tool_calls(%{} = _message, _toolset, _null_paths), do: {[], []}
+  def __tool_calls__(%{} = _message, _toolset, _null_paths), do: []
 
-  def tool_calls(items, %ToolSet{} = toolset, null_paths) when is_list(items) do
-    {calls, rejected} =
-      Enum.reduce(items, {[], []}, fn item, {calls, rejected} ->
-        case function_call(item) do
-          nil ->
-            {calls, rejected}
+  def __tool_calls__(items, %ToolSet{} = toolset, null_paths) when is_list(items) do
+    Enum.flat_map(items, fn item ->
+      case function_call(item) do
+        nil ->
+          []
 
-          {api, id, name, arguments} ->
-            case to_call(id, name, arguments, toolset, null_paths) do
-              {:ok, call} -> {[call | calls], rejected}
-              {:error, text} -> {calls, [text_output(api, id, text) | rejected]}
-            end
-        end
-      end)
-
-    {Enum.reverse(calls), Enum.reverse(rejected)}
+        {api, id, name, arguments} ->
+          case to_call(id, name, arguments, toolset, null_paths) do
+            {:ok, call} -> [{:call, call}]
+            {:error, text} -> [{:rejected, text_output(api, id, text)}]
+          end
+      end
+    end)
   end
 
   defp function_call(%{"function" => %{} = function} = item),

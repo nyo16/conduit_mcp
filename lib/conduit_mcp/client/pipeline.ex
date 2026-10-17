@@ -81,10 +81,27 @@ defmodule ConduitMcp.Client.Pipeline do
   ## Context
 
   Hooks, the approver, filter functions and policy predicates get `ctx`:
-  `:client`, `:server_id`, `:era`, `:assigns` (the call's, else the
-  client's), `:principal` (the call's `:principal` option, else `nil`),
-  `:has_approver?` and, from step 3, `:approved_fingerprints` (the entry
-  for the called tool, when it has one).
+  `:client`, `:server_id` (the call's provenance: the server the call goes
+  to), `:era`, `:assigns` (the call's, else the client's), `:principal`
+  (the call's `:principal` option, else `nil`), `:taint` (the call's
+  `:taint` option as a `MapSet`, see "Taint"), `:has_approver?` and, from
+  step 3, `:approved_fingerprints` (the entry for the called tool, when it
+  has one).
+
+  ## Taint (HB-3)
+
+  A model that read one server's output may be steered by it into calling
+  another server's tool (cross-server exfiltration). The library cannot
+  see the model's context, so the host says which servers' output entered
+  the current turn with `taint: ["web", "mail"]`, and policy rules decide
+  what that means, for example asking before any open-world tool once
+  untrusted output is in context:
+
+      ask: [{:all, [{:annotation, :open_world, true}, ConduitMcp.Client.Policy.tainted()]}]
+
+  `ConduitMcp.Client.Policy.tainted/1` matches when the taint set holds a
+  server other than the called tool's own (minus an `:ignore` list); any
+  function rule can read `ctx.taint` directly.
 
   ## Shaping for a model (PI-2)
 
@@ -138,7 +155,7 @@ defmodule ConduitMcp.Client.Pipeline do
   alias ConduitMcp.Client.ToolFilter
   alias ConduitMcp.Client.ToolResult
 
-  @own_options [:principal, :shape, :tool, :task, :task_ttl]
+  @own_options [:principal, :shape, :tool, :task, :task_ttl, :taint]
 
   @doc """
   Runs a governed tool call on `client`.
@@ -156,6 +173,8 @@ defmodule ConduitMcp.Client.Pipeline do
       grants are recorded and looked up under (default `nil`).
     * `:shape` - `:llm` to shape the result for a model (see the
       moduledoc).
+    * `:taint` - the server ids (strings) whose output entered the current
+      turn, as a list or `MapSet` (default none); see "Taint".
     * `:tool` - an already resolved `ConduitMcp.Client.Tool` for the same
       `{server_id, name}`, skipping the cache lookup.
 
@@ -208,6 +227,7 @@ defmodule ConduitMcp.Client.Pipeline do
       era: view.era,
       assigns: Keyword.get(opts, :assigns) || view.input.assigns,
       principal: own[:principal],
+      taint: taint!(own[:taint]),
       has_approver?: settings.on_ask != nil
     }
 
@@ -231,6 +251,18 @@ defmodule ConduitMcp.Client.Pipeline do
       }
     }
   end
+
+  defp taint!(nil), do: MapSet.new()
+  defp taint!(%MapSet{} = taint), do: taint!(MapSet.to_list(taint))
+
+  defp taint!(ids) when is_list(ids) do
+    if Enum.all?(ids, &is_binary/1),
+      do: MapSet.new(ids),
+      else: raise(ArgumentError, ":taint must list server ids (strings), got: #{inspect(ids)}")
+  end
+
+  defp taint!(other),
+    do: raise(ArgumentError, ":taint must be a list of server ids, got: #{inspect(other)}")
 
   # --- steps -----------------------------------------------------------------------
 

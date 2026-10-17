@@ -15,7 +15,8 @@ defmodule ConduitMcp.Client.Adapters.Gemini do
                   "tools" => [%{"functionDeclarations" => Gemini.function_declarations(toolset)}]}
 
       {calls, rejected} = Gemini.function_calls(response, toolset)
-      # run each %ToolCall{} through the client pipeline, then:
+      # run each %ToolCall{} through the client pipeline (or let
+      # ConduitMcp.Client.Adapters.execute_tool_calls/4 do all of this), then:
       parts = Enum.map(outcomes, fn {call, outcome} ->
         {:ok, name} = ConduitMcp.Client.ToolSet.exposed_name(toolset, call.server_id, call.name)
         Gemini.function_response(name, outcome, id: call.call_id)
@@ -85,30 +86,31 @@ defmodule ConduitMcp.Client.Adapters.Gemini do
   model. Other parts are ignored.
   """
   @spec function_calls(map() | [map()], ToolSet.t()) :: {[ToolCall.t()], [map()]}
-  def function_calls(%{"candidates" => [%{"content" => content} | _]}, toolset),
-    do: function_calls(content, toolset)
+  def function_calls(response, %ToolSet{} = toolset),
+    do: response |> __function_calls__(toolset) |> Content.split_calls()
 
-  def function_calls(%{"candidates" => _}, _toolset), do: {[], []}
+  @doc false
+  # `function_calls/2` in the model's order, one `{:call, %ToolCall{}}` or
+  # `{:rejected, part}` per `functionCall` part, for
+  # `ConduitMcp.Client.Adapters.execute_tool_calls/4`.
+  @spec __function_calls__(map() | [map()], ToolSet.t()) :: [Content.parsed()]
+  def __function_calls__(%{"candidates" => [%{"content" => content} | _]}, toolset),
+    do: __function_calls__(content, toolset)
 
-  def function_calls(%{"parts" => parts}, toolset) when is_list(parts),
-    do: function_calls(parts, toolset)
+  def __function_calls__(%{"candidates" => _}, _toolset), do: []
 
-  def function_calls(%{} = _content, _toolset), do: {[], []}
+  def __function_calls__(%{"parts" => parts}, toolset) when is_list(parts),
+    do: __function_calls__(parts, toolset)
 
-  def function_calls(parts, %ToolSet{} = toolset) when is_list(parts) do
-    {calls, rejected} =
-      Enum.reduce(parts, {[], []}, fn
-        %{"functionCall" => %{} = call}, {calls, rejected} ->
-          case to_call(call, toolset) do
-            {:ok, tool_call} -> {[tool_call | calls], rejected}
-            {:error, text} -> {calls, [error_part(call, text) | rejected]}
-          end
+  def __function_calls__(%{} = _content, _toolset), do: []
 
-        _part, acc ->
-          acc
-      end)
-
-    {Enum.reverse(calls), Enum.reverse(rejected)}
+  def __function_calls__(parts, %ToolSet{} = toolset) when is_list(parts) do
+    for %{"functionCall" => %{} = call} <- parts do
+      case to_call(call, toolset) do
+        {:ok, tool_call} -> {:call, tool_call}
+        {:error, text} -> {:rejected, error_part(call, text)}
+      end
+    end
   end
 
   defp to_call(call, toolset) do
