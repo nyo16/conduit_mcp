@@ -95,7 +95,9 @@ defmodule ConduitMcp.Client.HubWireTest do
     reply(b, retry_id, %{"content" => [%{"type" => "text", "text" => "done"}]})
 
     assert {:ok, %ToolResult{content: [%{"text" => "done"}]}} = Task.await(task)
-    refute_received {:fake_transport, ^a, {:request, _, _}}
+    # Server "a" opens its own `subscriptions/listen` once its tools are
+    # cached; what must never reach it is any part of "b"'s call.
+    refute_received {:fake_transport, ^a, {:request, %{"method" => "tools/call"}, _}}
   end
 
   test "a list_changed flood costs a few fetches, not one per notification (HB-4)", %{hub: hub} do

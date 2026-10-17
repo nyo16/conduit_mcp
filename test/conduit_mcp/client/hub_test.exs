@@ -388,8 +388,8 @@ defmodule ConduitMcp.Client.HubTest do
       {:ok, hub_pid, _} = ConduitMcp.Client.Registry.lookup({:hub, hub})
 
       for _ <- 1..10 do
-        kill_server(hub, "alpha")
-        await_servers(hub, ["alpha"])
+        killed = kill_server(hub, "alpha")
+        await_replaced(hub, "alpha", killed)
       end
 
       assert Process.alive?(hub_pid)
@@ -421,8 +421,8 @@ defmodule ConduitMcp.Client.HubTest do
                ConduitMcp.Client.Registry.lookup({:supervisor, Hub.client(hub, "alpha")})
 
       # Still monitored: a crash after the manager's restart is noticed.
-      kill_server(hub, "alpha")
-      await_servers(hub, ["alpha"])
+      killed = kill_server(hub, "alpha")
+      await_replaced(hub, "alpha", killed)
       assert names(hub) == ["alpha__echo", "beta__echo"]
     end
   end
@@ -511,5 +511,18 @@ defmodule ConduitMcp.Client.HubTest do
     Process.exit(pid, :kill)
     assert_receive {:DOWN, ^monitor, :process, ^pid, :killed}
     pid
+  end
+
+  # The Registry drops a dead client's entry asynchronously, so readiness
+  # alone can still be the killed process's; wait for its replacement.
+  defp await_replaced(hub, id, killed) do
+    eventually(fn ->
+      match?(
+        {:ok, pid, _} when pid != killed,
+        ConduitMcp.Client.Registry.lookup({:supervisor, Hub.client(hub, id)})
+      )
+    end)
+
+    await_servers(hub, [id])
   end
 end
