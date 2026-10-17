@@ -6,6 +6,7 @@ defmodule ConduitMcp.Client.Connection.Handshake do
   # the optional health check. Functions return `:gen_statem` results.
 
   alias ConduitMcp.Client.Cache
+  alias ConduitMcp.Client.Connection.Authorize
   alias ConduitMcp.Client.Connection.Data
   alias ConduitMcp.Client.Connection.Listen
   alias ConduitMcp.Client.Connection.Requests
@@ -40,8 +41,8 @@ defmodule ConduitMcp.Client.Connection.Handshake do
   defp ensure_transport(%Data{tstate: nil, config: config} = data) do
     {transport, opts} = config.transport
 
-    case transport.init(opts, %{owner: self(), task_sup: data.task_sup, key: data.name}) do
-      {:ok, tstate} -> {:ok, %{data | tstate: tstate}}
+    case transport.init(opts, %{owner: self(), task_sup: data.task_sup, key: data.config.name}) do
+      {:ok, tstate} -> {:ok, Authorize.push(%{data | tstate: tstate})}
       {:error, reason} -> {:error, reason}
     end
   end
@@ -357,6 +358,7 @@ defmodule ConduitMcp.Client.Connection.Handshake do
     }
 
     {data, actions} = Requests.fail_all(data, error)
+    data = Authorize.reset(data, error)
     {data, stop_actions} = ServerRequests.stop_all(data)
     {data, listen_actions} = Listen.reset(data, error)
     Cache.mark_all_stale(data.cache)

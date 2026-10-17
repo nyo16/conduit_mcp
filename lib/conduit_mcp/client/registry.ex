@@ -16,6 +16,9 @@ defmodule ConduitMcp.Client.Registry do
       server's capabilities, cached lists). `ConduitMcp.Client.status/1`
       and the request functions read both without messaging the
       connection.
+    * `{:token_store, name}` - a `ConduitMcp.Client.OAuth.TokenStore.ETS`
+      (`name` is `{:client, client_name}` for a client's default store).
+      Its value is the id of its `:protected` table, read directly.
 
   A `ConduitMcp.Client.Hub` registers under its `:name` too:
 

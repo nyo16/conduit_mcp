@@ -444,7 +444,10 @@ defmodule ConduitMcp.Client.HubTest do
       assert :ok = Hub.remove_server(hub, "alpha")
       assert names(hub) == ["gamma__echo", "gamma__more"]
       assert {:ok, ["gamma"]} = Hub.servers(hub)
-      assert :error = ConduitMcp.Client.Registry.lookup({:supervisor, Hub.client(hub, "alpha")})
+      # The Registry drops a dead process's entry asynchronously.
+      eventually(fn ->
+        ConduitMcp.Client.Registry.lookup({:supervisor, Hub.client(hub, "alpha")}) == :error
+      end)
 
       assert {:error, %Error{kind: :not_found}} = Hub.remove_server(hub, "alpha")
 

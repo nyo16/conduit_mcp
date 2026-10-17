@@ -20,9 +20,10 @@ defmodule ConduitMcp.Client.Connection do
   | State | Does | Leaves to |
   |---|---|---|
   | `:connecting` | `transport.connect/1`, bounded by `:request_timeout` | `:discovering`, or `:initializing` for a legacy pin or hint |
-  | `:discovering` | sends `server/discover` (bounded by `:probe_timeout` when probing) | `:ready` (modern), `:initializing` on legacy evidence, `:reconnecting`, `:closed` |
-  | `:initializing` | sends legacy `initialize`, then `notifications/initialized` | `:ready`, `:reconnecting`, `:closed` |
-  | `:ready` | sends requests; resets the reconnect count after `:stable_after`; runs the optional health check | `:reconnecting`, `:discovering` (re-negotiation) |
+  | `:discovering` | sends `server/discover` (bounded by `:probe_timeout` when probing) | `:ready` (modern), `:initializing` on legacy evidence, `:reconnecting`, `:closed`, `:authorizing` (OAuth, 401) |
+  | `:initializing` | sends legacy `initialize`, then `notifications/initialized` | `:ready`, `:reconnecting`, `:closed`, `:authorizing` (OAuth, 401) |
+  | `:ready` | sends requests; resets the reconnect count after `:stable_after`; runs the optional health check | `:reconnecting`, `:discovering` (re-negotiation), `:authorizing` |
+  | `:authorizing` | OAuth only: after a 401, a task finds or renews a token (`ConduitMcp.Client.OAuth`); requests wait for it | back to `:ready` or the handshake, `:closed`/`:reconnecting` on an OAuth failure; stays while awaiting the user |
   | `:reconnecting` | waits `backoff.(attempt)` | `:connecting`, or `:closed` after `:max_reconnects` |
   | `:closed` | answers every request `kind: :closed` at once | `:connecting` via `ConduitMcp.Client.reconnect/1` |
 
@@ -120,6 +121,12 @@ defmodule ConduitMcp.Client.Connection do
   `initialize` without failing the requests in flight, and the transport
   re-sends the expired ones once (`ConduitMcp.Client.Transport`).
 
+  With `auth: {:oauth, ...}` a 401 enters `:authorizing` instead, and a 403
+  `insufficient_scope` steps up; the refused request is sent again once a
+  token exists, or fails with `reason: :authorization_required` while the
+  user must authorize (never waiting for a human). The OAuth work runs in
+  tasks; see `ConduitMcp.Client.OAuth`.
+
   ## Server-to-client requests (legacy)
 
   `ping` is answered `{}`. `sampling/createMessage`, `elicitation/create`
@@ -154,6 +161,7 @@ defmodule ConduitMcp.Client.Connection do
   require Logger
 
   alias ConduitMcp.Client.Config
+  alias ConduitMcp.Client.Connection.Authorize
   alias ConduitMcp.Client.Connection.Data
   alias ConduitMcp.Client.Connection.Handshake
   alias ConduitMcp.Client.Connection.Inbound
@@ -197,7 +205,7 @@ defmodule ConduitMcp.Client.Connection do
 
     case transport.init(opts, %{owner: self(), task_sup: task_sup, key: config.name}) do
       {:ok, tstate} ->
-        data = Data.new(config, task_sup, tstate)
+        data = config |> Data.new(task_sup, tstate) |> Authorize.push()
 
         notifier =
           Notifier.start(config.handler, %{client: config.name, server_id: config.server_id})
@@ -220,6 +228,9 @@ defmodule ConduitMcp.Client.Connection do
   def handle_event(:internal, {:transport, event}, state, data),
     do: transport_event(event, state, data)
 
+  def handle_event(:info, {:"$mcp_request", _, _, _, _, _} = request, :authorizing, data),
+    do: Authorize.admit(request, data)
+
   def handle_event(:info, {:"$mcp_request", _, _, _, _, _} = request, state, data),
     do: result(Requests.admit(request, state, data))
 
@@ -241,6 +252,7 @@ defmodule ConduitMcp.Client.Connection do
       {:server_request, id} -> result(ServerRequests.reply(id, ref, answer, data))
       # A list written to the cache may give the modern listen a new filter.
       {:refresh, kind} -> sync(Refresh.done(kind, ref, answer, data), state)
+      :auth -> Authorize.task_result(ref, answer, state, data)
       :error -> transport_info(message, state, data)
     end
   end
@@ -318,22 +330,13 @@ defmodule ConduitMcp.Client.Connection do
     end
   end
 
-  # HTTP 401/403: the request fails with `kind: :auth` (the OAuth phase
-  # hooks in here).
+  # HTTP 401/403: with OAuth configured, the authorization path
+  # (`ConduitMcp.Client.Connection.Authorize`); otherwise, or when OAuth
+  # passes, the request fails with `kind: :auth`.
   defp transport_event({:unauthorized, id, info}, state, data) do
-    case Requests.unauthorized(id, info, data) do
-      :unknown ->
-        case Map.fetch(data.internal, id) do
-          {:ok, purpose} ->
-            error = Requests.auth_error(info)
-            internal_outcome(id, purpose, {:error, error}, state, data)
-
-          :error ->
-            :keep_state_and_data
-        end
-
-      result ->
-        result(result)
+    case Authorize.unauthorized(id, info, state, data) do
+      :pass -> unauthorized(id, Map.delete(info, :sent), state, data)
+      result -> result
     end
   end
 
@@ -360,6 +363,23 @@ defmodule ConduitMcp.Client.Connection do
 
   defp transport_event({:closed, reason}, state, data),
     do: Handshake.transport_closed(state, reason, data)
+
+  defp unauthorized(id, info, state, data) do
+    case Requests.unauthorized(id, info, data) do
+      :unknown ->
+        case Map.fetch(data.internal, id) do
+          {:ok, purpose} ->
+            error = Requests.auth_error(info)
+            internal_outcome(id, purpose, {:error, error}, state, data)
+
+          :error ->
+            :keep_state_and_data
+        end
+
+      result ->
+        result(result)
+    end
+  end
 
   # The answer to one of the connection's own requests.
   defp internal_outcome(id, :listen, outcome, _state, data),
@@ -414,10 +434,11 @@ defmodule ConduitMcp.Client.Connection do
 
   # A task this process started (a server request handler or a cache
   # refresh) exited without answering.
-  defp task_down(ref, data) do
+  defp task_down(ref, state, data) do
     case Data.job(data, ref) do
       {:server_request, id} -> ServerRequests.down(id, data)
       {:refresh, kind} -> Refresh.down(kind, data)
+      :auth -> {:gen_statem, Authorize.task_down(ref, state, data)}
       :error -> :unknown
     end
   end
@@ -427,10 +448,11 @@ defmodule ConduitMcp.Client.Connection do
   defp down(ref, message, state, data) do
     with :unknown <- Requests.cancel_ref(ref, :caller_down, data),
          :unknown <- Inbound.subscriber_down(ref, data),
-         :unknown <- task_down(ref, data),
+         :unknown <- task_down(ref, state, data),
          :unknown <- TaskWatch.down(ref, state, data) do
       transport_info(message, state, data)
     else
+      {:gen_statem, result} -> result
       %Data{} = data -> sync(data, state)
       result -> result(result)
     end
@@ -493,6 +515,9 @@ defmodule ConduitMcp.Client.Connection do
     {:keep_state, TaskWatch.unwatch(pid, task_id, data)}
   end
 
+  defp control(:authorized, mref, state, data), do: Authorize.authorized(mref, state, data)
+  defp control(:oauth_session, mref, _state, data), do: Authorize.session(mref, data)
+
   defp control(_unknown, mref, _state, _data),
     do: reply(mref, {:error, Error.new(:protocol, :unknown_control_call)})
 
@@ -535,7 +560,11 @@ defmodule ConduitMcp.Client.Connection do
       data
       | tstate: :redacted,
         input: :redacted,
-        pending: Map.new(data.pending, fn {id, entry} -> {id, %{entry | assigns: :redacted}} end),
+        pending:
+          Map.new(data.pending, fn {id, entry} ->
+            {id, %{entry | assigns: :redacted, params: :redacted}}
+          end),
+        auth: if(data.auth, do: :redacted),
         config: %{config | transport: {transport, :redacted}, assigns: :redacted}
     }
   end

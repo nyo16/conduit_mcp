@@ -61,7 +61,9 @@ defmodule ConduitMcp.Client.Connection.Refresh do
   end
 
   defp start(kind, waiters, opts, trigger, data) do
-    task = Task.Supervisor.async_nolink(data.task_sup, Fetch, :all, [data.name, kind, opts])
+    task =
+      Task.Supervisor.async_nolink(data.task_sup, Fetch, :all, [data.config.name, kind, opts])
+
     Telemetry.cache_refresh_start(Data.telemetry(data), kind, trigger)
 
     refresh = %{

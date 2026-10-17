@@ -478,6 +478,22 @@ defmodule ConduitMcp.TelemetryTest do
           tool_name: "github__search",
           reason: :unsupported_keyword
         })
+
+        # The OAuth events, through their real emitter: a stop with an
+        # error reason, and an exception.
+        oauth = %{client: {:client, make_ref()}, server_id: "s", principal: nil}
+
+        for op <- [:discovery, :registration, :token_exchange, :refresh, :step_up] do
+          ConduitMcp.Client.OAuth.Telemetry.span(op, oauth, fn ->
+            {{:error, ConduitMcp.Client.OAuth.Error.new(:invalid_grant)}, %{}}
+          end)
+
+          assert_raise RuntimeError, fn ->
+            ConduitMcp.Client.OAuth.Telemetry.span(op, oauth, fn -> raise "boom" end)
+          end
+        end
+
+        ConduitMcp.Client.OAuth.Telemetry.authorization_required(oauth, :step_up)
       end)
 
       for event <- ConduitMcp.Telemetry.events() do

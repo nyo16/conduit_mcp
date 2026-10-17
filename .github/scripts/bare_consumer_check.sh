@@ -92,11 +92,28 @@ defmodule BareCheck do
     absent!(ConduitMcp.Client.Transport.StreamableHTTP.Exchange)
     absent!(ConduitMcp.Client.Transport.StreamableHTTP.Listener)
 
+    # The OAuth client: everything that does HTTP needs :finch, and the
+    # private_key_jwt signer needs :jose.
+    absent!(ConduitMcp.Client.OAuth)
+    absent!(ConduitMcp.Client.OAuth.Session)
+    absent!(ConduitMcp.Client.OAuth.HTTP)
+    absent!(ConduitMcp.Client.OAuth.Discovery.Fetch)
+    absent!(ConduitMcp.Client.OAuth.Registration)
+    absent!(ConduitMcp.Client.OAuth.TokenEndpoint)
+    absent!(ConduitMcp.Client.OAuth.ClientCredentials)
+    absent!(ConduitMcp.Client.OAuth.Loopback)
+    absent!(ConduitMcp.Client.OAuth.ClientAssertion)
+
     present!(ConduitMcp.Plugs.Auth)
     present!(ConduitMcp.Transport.StreamableHTTP)
     present!(ConduitMcp.Transport.SSE)
     present!(ConduitMcp.OptionalDeps)
     present!(ConduitMcp.Client.Transport.StreamableHTTP)
+    present!(ConduitMcp.Client.OAuth.Config)
+    present!(ConduitMcp.Client.OAuth.TokenStore)
+    present!(ConduitMcp.Client.OAuth.TokenStore.ETS)
+    present!(ConduitMcp.Client.OAuth.CIMD)
+    present!(ConduitMcp.Client.OAuth.Challenge)
 
     refute!(
       ConduitMcp.OptionalDeps.oauth_available?(),
@@ -109,6 +126,7 @@ defmodule BareCheck do
     key_provider_raises!()
     client_validation_raises!()
     http_client_raises!()
+    oauth_client_raises!()
     serves_without_optional_deps!()
 
     IO.puts("\nbare-consumer check: OK")
@@ -241,6 +259,44 @@ ConduitMcp.OptionalDependencyError:\n#{Exception.message(e)}")
         )
 
         IO.puts("  ok  Streamable HTTP client transport without :finch rejected at start")
+    end
+  end
+
+  # auth: {:oauth, ...} without :finch must refuse to start, naming :finch,
+  # and so must the OAuth runtime and the private_key_jwt signer on their own.
+  defp oauth_client_raises!() do
+    try do
+      ConduitMcp.Client.child_spec(
+        name: :bare_oauth,
+        transport:
+          {ConduitMcp.Client.Transport.StreamableHTTP,
+           url: "https://mcp.example.com/",
+           auth: {:oauth, redirect_uri: "http://127.0.0.1:33418/callback"}}
+      )
+
+      die("ConduitMcp.Client accepted auth: {:oauth, ...} without :finch")
+    rescue
+      e in ConduitMcp.OptionalDependencyError ->
+        assert!(Exception.message(e) =~ ":finch", "OAuth client error must name :finch")
+        IO.puts("  ok  auth: {:oauth, ...} without :finch rejected at start")
+    end
+
+    try do
+      ConduitMcp.OptionalDeps.oauth_client!()
+      die("OptionalDeps.oauth_client!/0 returned without :finch")
+    rescue
+      e in ConduitMcp.OptionalDependencyError ->
+        assert!(Exception.message(e) =~ ":finch", "oauth_client!/0 must name :finch")
+        IO.puts("  ok  OptionalDeps.oauth_client!/0 names :finch")
+    end
+
+    try do
+      ConduitMcp.OptionalDeps.client_assertion!()
+      die("OptionalDeps.client_assertion!/0 returned without :jose")
+    rescue
+      e in ConduitMcp.OptionalDependencyError ->
+        assert!(Exception.message(e) =~ ":jose", "client_assertion!/0 must name :jose")
+        IO.puts("  ok  private_key_jwt without :jose names :jose")
     end
   end
 

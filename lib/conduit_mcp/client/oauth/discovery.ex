@@ -193,23 +193,33 @@ defmodule ConduitMcp.Client.OAuth.Discovery do
   ## Options
 
     * `:allow_insecure` - admit `http` endpoints on loopback hosts.
+    * `:grant` - `:authorization_code` (default) or `:client_credentials`.
+      A machine-to-machine client never sends the user to the
+      authorization endpoint, so for `:client_credentials` neither `"S256"`
+      nor `authorization_endpoint` is required; `token_endpoint` still is,
+      and every endpoint present is still checked.
   """
   @spec validate_as_metadata(term(), String.t(), keyword()) :: {:ok, map()} | {:error, Error.t()}
   def validate_as_metadata(metadata, issuer, opts \\ [])
 
   def validate_as_metadata(%{} = metadata, issuer, opts) when is_binary(issuer) do
+    code_flow? = Keyword.get(opts, :grant, :authorization_code) == :authorization_code
+
     cond do
       Map.get(metadata, "issuer") !== issuer -> Error.error(:issuer_mismatch)
-      not PKCE.s256_supported?(metadata) -> Error.error(:pkce_unsupported)
-      true -> validate_endpoints(metadata, opts)
+      code_flow? and not PKCE.s256_supported?(metadata) -> Error.error(:pkce_unsupported)
+      true -> validate_endpoints(metadata, required_endpoints(code_flow?), opts)
     end
   end
 
   def validate_as_metadata(_metadata, _issuer, _opts),
     do: Error.error(:invalid_metadata, %{field: nil})
 
-  defp validate_endpoints(metadata, opts) do
-    missing = Enum.find(@required_endpoints, &(not Map.has_key?(metadata, &1)))
+  defp required_endpoints(true), do: @required_endpoints
+  defp required_endpoints(false), do: ["token_endpoint"]
+
+  defp validate_endpoints(metadata, required, opts) do
+    missing = Enum.find(required, &(not Map.has_key?(metadata, &1)))
 
     optional =
       metadata
@@ -217,7 +227,7 @@ defmodule ConduitMcp.Client.OAuth.Discovery do
       |> Enum.filter(&endpoint_field?/1)
       |> Enum.sort()
 
-    fields = @required_endpoints ++ (optional -- @required_endpoints)
+    fields = required ++ (optional -- required)
 
     if missing do
       Error.error(:invalid_metadata, %{field: missing})

@@ -361,6 +361,19 @@ defmodule ConduitMcp.Client do
   @spec reconnect(client()) :: :ok | {:error, Error.t()}
   def reconnect(client), do: Request.call(client, :reconnect, @control_timeout)
 
+  @doc """
+  Tells a client using OAuth (`auth: {:oauth, ...}`) that the host stored
+  new tokens: a connection waiting for interactive authorization checks the
+  token store now and resumes, instead of on its next request.
+  `ConduitMcp.Client.OAuth.handle_callback/3` calls it when given
+  `client:`. Returns `:ok` without waiting for the check, or
+  `{:error, %Error{kind: :auth, reason: :oauth_not_configured}}`.
+
+      :ok = ConduitMcp.Client.authorized(:docs)
+  """
+  @spec authorized(client()) :: :ok | {:error, Error.t()}
+  def authorized(client), do: Request.call(client, :authorized, @control_timeout)
+
   # --- requests ------------------------------------------------------------------
 
   @doc """

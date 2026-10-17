@@ -84,6 +84,13 @@ defmodule ConduitMcp.Client.OAuth.Error do
     * `:token_request_failed` - the token endpoint failed otherwise.
     * `:step_up_limit` - the step-up attempt limit for a resource and scope set
       was reached (see `ConduitMcp.Client.OAuth.Scopes.step_up_allowed?/4`).
+    * `:url_blocked` - `ConduitMcp.Client.URLPolicy` refused a server-supplied
+      URL before any connection was made (a private, loopback or otherwise
+      internal address, or an unresolvable host); `:data` is the policy's
+      reason.
+    * `:client_secret_unavailable` - a client secret configured as
+      `{:system, "VAR"}` names an unset environment variable; `:data` is the
+      variable name.
   """
 
   @descriptions [
@@ -120,7 +127,9 @@ defmodule ConduitMcp.Client.OAuth.Error do
     registration_failed: "client registration failed",
     invalid_grant: "authorization grant or refresh token rejected",
     token_request_failed: "token request failed",
-    step_up_limit: "step-up authorization attempt limit reached"
+    step_up_limit: "step-up authorization attempt limit reached",
+    url_blocked: "URL refused by the URL policy",
+    client_secret_unavailable: "the configured client secret is not set"
   ]
 
   @reasons Keyword.keys(@descriptions)
@@ -160,6 +169,8 @@ defmodule ConduitMcp.Client.OAuth.Error do
           | :invalid_grant
           | :token_request_failed
           | :step_up_limit
+          | :url_blocked
+          | :client_secret_unavailable
 
   @type t :: %__MODULE__{reason: reason(), data: term()}
 

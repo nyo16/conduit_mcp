@@ -31,6 +31,7 @@ if Code.ensure_loaded?(Finch) do
 
     alias ConduitMcp.Client.Error
     alias ConduitMcp.Client.OAuth.Challenge
+    alias ConduitMcp.Client.OAuth.Session, as: OAuthSession
     alias ConduitMcp.Client.Secret
     alias ConduitMcp.Client.SSE
     alias ConduitMcp.Client.Transport.StreamableHTTP
@@ -43,6 +44,7 @@ if Code.ensure_loaded?(Finch) do
     @max_retry 30_000
     @max_session_id_bytes 1_024
     @max_error_body 65_536
+    @sent_key {__MODULE__, :sent}
 
     @doc "Runs the exchange described by `spec` (see the transport's `spec/6`)."
     @spec run(map()) :: :ok
@@ -105,6 +107,28 @@ if Code.ensure_loaded?(Finch) do
     defp credentials(%{auth: {:bearer, token}}, _method),
       do: {:ok, [{"authorization", StreamableHTTP.bearer(token)}]}
 
+    # OAuth: the stored token, refreshed here first when it is about to
+    # expire (this process, never the connection). Only the MCP server's
+    # URL ever gets it. The fingerprint of what was sent lets the
+    # connection tell, after a 401, whether the store holds a newer token.
+    defp credentials(%{auth: {:oauth, %OAuthSession{} = session}}, _method) do
+      case OAuthSession.bearer(session) do
+        {:ok, nil} ->
+          Process.put(@sent_key, nil)
+          {:ok, []}
+
+        {:ok, token} ->
+          Process.put(@sent_key, OAuthSession.fingerprint(token))
+          {:ok, [{"authorization", StreamableHTTP.bearer(token)}]}
+      end
+    rescue
+      # A host token store that raised; what it raised is not reported.
+      _error -> {:error, Error.new(:auth, :credentials_unavailable)}
+    end
+
+    # Not handed over by the connection yet: nothing to send.
+    defp credentials(%{auth: {:oauth, _config}}, _method), do: {:ok, []}
+
     # The auth seam: user code, run here and never in the connection.
     defp credentials(%{auth: fun} = spec, method) when is_function(fun, 1) do
       case fun.(%{url: spec.url, method: method}) do
@@ -141,7 +165,7 @@ if Code.ensure_loaded?(Finch) do
           spec.http.cancel(response)
           fail(spec, {:unexpected_status, status})
 
-        spec.probe? ->
+        spec.probe? and not (oauth?(spec) and status in [401, 403]) ->
           probe_failure(response, spec)
 
         status in [401, 403] ->
@@ -189,8 +213,13 @@ if Code.ensure_loaded?(Finch) do
         end
 
       spec.http.cancel(response)
-      done(spec, [{:unauthorized, spec.id, %{status: response.status, challenges: challenges}}])
+      info = %{status: response.status, challenges: challenges}
+      info = if oauth?(spec), do: Map.put(info, :sent, Process.get(@sent_key)), else: info
+      done(spec, [{:unauthorized, spec.id, info}])
     end
+
+    defp oauth?(%{auth: {:oauth, _}}), do: true
+    defp oauth?(_spec), do: false
 
     defp retry_after(response) do
       with value when is_binary(value) <- spec_header(response, "retry-after"),

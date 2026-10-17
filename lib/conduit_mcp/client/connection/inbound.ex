@@ -88,7 +88,7 @@ defmodule ConduitMcp.Client.Connection.Inbound do
 
   defp fan_out(data, method, params) do
     for {_ref, pid} <- data.subscribers,
-        do: send(pid, {:mcp_notification, data.name, method, params})
+        do: send(pid, {:mcp_notification, data.config.name, method, params})
 
     Notifier.notify(data.notifier, method, params, data.era)
   end

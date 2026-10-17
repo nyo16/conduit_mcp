@@ -11,7 +11,12 @@ defmodule ConduitMcp.Client.Connection.Requests do
   #
   #     %{mref: alias, caller_mon: ref, method: String.t(), handle: term(),
   #       deadline: ms, max_deadline: ms, timeout: ms, reset?: boolean(),
-  #       assigns: map() | nil, paused: non_neg_integer(), paused_at: ms | nil}
+  #       assigns: map() | nil, paused: non_neg_integer(), paused_at: ms | nil,
+  #       params: map(), info: map(), wire_opts: keyword()}
+  #
+  # `params`, `info` and `wire_opts` are what the request was sent with, so
+  # a request the server refused with 401 can be sent again once OAuth has
+  # a token (`resend/2`; it never reached the server's handler).
   #
   # `refs` maps both the caller's alias and the connection's monitor of the
   # caller to the id, so `$mcp_cancel` and `:DOWN` find the entry in O(1).
@@ -151,7 +156,10 @@ defmodule ConduitMcp.Client.Connection.Requests do
             reset?: Keyword.get(opts, :reset_on_progress, false),
             assigns: Keyword.get(opts, :assigns),
             paused: 0,
-            paused_at: nil
+            paused_at: nil,
+            params: params,
+            info: info,
+            wire_opts: wire_opts
           }
 
           reply(mref, {:accepted, id})
@@ -213,6 +221,36 @@ defmodule ConduitMcp.Client.Connection.Requests do
         end
 
         {data, [cancel_timer(id)]}
+    end
+  end
+
+  @doc """
+  Sends pending request `id` again, with the same id, params and envelope:
+  the server refused it with HTTP 401 and OAuth now has a token. A request
+  no longer pending is skipped.
+  """
+  @spec resend(Data.t(), pos_integer()) :: result()
+  def resend(data, id) do
+    case Map.fetch(data.pending, id) do
+      {:ok, entry} ->
+        case Data.send_request(
+               data,
+               id,
+               entry.method,
+               entry.params,
+               entry.info,
+               entry.mref,
+               entry.wire_opts
+             ) do
+          {:ok, handle, data} ->
+            {put_entry(data, id, %{entry | handle: handle}), []}
+
+          {:error, reason, data} ->
+            exchange_done(id, {:error, reason}, data)
+        end
+
+      :error ->
+        {data, []}
     end
   end
 
