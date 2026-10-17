@@ -1,0 +1,68 @@
+defmodule ConduitMcp.Client.ToolResult do
+  @moduledoc """
+  The outcome of a `tools/call` that the server completed.
+
+  A tool that fails reports it in-band: `is_error: true` with the failure in
+  `content`. That is still `{:ok, %ToolResult{is_error: true}}`;
+  `{:error, %ConduitMcp.Client.Error{}}` is reserved for protocol, transport
+  and policy failures.
+
+    * `content` - the `content` blocks, string-keyed, as sent.
+    * `structured` - `structuredContent`, or `nil`.
+    * `is_error` - `true` only when the server sent `isError: true`.
+    * `meta` - the result's `_meta`, or `%{}`.
+    * `extra` - every other wire key (minus `resultType`), never atomized.
+  """
+
+  alias ConduitMcp.Client.Wire
+
+  @known_keys ["content", "structuredContent", "isError", "_meta", "resultType"]
+
+  defstruct content: [], structured: nil, is_error: false, meta: %{}, extra: %{}
+
+  @type t :: %__MODULE__{
+          content: [map()],
+          structured: term(),
+          is_error: boolean(),
+          meta: map(),
+          extra: map()
+        }
+
+  @doc """
+  Builds a result from a wire `CallToolResult` map.
+
+  `content` must be a list when present (a missing `content` reads as `[]`)
+  and `isError` a boolean or `null` when present (`null` reads as `false`);
+  otherwise the result is a `:protocol` error with reason
+  `:invalid_tool_result`. `resultType` is not checked here: an MRTR interim
+  result never reaches this function.
+
+      iex> {:ok, result} =
+      ...>   ConduitMcp.Client.ToolResult.from_wire(%{
+      ...>     "content" => [%{"type" => "text", "text" => "boom"}],
+      ...>     "isError" => true
+      ...>   })
+      iex> result.is_error
+      true
+  """
+  @spec from_wire(term()) :: {:ok, t()} | {:error, ConduitMcp.Client.Error.t()}
+  def from_wire(%{} = map) when not is_struct(map) do
+    content = Map.get(map, "content", [])
+    is_error = Map.get(map, "isError") || false
+
+    if is_list(content) and is_boolean(is_error) do
+      {:ok,
+       %__MODULE__{
+         content: content,
+         structured: Map.get(map, "structuredContent"),
+         is_error: is_error,
+         meta: Wire.meta(map),
+         extra: Map.drop(map, @known_keys)
+       }}
+    else
+      Wire.invalid(:invalid_tool_result, map)
+    end
+  end
+
+  def from_wire(other), do: Wire.invalid(:invalid_tool_result, other)
+end
