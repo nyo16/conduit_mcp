@@ -11,7 +11,7 @@ ConduitMCP is an Elixir library implementing the [Model Context Protocol (MCP)](
 ```bash
 mix deps.get              # Install dependencies
 mix compile               # Compile
-mix test                  # Run all tests (~2,300: 2,201 tests, 61 doctests, 37 properties; includes :integration and :stdio)
+mix test                  # Run all tests (~2,340: 2,236 tests, 61 doctests, 40 properties; includes :integration and :stdio)
 mix test test/conduit_mcp/dsl_test.exs           # Run a single test file
 mix test test/conduit_mcp/dsl_test.exs:42        # Run a specific test line
 mix format                # Format code
@@ -108,6 +108,7 @@ Tools can carry `_meta` metadata via the `meta/1` macro (generic map) or `ui/1` 
 - `test/support/` is compiled in the test env via `elixirc_paths(:test)` in `mix.exs` (no `Code.require_file`). Notable helpers: `test_server.ex` (`ConduitMcp.TestServer`, `dsl: false`), `telemetry_test.ex` (`ConduitMcp.TelemetryTestHelper`), `mcp_schema.ex` (`ConduitMcp.Test.McpSchema`, validates against the vendored `test/fixtures/mcp_schema/*/schema.json`), and `client/` (fake transports, scripted Bandit plugs, an OAuth fake, stdio fixtures).
 - Real-socket tests start Bandit on `port: 0`, `ip: :loopback` and read the port from `ThousandIsland.listener_info/1`. They are tagged `:integration` (HTTP) or `:stdio` (child processes); neither tag is excluded, so plain `mix test` runs them.
 - No `Process.sleep` in tests: tiny timeouts plus `assert_receive`.
+- Hub tests wait for readiness as the hub sees it (`await_hub_ready/3` in `test/support/client/harness.ex`, i.e. `Hub.status/1`), not a client's own `await_ready/2`: the manager marks a server running only after its client started. After killing a process, wait for its replacement — the Registry drops a dead process's entry asynchronously.
 
 ### Conventions
 

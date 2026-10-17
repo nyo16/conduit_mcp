@@ -366,6 +366,13 @@ Smaller behaviour changes worth knowing about:
   It sat behind the auth plug, so the document a client fetches *after* a 401
   to discover the authorization server required already being authenticated.
   It is now served by both transports, without auth.
+- **The client never turns certificate checks off.** The Streamable HTTP
+  transport refuses any `verify` other than `:verify_peer` (a duplicate
+  `verify:` key included) and any custom `verify_fun` at client start, and
+  the OAuth client forces `verify_peer` on every metadata, registration and
+  token request. A `transport_opts: [verify: :verify_none, ...]` used to
+  reach an untrusted server. Opt out: `insecure_skip_tls_verify: true` on the
+  transport, for local development only (it logs a warning).
 
 ### Fixed
 
@@ -780,7 +787,17 @@ Smaller behaviour changes worth knowing about:
   and OAuth) and `:jsv` (`~> 0.26`, client schema validation), guarded by
   `ConduitMcp.OptionalDeps.finch!/0`, `jsv!/0`, `oauth_client!/0` and
   `client_assertion!/0` at init.
-- **Test coverage** expanded to 2 299 tests (2 201 tests, 61 doctests, 37
+- **Server log messages reaching the client are bounded.** Inbound
+  `notifications/message` is sanitized (`ConduitMcp.Reflect`), level-clamped
+  to the RFC 5424 set and rate-limited per connection (`log_rate_limit:
+  [per_second: 50, burst: 100]`); drops emit
+  `[:conduit_mcp, :client, :log, :dropped]`. A server could flood a host's
+  log handler. Opt out: raise `log_rate_limit`.
+- **Client trace context.** A `:traceparent` request option (falling back to
+  `Logger.metadata()[:traceparent]`) is validated with the now-public
+  `ConduitMcp.Era.traceparent/1` and sent in modern `_meta`; `tracestate` and
+  `baggage` are never sent.
+- **Test coverage** expanded to 2 337 tests (2 236 tests, 61 doctests, 40
   properties; up from 745 in 0.10.1), including real-socket `:integration`
   and child-process `:stdio` tests that run in the default suite.
 - **Dependencies updated** (lock only; no requirement changed): hammer 7.5.0,
