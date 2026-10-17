@@ -175,6 +175,7 @@ defmodule ConduitMcp.MixProject do
         "guides/client_permissions_and_hooks.md",
         "guides/client_hub.md",
         "guides/client_llm_adapters.md",
+        "guides/client_oauth.md",
         "guides/client_security.md"
       ],
       groups_for_extras: [
@@ -203,6 +204,7 @@ defmodule ConduitMcp.MixProject do
           "guides/client_permissions_and_hooks.md",
           "guides/client_hub.md",
           "guides/client_llm_adapters.md",
+          "guides/client_oauth.md",
           "guides/client_security.md"
         ]
       ],
