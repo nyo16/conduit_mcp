@@ -14,9 +14,11 @@ defmodule ConduitMcp.Client.Request do
       `id`.
     * `{:progress, params}` - a `notifications/progress` for it; passed to
       `:on_progress`.
-    * `{:response, message}` - the JSON-RPC response.
     * `{:result, map}` - the connection completed the request itself (for
       example a modern `set_log_level`, which sends nothing).
+    * `{:deadline, ms}` - the deadline moved: a legacy server request tied
+      to this one is running in the client's handler (the deadline is
+      paused, bounded by `:max_total_timeout`), or ended.
     * `{:error, %ConduitMcp.Client.Error{}}` - the connection refused or
       failed it.
     * `{:DOWN, mref, ...}` - the connection exited (`kind:
@@ -44,6 +46,7 @@ defmodule ConduitMcp.Client.Request do
   `ConduitMcp.Telemetry`).
   """
 
+  alias ConduitMcp.Client.Cache
   alias ConduitMcp.Client.Error
   alias ConduitMcp.Client.Registry
   alias ConduitMcp.Client.Telemetry
@@ -56,7 +59,14 @@ defmodule ConduitMcp.Client.Request do
   @client_info "io.modelcontextprotocol/clientInfo"
   @log_level "io.modelcontextprotocol/logLevel"
 
-  @run_options [:timeout, :on_progress, :reset_timeout_on_progress, :max_total_timeout]
+  @run_options [
+    :timeout,
+    :on_progress,
+    :reset_timeout_on_progress,
+    :max_total_timeout,
+    :assigns,
+    :extensions
+  ]
 
   @typedoc """
   What to send: a JSON-RPC method, or an operation whose wire form depends on
@@ -104,7 +114,14 @@ defmodule ConduitMcp.Client.Request do
     * `:reset_timeout_on_progress` - each progress notification restarts
       the `:timeout` (default `false`), never past `:max_total_timeout`.
     * `:max_total_timeout` - the cap for the above (default the client's
-      `:max_total_timeout`).
+      `:max_total_timeout`), and for a deadline paused while a legacy
+      server request tied to this one runs in the client's handler.
+    * `:assigns` - a map passed to `ConduitMcp.Client.Handler` callbacks as
+      `ctx.assigns` for legacy server requests tied to this request (default
+      the client's `:assigns`).
+    * `:extensions` - extension capabilities to declare in this request's
+      modern `clientCapabilities` (for example
+      `%{"io.modelcontextprotocol/tasks" => %{}}`).
 
   ## Example
 
@@ -135,15 +152,23 @@ defmodule ConduitMcp.Client.Request do
   end
 
   @doc """
-  Resolves `client` to its connection pid and the value the connection
-  publishes under `{:client, name}` (see `ConduitMcp.Client.Registry`).
+  Resolves `client` to its connection pid and its caller view: the value the
+  connection registers under `{:client, name}` (see
+  `ConduitMcp.Client.Registry`) merged with its current status from
+  `ConduitMcp.Client.Cache` (`state`, `era`, `version`, `reason`, `origin`,
+  `server`).
   """
   @spec lookup(term()) :: {:ok, pid(), map()} | {:error, Error.t()}
   def lookup(client) do
     case Registry.lookup({:client, client}) do
-      {:ok, pid, %{} = view} -> {:ok, pid, view}
-      {:ok, _pid, :starting} -> {:error, Error.new(:unavailable, :starting)}
-      :error -> {:error, Error.new(:unavailable, :not_started)}
+      {:ok, pid, %{cache: cache} = view} ->
+        with {:ok, status} <- Cache.status(cache), do: {:ok, pid, Map.merge(view, status)}
+
+      {:ok, _pid, :starting} ->
+        {:error, Error.new(:unavailable, :starting)}
+
+      :error ->
+        {:error, Error.new(:unavailable, :not_started)}
     end
   end
 
@@ -255,6 +280,8 @@ defmodule ConduitMcp.Client.Request do
     max_total = Keyword.get(opts, :max_total_timeout, view.max_total_timeout)
     on_progress = Keyword.get(opts, :on_progress)
     reset? = Keyword.get(opts, :reset_timeout_on_progress, false)
+    assigns = Keyword.get(opts, :assigns)
+    extensions = Keyword.get(opts, :extensions, %{})
 
     for {key, value} <- [timeout: timeout, max_total_timeout: max_total],
         not (is_integer(value) and value > 0) do
@@ -266,12 +293,22 @@ defmodule ConduitMcp.Client.Request do
             ":on_progress must be a one-arity function or a pid, got: #{inspect(on_progress)}"
     end
 
+    unless assigns == nil or is_map(assigns) do
+      raise ArgumentError, ":assigns must be a map, got: #{inspect(assigns)}"
+    end
+
+    unless is_map(extensions) do
+      raise ArgumentError, ":extensions must be a map, got: #{inspect(extensions)}"
+    end
+
     %{
       timeout: timeout,
       deadline: now + timeout,
       max_deadline: now + max(timeout, max_total),
       reset?: reset? == true,
-      on_progress: on_progress
+      on_progress: on_progress,
+      assigns: assigns,
+      extensions: extensions
     }
   end
 
@@ -281,7 +318,9 @@ defmodule ConduitMcp.Client.Request do
       max_deadline: settings.max_deadline,
       timeout: settings.timeout,
       reset_on_progress: settings.reset?,
-      progress: settings.on_progress != nil or settings.reset?
+      progress: settings.on_progress != nil or settings.reset?,
+      assigns: settings.assigns,
+      extensions: settings.extensions
     ]
   end
 
@@ -304,6 +343,9 @@ defmodule ConduitMcp.Client.Request do
       {^mref, {:progress, params}} ->
         progress(settings.on_progress, req.client, params)
         await(req, extend(settings))
+
+      {^mref, {:deadline, deadline}} ->
+        await(req, %{settings | deadline: deadline})
 
       {^mref, {:response, message}} ->
         {decode(message), %{request_id: req.id}}
@@ -331,9 +373,12 @@ defmodule ConduitMcp.Client.Request do
   defp progress(fun, _client, params), do: fun.(params)
 
   # Mirrors the connection's re-arm (`Connection.Requests`), so the safety
-  # net never fires before the real deadline.
-  defp extend(%{reset?: true} = settings),
-    do: %{settings | deadline: min(now_ms() + settings.timeout, settings.max_deadline)}
+  # net never fires before the real deadline; it never moves the deadline
+  # back, since a paused deadline already sits at the maximum.
+  defp extend(%{reset?: true} = settings) do
+    deadline = min(now_ms() + settings.timeout, settings.max_deadline)
+    %{settings | deadline: max(settings.deadline, deadline)}
+  end
 
   defp extend(settings), do: settings
 

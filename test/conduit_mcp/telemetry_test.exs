@@ -396,6 +396,30 @@ defmodule ConduitMcp.TelemetryTest do
           %{count: 1},
           Map.put(client, :method, "notifications/message")
         )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :cache, :refresh, :start],
+          %{monotonic_time: 1, system_time: 1},
+          Map.merge(client, %{kind: :tools, trigger: :demand})
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :cache, :refresh, :stop],
+          Map.merge(span, %{count: 2, pages: 1, rejected: 1}),
+          Map.merge(client, %{kind: :tools, trigger: :demand, status: :ok, error_kind: nil})
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :tool, :rejected],
+          %{count: 1},
+          Map.merge(client, %{tool_name: nil, reason: :invalid_name})
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :tool, :definition_changed],
+          %{count: 1},
+          Map.put(client, :tool_name, "echo")
+        )
       end)
 
       for event <- ConduitMcp.Telemetry.events() do

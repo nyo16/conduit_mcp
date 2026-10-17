@@ -5,8 +5,10 @@ defmodule ConduitMcp.Client.Connection.Handshake do
   # the legacy `initialize` handshake, reconnect with backoff, closing, and
   # the optional health check. Functions return `:gen_statem` results.
 
+  alias ConduitMcp.Client.Cache
   alias ConduitMcp.Client.Connection.Data
   alias ConduitMcp.Client.Connection.Requests
+  alias ConduitMcp.Client.Connection.ServerRequests
   alias ConduitMcp.Client.DiscoverResult
   alias ConduitMcp.Client.Error
   alias ConduitMcp.Client.Negotiation
@@ -327,7 +329,9 @@ defmodule ConduitMcp.Client.Connection.Handshake do
     }
 
     {data, actions} = Requests.fail_all(data, error)
-    {Data.close_transport(data, reason), actions}
+    {data, stop_actions} = ServerRequests.stop_all(data)
+    Cache.mark_all_stale(data.cache)
+    {Data.close_transport(data, reason), actions ++ stop_actions}
   end
 
   @doc "A `state_timeout` fired in `state`."
@@ -377,6 +381,9 @@ defmodule ConduitMcp.Client.Connection.Handshake do
 
   def internal_response(id, :health, _message, _state, %Data{health_id: id} = data),
     do: {:keep_state, %{data | health_id: nil, health_misses: 0}}
+
+  # The answer to a `tasks/cancel` sent for a dead caller (`TaskWatch`).
+  def internal_response(_id, :task_cancel, _message, _state, data), do: {:keep_state, data}
 
   # A late answer to an abandoned handshake or health check.
   def internal_response(_id, _purpose, _message, _state, _data), do: :keep_state_and_data

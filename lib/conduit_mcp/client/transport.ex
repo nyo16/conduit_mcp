@@ -73,7 +73,9 @@ defmodule ConduitMcp.Client.Transport do
 
   ## Events from `c:handle_info/2`
 
-    * `{:connected, info}` - see `c:connect/1`.
+    * `{:connected, info}` - see `c:connect/1`. An HTTP transport puts the
+      server's origin (`"https://host[:port]"`) in `info[:origin]`; the
+      client compares URL-mode elicitation URLs with it.
     * `{:response, id, message}`, `{:exchange_done, id, outcome}` - above.
     * `{:notification, method, params}` - a server notification.
       `notifications/progress` is routed to the request whose id equals its

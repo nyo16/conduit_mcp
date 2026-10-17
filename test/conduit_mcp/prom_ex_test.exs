@@ -23,7 +23,8 @@ if Code.ensure_loaded?(PromEx) do
           )
 
         for metric <- group.metrics do
-          assert metric.tags -- [:method, :status, :error_kind, :is_error, :to, :reason] == [],
+          assert metric.tags -- [:method, :status, :error_kind, :is_error, :to, :reason, :kind] ==
+                   [],
                  inspect(metric.name)
         end
       end

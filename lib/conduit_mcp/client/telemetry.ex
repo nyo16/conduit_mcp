@@ -7,8 +7,9 @@ defmodule ConduitMcp.Client.Telemetry do
   # name, era, transport kind, closed-set atoms and request ids. Never
   # arguments, results, `_meta`, tokens or raw error data.
   #
-  # Spans (`request`, `tool_call`) run in the caller; the rest run inside the
-  # connection process.
+  # Spans (`request`, `tool_call`) run in the caller, and `tool.rejected` in
+  # the process that fetched the list (a caller, or a cache refresh task);
+  # the rest run inside the connection process.
 
   alias ConduitMcp.Client.Error
   alias ConduitMcp.Reflect
@@ -137,6 +138,58 @@ defmodule ConduitMcp.Client.Telemetry do
       [:conduit_mcp, :client, :notification],
       %{count: 1},
       Map.put(base, :method, Reflect.text(method, 64))
+    )
+  end
+
+  @doc """
+  A listed tool was excluded at intake. `tool_name` is already sanitized
+  (or `nil` when the server sent no string name).
+  """
+  @spec tool_rejected(base(), String.t() | nil, atom()) :: :ok
+  def tool_rejected(base, tool_name, reason) do
+    :telemetry.execute(
+      [:conduit_mcp, :client, :tool, :rejected],
+      %{count: 1},
+      Map.merge(base, %{tool_name: tool_name, reason: reason})
+    )
+  end
+
+  @doc "A known tool's fingerprint changed on a refresh."
+  @spec definition_changed(base(), String.t()) :: :ok
+  def definition_changed(base, tool_name) do
+    :telemetry.execute(
+      [:conduit_mcp, :client, :tool, :definition_changed],
+      %{count: 1},
+      Map.put(base, :tool_name, Reflect.text(tool_name, 128))
+    )
+  end
+
+  @doc "The connection started refreshing the cached `kind` list."
+  @spec cache_refresh_start(base(), atom(), :demand | :list_changed) :: :ok
+  def cache_refresh_start(base, kind, trigger) do
+    :telemetry.execute(
+      [:conduit_mcp, :client, :cache, :refresh, :start],
+      %{monotonic_time: System.monotonic_time(), system_time: System.system_time()},
+      Map.merge(base, %{kind: kind, trigger: trigger})
+    )
+  end
+
+  @doc "A cache refresh started at `started` (native monotonic time) finished."
+  @spec cache_refresh_stop(base(), atom(), :demand | :list_changed, integer(), term()) :: :ok
+  def cache_refresh_stop(base, kind, trigger, started, result) do
+    {counts, outcome} =
+      case result do
+        {:ok, %{items: items, pages: pages, rejected: rejected}} ->
+          {%{count: length(items), pages: pages, rejected: rejected}, status(:ok)}
+
+        other ->
+          {%{count: 0, pages: 0, rejected: 0}, status(other)}
+      end
+
+    :telemetry.execute(
+      [:conduit_mcp, :client, :cache, :refresh, :stop],
+      stop_measurements(started, counts),
+      base |> Map.merge(%{kind: kind, trigger: trigger}) |> Map.merge(outcome)
     )
   end
 

@@ -10,12 +10,19 @@ defmodule ConduitMcp.Client.Connection.Requests do
   # A pending entry:
   #
   #     %{mref: alias, caller_mon: ref, method: String.t(), handle: term(),
-  #       deadline: ms, max_deadline: ms, timeout: ms, reset?: boolean()}
+  #       deadline: ms, max_deadline: ms, timeout: ms, reset?: boolean(),
+  #       assigns: map() | nil, paused: non_neg_integer(), paused_at: ms | nil}
   #
   # `refs` maps both the caller's alias and the connection's monitor of the
   # caller to the id, so `$mcp_cancel` and `:DOWN` find the entry in O(1).
   # Deadlines are absolute `System.monotonic_time(:millisecond)` values, the
   # clock `:gen_statem` absolute timeouts use.
+  #
+  # While a legacy server request tied to a request runs (`paused` > 0), the
+  # request's timer is set at its `max_deadline`; when the last one ends the
+  # deadline moves forward by the paused time, never past `max_deadline`.
+  # The caller is told each new deadline (`{:deadline, ms}`), so its own
+  # safety net moves with it.
 
   alias ConduitMcp.Client.Connection.Data
   alias ConduitMcp.Client.Error
@@ -126,6 +133,7 @@ defmodule ConduitMcp.Client.Connection.Requests do
     else
       {id, data} = Data.take_id(data)
       info = if Keyword.get(opts, :progress, false), do: %{progress_token: id}, else: %{}
+      info = Map.put(info, :extensions, Keyword.get(opts, :extensions, %{}))
 
       case Data.send_request(data, id, method, params, info, mref, []) do
         {:ok, handle, data} ->
@@ -137,7 +145,10 @@ defmodule ConduitMcp.Client.Connection.Requests do
             deadline: Keyword.fetch!(opts, :deadline),
             max_deadline: Keyword.fetch!(opts, :max_deadline),
             timeout: Keyword.fetch!(opts, :timeout),
-            reset?: Keyword.get(opts, :reset_on_progress, false)
+            reset?: Keyword.get(opts, :reset_on_progress, false),
+            assigns: Keyword.get(opts, :assigns),
+            paused: 0,
+            paused_at: nil
           }
 
           reply(mref, {:accepted, id})
@@ -256,13 +267,63 @@ defmodule ConduitMcp.Client.Connection.Requests do
 
   def progress(_params, data), do: {data, []}
 
-  defp extend(data, id, %{reset?: true} = entry) do
+  defp extend(data, id, %{reset?: true, paused: 0} = entry) do
     deadline = min(now_ms() + entry.timeout, entry.max_deadline)
     entry = %{entry | deadline: deadline}
     {%{data | pending: Map.put(data.pending, id, entry)}, [timer(id, deadline)]}
   end
 
   defp extend(data, _id, _entry), do: {data, []}
+
+  @doc """
+  A legacy server request tied to request `id` started: the request's
+  deadline stops running (bounded by its `max_deadline`). `nil` or an id no
+  longer pending changes nothing.
+  """
+  @spec pause(Data.t(), term()) :: result()
+  def pause(data, id) do
+    case Map.fetch(data.pending, id) do
+      {:ok, %{paused: 0} = entry} ->
+        reply(entry.mref, {:deadline, entry.max_deadline})
+        entry = %{entry | paused: 1, paused_at: now_ms()}
+        {put_entry(data, id, entry), [timer(id, entry.max_deadline)]}
+
+      {:ok, entry} ->
+        {put_entry(data, id, %{entry | paused: entry.paused + 1}), []}
+
+      :error ->
+        {data, []}
+    end
+  end
+
+  @doc "The server request tied to request `id` ended: undo one `pause/2`."
+  @spec resume(Data.t(), term()) :: result()
+  def resume(data, id) do
+    case Map.fetch(data.pending, id) do
+      {:ok, %{paused: 1} = entry} ->
+        deadline = min(entry.deadline + (now_ms() - entry.paused_at), entry.max_deadline)
+        reply(entry.mref, {:deadline, deadline})
+        entry = %{entry | paused: 0, paused_at: nil, deadline: deadline}
+        {put_entry(data, id, entry), [timer(id, deadline)]}
+
+      {:ok, %{paused: paused} = entry} when paused > 1 ->
+        {put_entry(data, id, %{entry | paused: paused - 1}), []}
+
+      _not_paused ->
+        {data, []}
+    end
+  end
+
+  @doc "The `assigns` of pending request `id`, or `nil`."
+  @spec assigns(Data.t(), term()) :: map() | nil
+  def assigns(data, id) do
+    case Map.fetch(data.pending, id) do
+      {:ok, entry} -> entry.assigns
+      :error -> nil
+    end
+  end
+
+  defp put_entry(data, id, entry), do: %{data | pending: Map.put(data.pending, id, entry)}
 
   @doc "Answers every pending request with `error` and forgets them."
   @spec fail_all(Data.t(), Error.t()) :: result()

@@ -186,6 +186,20 @@ if Code.ensure_loaded?(PromEx) do
       dropped
     - `{prefix}_client_notification_total` - Counter of server notifications
       received
+    - `{prefix}_client_cache_refresh_start_total` - Counter of cache
+      refreshes started
+      - Tags: `kind`
+    - `{prefix}_client_cache_refresh_total` - Counter of finished cache
+      refreshes
+      - Tags: `kind`, `status`, `error_kind`
+    - `{prefix}_client_cache_refresh_duration_milliseconds` - Distribution of
+      cache refresh durations
+      - Tags: `kind`, `status`
+    - `{prefix}_client_tool_rejected_total` - Counter of listed tools
+      dropped at intake
+      - Tags: `reason`
+    - `{prefix}_client_tool_definition_changed_total` - Counter of known
+      tools whose definition changed
 
     ## PromQL Examples
 
@@ -707,6 +721,48 @@ if Code.ensure_loaded?(PromEx) do
             event_name: [:conduit_mcp, :client, :notification],
             description: "MCP server notifications received by the client",
             measurement: fn _measurements -> 1 end
+          ),
+          counter(
+            metric_prefix ++ [:client, :cache, :refresh, :start, :total],
+            event_name: [:conduit_mcp, :client, :cache, :refresh, :start],
+            description: "MCP client cache refreshes started",
+            measurement: fn _measurements -> 1 end,
+            tags: [:kind],
+            tag_values: &extract_client_tags/1
+          ),
+          counter(
+            metric_prefix ++ [:client, :cache, :refresh, :total],
+            event_name: [:conduit_mcp, :client, :cache, :refresh, :stop],
+            description: "MCP client cache refreshes finished",
+            measurement: fn _measurements -> 1 end,
+            tags: [:kind, :status, :error_kind],
+            tag_values: &extract_client_tags/1
+          ),
+          distribution(
+            metric_prefix ++ [:client, :cache, :refresh, :duration, duration_unit],
+            event_name: [:conduit_mcp, :client, :cache, :refresh, :stop],
+            description: "MCP client cache refresh duration distribution",
+            measurement: :duration,
+            unit: {:native, duration_unit},
+            tags: [:kind, :status],
+            tag_values: &extract_client_tags/1,
+            reporter_options: [
+              buckets: [10, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 60_000]
+            ]
+          ),
+          counter(
+            metric_prefix ++ [:client, :tool, :rejected, :total],
+            event_name: [:conduit_mcp, :client, :tool, :rejected],
+            description: "Tools dropped by the MCP client at intake",
+            measurement: fn _measurements -> 1 end,
+            tags: [:reason],
+            tag_values: &extract_client_tags/1
+          ),
+          counter(
+            metric_prefix ++ [:client, :tool, :definition_changed, :total],
+            event_name: [:conduit_mcp, :client, :tool, :definition_changed],
+            description: "Known tools whose definition changed on refresh",
+            measurement: fn _measurements -> 1 end
           )
         ]
       )
@@ -714,7 +770,7 @@ if Code.ensure_loaded?(PromEx) do
 
     # Tag extraction functions
 
-    @client_tags [:method, :status, :error_kind, :is_error, :to, :reason]
+    @client_tags [:method, :status, :error_kind, :is_error, :to, :reason, :kind]
 
     defp extract_client_tags(metadata) do
       for key <- @client_tags, Map.has_key?(metadata, key), into: %{} do
