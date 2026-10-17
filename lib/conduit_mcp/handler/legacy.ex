@@ -84,6 +84,16 @@ defmodule ConduitMcp.Handler.Legacy do
         Protocol.valid_notification?(request) ->
           handle_notification(request, server_module, conn)
 
+        # This era sends the client no requests, so no response can be
+        # awaited: an incoming one is accepted and dropped, like an unknown
+        # notification. Replying to it would answer a reply.
+        Protocol.valid_response?(request) ->
+          Logger.debug("Ignoring JSON-RPC response",
+            id: ConduitMcp.Reflect.text(request["id"], 64)
+          )
+
+          :ok
+
         true ->
           Protocol.error_response(
             Map.get(request, "id"),

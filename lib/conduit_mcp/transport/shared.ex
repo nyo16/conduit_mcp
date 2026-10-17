@@ -46,6 +46,7 @@ defmodule ConduitMcp.Transport.Shared do
   require Logger
 
   alias ConduitMcp.Handler
+  alias ConduitMcp.Handler.Common
   alias ConduitMcp.OptionalDeps
   alias ConduitMcp.Plugs
   alias ConduitMcp.Protocol
@@ -311,13 +312,25 @@ defmodule ConduitMcp.Transport.Shared do
     :ok
   end
 
+  # The request headers an MCP client sends. A browser client cannot present
+  # the session it was issued, or the negotiated version, unless the preflight
+  # allows them. `Mcp-Param-*` names are tool-specific and CORS allow-headers
+  # has no wildcard that holds for credentialed requests, so a server using
+  # them lists them in `:cors_headers` itself.
+  @default_cors_headers "content-type, authorization, mcp-session-id, mcp-protocol-version, " <>
+                          "mcp-method, mcp-name"
+  @default_cors_methods "GET, POST, OPTIONS"
+  # The response headers a browser client must be able to read: the session
+  # id it has to echo, and the version the server answered with.
+  @cors_expose_headers "mcp-session-id, mcp-protocol-version"
+
   defp shared_private(opts, endpoint_config, transport) do
     shared = %{
       server_module: Keyword.get(opts, :server_module),
       allowed_origins: Keyword.get(opts, :allowed_origins),
       cors_origin: Keyword.get(opts, :cors_origin),
-      cors_methods: Keyword.get(opts, :cors_methods, "GET, POST, OPTIONS"),
-      cors_headers: Keyword.get(opts, :cors_headers, "content-type, authorization"),
+      cors_methods: Keyword.get(opts, :cors_methods, @default_cors_methods),
+      cors_headers: Keyword.get(opts, :cors_headers, @default_cors_headers),
       auth_config: Keyword.get(opts, :auth_config),
       auth_plug: Keyword.get(opts, :auth_plug),
       rate_limit_plug: Keyword.get(opts, :rate_limit_plug),
@@ -354,12 +367,13 @@ defmodule ConduitMcp.Transport.Shared do
         |> put_resp_header("access-control-allow-origin", cors_origin)
         |> put_resp_header(
           "access-control-allow-methods",
-          conn.private[:cors_methods] || "GET, POST, OPTIONS"
+          conn.private[:cors_methods] || @default_cors_methods
         )
         |> put_resp_header(
           "access-control-allow-headers",
-          conn.private[:cors_headers] || "content-type, authorization"
+          conn.private[:cors_headers] || @default_cors_headers
         )
+        |> put_resp_header("access-control-expose-headers", @cors_expose_headers)
     end
   end
 
@@ -402,6 +416,13 @@ defmodule ConduitMcp.Transport.Shared do
   @doc """
   The shared JSON-RPC POST body dispatch.
 
+  A notification or a JSON-RPC response is answered `202 Accepted` with no
+  body. A request is answered with its JSON-RPC response and an
+  `mcp-protocol-version` header (see `put_protocol_version_header/2`) — at
+  HTTP 200, except that under `strategy: :oauth` an insufficient-scope error
+  is answered 403 with an `insufficient_scope` Bearer challenge
+  (`ConduitMcp.Plugs.OAuth.forbidden/4`), so the client can step up.
+
   `prepare` runs after a successful response map is produced and before it is
   sent, so a transport can attach transport-specific headers or state. It
   returns `{:ok, conn}` to continue, or `{:error, conn}` when it has already
@@ -418,19 +439,9 @@ defmodule ConduitMcp.Transport.Shared do
           id: Reflect.text(params["id"], 64)
         )
 
-        case Handler.handle_request(params, conn.private[:server_module], conn) do
-          :ok ->
-            # A notification: nothing to return.
-            send_resp(conn, 204, "")
-
-          response_map when is_map(response_map) ->
-            conn = put_protocol_version_header(conn)
-
-            case prepare.(conn, response_map) do
-              {:ok, conn} -> send_json(conn, 200, response_map)
-              {:error, conn} -> conn
-            end
-        end
+        params
+        |> Handler.handle_request(conn.private[:server_module], conn)
+        |> send_reply(conn, prepare)
 
       _ ->
         send_json(
@@ -445,10 +456,74 @@ defmodule ConduitMcp.Transport.Shared do
     end
   end
 
-  @doc false
-  @spec put_protocol_version_header(Plug.Conn.t()) :: Plug.Conn.t()
-  def put_protocol_version_header(conn) do
-    put_resp_header(conn, "mcp-protocol-version", Protocol.protocol_version())
+  # A notification or a client's response: accepted, nothing to return.
+  defp send_reply(:ok, conn, _prepare), do: send_resp(conn, 202, "")
+
+  defp send_reply(response_map, conn, prepare) when is_map(response_map) do
+    conn = put_protocol_version_header(conn, response_map)
+
+    with :continue <- insufficient_scope_challenge(conn, response_map),
+         {:ok, conn} <- prepare.(conn, response_map) do
+      send_json(conn, 200, response_map)
+    else
+      {:sent, conn} -> conn
+      {:error, conn} -> conn
+    end
+  end
+
+  # Only OAuth answers insufficient scope at the HTTP layer: it is the one
+  # strategy with an authorization server to step up with, and the Bearer
+  # challenge is defined for its tokens. Every other strategy keeps the
+  # JSON-RPC error at 200. The error is recognised by
+  # `ConduitMcp.Handler.Common.insufficient_scope/1`, by code and `data`.
+  defp insufficient_scope_challenge(conn, response_map) do
+    with {mod, plug_opts} <- oauth_plug(conn),
+         {:ok, scopes} <- Common.insufficient_scope(response_map) do
+      {:sent, mod.forbidden(conn, plug_opts, scopes, response_map)}
+    else
+      _ -> :continue
+    end
+  end
+
+  defp oauth_plug(conn) do
+    case conn.private[:auth_plug] do
+      {ConduitMcp.Plugs.OAuth, _plug_opts} = plug -> plug
+      _ -> nil
+    end
+  end
+
+  @doc """
+  Sets `mcp-protocol-version` on the response to request `response_map`.
+
+  The value is the version this connection negotiated, most specific source
+  first: an `initialize` result's own `protocolVersion`; then the version
+  recorded on the request's session; then the request's
+  `mcp-protocol-version` header; then `ConduitMcp.Protocol.protocol_version/0`.
+  A session or header value is used only when it is in
+  `ConduitMcp.Protocol.supported_versions/0`, so client input is never echoed
+  unvalidated.
+  """
+  @spec put_protocol_version_header(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def put_protocol_version_header(conn, response_map) do
+    put_resp_header(conn, "mcp-protocol-version", negotiated_version(conn, response_map))
+  end
+
+  defp negotiated_version(
+         %Plug.Conn{body_params: %{"method" => "initialize"}},
+         %{"result" => %{"protocolVersion" => version}}
+       )
+       when is_binary(version),
+       do: version
+
+  defp negotiated_version(conn, _response_map) do
+    session_version = get_in(conn.private, [:mcp_session_data, "protocol_version"])
+    header_version = conn |> get_req_header("mcp-protocol-version") |> List.first()
+
+    Enum.find(
+      [session_version, header_version],
+      Protocol.protocol_version(),
+      &(&1 in Protocol.supported_versions())
+    )
   end
 
   @doc false

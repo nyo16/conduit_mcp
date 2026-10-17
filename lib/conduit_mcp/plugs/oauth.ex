@@ -12,7 +12,9 @@ if Code.ensure_loaded?(Joken) do
     - Issuer and audience validation
     - Mandatory `exp` (a token without one is rejected, not accepted forever)
       and `nbf` enforcement when present
-    - Scope extraction and enforcement
+    - Scope extraction and enforcement: a request lacking a tool's,
+      resource's or prompt's declared `scope` is answered 403 with an
+      `insufficient_scope` challenge (`forbidden/4`) so the client can step up
     - WWW-Authenticate headers per RFC 9728
     - Protected Resource Metadata endpoint support
 
@@ -579,10 +581,17 @@ if Code.ensure_loaded?(Joken) do
     end
 
     @doc """
-    Sends a 403 Forbidden response with insufficient_scope error.
-    Used by the handler when a tool/resource requires a scope the token doesn't have.
+    Sends a 403 Forbidden response with an `insufficient_scope` Bearer
+    challenge (RFC 6750 §3.1) naming `required_scopes`, which is what lets a
+    client step up its authorization.
+
+    Both transports call this when a request fails a tool, resource or prompt
+    `scope` under `strategy: :oauth`, passing the JSON-RPC error response as
+    `body` so the client can still correlate it. `body` defaults to
+    `%{"error" => "Forbidden", "message" => "Insufficient scope. Required: ..."}`.
     """
-    def forbidden(conn, opts, required_scopes) do
+    @spec forbidden(Plug.Conn.t(), map(), [String.t()], map() | nil) :: Plug.Conn.t()
+    def forbidden(conn, opts, required_scopes, body \\ nil) do
       resource_metadata_uri =
         header_safe("#{opts.resource_uri}/.well-known/oauth-protected-resource")
 
@@ -591,16 +600,17 @@ if Code.ensure_loaded?(Joken) do
           "scope=\"#{header_safe(Enum.join(required_scopes, " "))}\", " <>
           "resource_metadata=\"#{resource_metadata_uri}\""
 
+      body =
+        body ||
+          %{
+            "error" => "Forbidden",
+            "message" => "Insufficient scope. Required: #{Enum.join(required_scopes, ", ")}"
+          }
+
       conn
       |> put_resp_header("www-authenticate", www_authenticate)
       |> put_resp_content_type("application/json")
-      |> send_resp(
-        403,
-        JSON.encode!(%{
-          "error" => "Forbidden",
-          "message" => "Insufficient scope. Required: #{Enum.join(required_scopes, ", ")}"
-        })
-      )
+      |> send_resp(403, JSON.encode!(body))
       |> halt()
     end
 

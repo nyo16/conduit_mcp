@@ -8,7 +8,12 @@ if Code.ensure_loaded?(PromEx) do
     - Tool execution metrics
     - Resource read metrics
     - Prompt retrieval metrics
+    - HTTP and message rate limit metrics
     - Authentication metrics
+    - Cancellation metrics
+    - Janitor cleanup metrics
+
+    Every event in `ConduitMcp.Telemetry.events/0` feeds at least one metric.
 
     ## Installation
 
@@ -98,6 +103,14 @@ if Code.ensure_loaded?(PromEx) do
       - Tags: `prompt_name`, `status`
       - Buckets: [10, 50, 100, 500, 1_000]
 
+    ### Rate Limit Metrics
+
+    - `{prefix}_rate_limit_check_total` - Counter of HTTP rate limit checks
+      - Tags: `status` (:allow | :deny)
+    - `{prefix}_rate_limit_check_duration_milliseconds` - Distribution of check durations
+      - Tags: `status`
+      - Buckets: [1, 5, 10, 25, 50, 100, 250]
+
     ### Message Rate Limit Metrics
 
     - `{prefix}_message_rate_limit_check_total` - Counter of message rate limit checks
@@ -113,6 +126,25 @@ if Code.ensure_loaded?(PromEx) do
     - `{prefix}_auth_verify_duration_milliseconds` - Distribution of auth verification durations
       - Tags: `strategy`, `status`
       - Buckets: [1, 5, 10, 25, 50, 100, 250]
+
+    ### Cancellation Metrics
+
+    - `{prefix}_request_cancelled_total` - Counter of recorded
+      `notifications/cancelled` (no tags: request ids, scopes and reasons
+      are unbounded or client-supplied)
+    - `{prefix}_cancellation_cleanup_removed_total` - Sum of expired
+      cancellation rows removed
+    - `{prefix}_cancellation_cleanup_in_flight_removed_total` - Sum of
+      in-flight rows of dead request processes removed
+    - `{prefix}_cancellation_janitor_runs_total` - Counter of cancellation
+      janitor runs (its `removed` duplicates the cleanup sum, so it is
+      counted, not summed)
+
+    ### Cleanup Metrics
+
+    - `{prefix}_session_cleanup_removed_total` - Sum of expired sessions evicted
+      - Tags: `store`
+    - `{prefix}_tasks_cleanup_removed_total` - Sum of terminal tasks evicted
 
     ## PromQL Examples
 
@@ -194,6 +226,8 @@ if Code.ensure_loaded?(PromEx) do
     - ✅ LOW: `prompt_name` (user-defined but typically limited)
     - ❌ HIGH: `uri` is NOT included (unbounded)
     - ❌ HIGH: `server_module` is NOT included (not useful)
+    - ❌ HIGH: the rate limit `key`, and cancellation `request_id`, `scope` and
+      `reason`, are NOT included (unbounded or client-supplied)
 
     All string values are normalized to prevent cardinality explosion.
     """
@@ -211,8 +245,11 @@ if Code.ensure_loaded?(PromEx) do
         tool_metrics(metric_prefix, duration_unit),
         resource_metrics(metric_prefix, duration_unit),
         prompt_metrics(metric_prefix, duration_unit),
+        rate_limit_metrics(metric_prefix, duration_unit),
         message_rate_limit_metrics(metric_prefix, duration_unit),
-        auth_metrics(metric_prefix, duration_unit)
+        auth_metrics(metric_prefix, duration_unit),
+        cancellation_metrics(metric_prefix),
+        cleanup_metrics(metric_prefix)
       ]
     end
 
@@ -344,6 +381,36 @@ if Code.ensure_loaded?(PromEx) do
       )
     end
 
+    # HTTP rate limit metrics from [:conduit_mcp, :rate_limit, :check]. `key`
+    # is an IP or user id, so it is never a tag.
+    defp rate_limit_metrics(metric_prefix, duration_unit) do
+      Event.build(
+        :conduit_mcp_rate_limit_metrics,
+        [
+          counter(
+            metric_prefix ++ [:rate_limit, :check, :total],
+            event_name: [:conduit_mcp, :rate_limit, :check],
+            description: "Total number of MCP HTTP rate limit checks",
+            measurement: fn _measurements -> 1 end,
+            tags: [:status],
+            tag_values: &extract_status_tag/1
+          ),
+          distribution(
+            metric_prefix ++ [:rate_limit, :check, :duration, duration_unit],
+            event_name: [:conduit_mcp, :rate_limit, :check],
+            description: "MCP HTTP rate limit check duration distribution",
+            measurement: :duration,
+            unit: {:native, duration_unit},
+            tags: [:status],
+            tag_values: &extract_status_tag/1,
+            reporter_options: [
+              buckets: [1, 5, 10, 25, 50, 100, 250]
+            ]
+          )
+        ]
+      )
+    end
+
     # Message rate limit metrics from [:conduit_mcp, :message_rate_limit, :check]
     defp message_rate_limit_metrics(metric_prefix, duration_unit) do
       Event.build(
@@ -408,7 +475,73 @@ if Code.ensure_loaded?(PromEx) do
       )
     end
 
+    # Cancellation metrics from [:conduit_mcp, :request, :cancelled],
+    # [:conduit_mcp, :cancellation, :cleanup] and
+    # [:conduit_mcp, :cancellation, :janitor]. Untagged: request ids, scopes
+    # and reasons are unbounded or client-supplied.
+    defp cancellation_metrics(metric_prefix) do
+      Event.build(
+        :conduit_mcp_cancellation_metrics,
+        [
+          counter(
+            metric_prefix ++ [:request, :cancelled, :total],
+            event_name: [:conduit_mcp, :request, :cancelled],
+            description: "Total number of recorded MCP request cancellations",
+            measurement: fn _measurements -> 1 end
+          ),
+          sum(
+            metric_prefix ++ [:cancellation, :cleanup, :removed, :total],
+            event_name: [:conduit_mcp, :cancellation, :cleanup],
+            description: "Expired MCP cancellation rows removed",
+            measurement: :removed
+          ),
+          sum(
+            metric_prefix ++ [:cancellation, :cleanup, :in_flight_removed, :total],
+            event_name: [:conduit_mcp, :cancellation, :cleanup],
+            description: "In-flight rows of dead MCP request processes removed",
+            measurement: :in_flight_removed
+          ),
+          # The janitor's `removed` is the cleanup pass's count again, so it
+          # is counted per run rather than summed a second time.
+          counter(
+            metric_prefix ++ [:cancellation, :janitor, :runs, :total],
+            event_name: [:conduit_mcp, :cancellation, :janitor],
+            description: "Total number of MCP cancellation janitor runs",
+            measurement: fn _measurements -> 1 end
+          )
+        ]
+      )
+    end
+
+    # Janitor metrics from [:conduit_mcp, :session, :cleanup] and
+    # [:conduit_mcp, :tasks, :cleanup].
+    defp cleanup_metrics(metric_prefix) do
+      Event.build(
+        :conduit_mcp_cleanup_metrics,
+        [
+          sum(
+            metric_prefix ++ [:session, :cleanup, :removed, :total],
+            event_name: [:conduit_mcp, :session, :cleanup],
+            description: "Expired MCP sessions evicted",
+            measurement: :removed,
+            tags: [:store],
+            tag_values: &extract_store_tag/1
+          ),
+          sum(
+            metric_prefix ++ [:tasks, :cleanup, :removed, :total],
+            event_name: [:conduit_mcp, :tasks, :cleanup],
+            description: "Terminal MCP tasks evicted",
+            measurement: :removed
+          )
+        ]
+      )
+    end
+
     # Tag extraction functions
+
+    defp extract_status_tag(%{status: status}), do: %{status: status}
+
+    defp extract_store_tag(%{store: store}), do: %{store: normalize_string(store)}
 
     defp extract_request_tags(%{method: method, status: status}) do
       %{

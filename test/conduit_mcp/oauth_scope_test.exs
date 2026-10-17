@@ -162,6 +162,29 @@ defmodule ConduitMcp.OAuthScopeTest do
       assert response["id"] == 1
     end
 
+    # A caller of handle_request/3 that is not a transport still gets a plain
+    # JSON-RPC error; the required scope rides in `data`, which is what a
+    # transport reads to answer 403 with a step-up challenge.
+    test "the denial names the required scope in the error data" do
+      conn = Plug.Conn.assign(%Plug.Conn{}, :oauth_scopes, ["data:read"])
+
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tools/call",
+        "params" => %{"name" => "admin_action", "arguments" => %{"action" => "x"}}
+      }
+
+      response = Handler.handle_request(request, ScopedServer, conn)
+
+      assert response["error"]["code"] == ConduitMcp.Errors.server_error()
+
+      assert response["error"]["data"] == %{
+               "error" => "insufficient_scope",
+               "scope" => "admin data:write"
+             }
+    end
+
     test "multi-scope tool requires all scopes" do
       conn =
         %Plug.Conn{}

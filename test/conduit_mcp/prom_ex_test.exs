@@ -10,7 +10,30 @@ if Code.ensure_loaded?(PromEx) do
         metrics = PromEx.event_metrics(opts)
 
         assert is_list(metrics)
-        assert length(metrics) == 6
+        assert length(metrics) == 9
+      end
+
+      # The plugin used to skip rate limiting, cancellation and the janitors,
+      # so those events were invisible in Prometheus.
+      test "every event in Telemetry.events/0 feeds a metric" do
+        metered =
+          [otp_app: :test_app]
+          |> PromEx.event_metrics()
+          |> Enum.flat_map(& &1.metrics)
+          |> MapSet.new(& &1.event_name)
+
+        assert MapSet.new(ConduitMcp.Telemetry.events()) == metered
+      end
+
+      test "cancellation and cleanup counts are tagged with low-cardinality values only" do
+        groups = PromEx.event_metrics(otp_app: :test_app)
+
+        for group <- groups,
+            group.group_name in [:conduit_mcp_cancellation_metrics, :conduit_mcp_cleanup_metrics],
+            metric <- group.metrics do
+          # request ids, scopes and client-supplied reasons are unbounded
+          assert metric.tags -- [:store] == [], inspect(metric.name)
+        end
       end
 
       test "requires otp_app option" do
@@ -101,9 +124,11 @@ if Code.ensure_loaded?(PromEx) do
 
       test "auth metrics group contains counter and distribution" do
         opts = [otp_app: :test_app]
-        [_, _, _, _, _, auth_metrics] = PromEx.event_metrics(opts)
 
-        assert auth_metrics.group_name == :conduit_mcp_auth_metrics
+        auth_metrics =
+          Enum.find(PromEx.event_metrics(opts), &(&1.group_name == :conduit_mcp_auth_metrics))
+
+        assert auth_metrics
         assert length(auth_metrics.metrics) == 2
 
         counter = Enum.at(auth_metrics.metrics, 0)
@@ -127,11 +152,15 @@ if Code.ensure_loaded?(PromEx) do
 
       test "all distributions have appropriate histogram buckets" do
         opts = [otp_app: :test_app]
-        metrics = PromEx.event_metrics(opts)
 
-        # Check that all distributions have buckets defined
-        Enum.each(metrics, fn event ->
-          distribution = Enum.at(event.metrics, 1)
+        distributions =
+          for event <- PromEx.event_metrics(opts),
+              %Telemetry.Metrics.Distribution{} = metric <- event.metrics,
+              do: metric
+
+        assert distributions != []
+
+        Enum.each(distributions, fn distribution ->
           assert is_list(distribution.reporter_options[:buckets])
           assert length(distribution.reporter_options[:buckets]) > 0
         end)
