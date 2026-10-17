@@ -17,7 +17,7 @@ defmodule ConduitMcp.Client.OAuth.HubStoreTest do
 
   @moduletag :integration
 
-  import ConduitMcp.Test.Client.Harness, only: [eventually: 1]
+  import ConduitMcp.Test.Client.Harness, only: [await_hub_ready: 2, eventually: 1]
 
   alias ConduitMcp.Client
   alias ConduitMcp.Client.{Hub, Registry, Secret, ToolResult}
@@ -114,7 +114,7 @@ defmodule ConduitMcp.Client.OAuth.HubStoreTest do
     # A restarted server client finds its tokens in the hub's store: no
     # new authorization, no new token request.
     kill_client(hub, "a")
-    eventually(fn -> Client.await_ready(Hub.client(hub, "a"), 1_000) == :ok end)
+    await_hub_ready(hub, ["a"])
 
     assert {:ok, %ToolResult{content: [%{"text" => "back"}]}} =
              Hub.call_tool(hub, "a__echo", %{"message" => "back"})

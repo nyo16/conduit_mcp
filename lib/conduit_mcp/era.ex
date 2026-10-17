@@ -263,7 +263,20 @@ defmodule ConduitMcp.Era do
   defp request_meta(%{"params" => %{"_meta" => meta}}) when is_map(meta), do: meta
   defp request_meta(_request), do: %{}
 
-  defp traceparent(value) when is_binary(value) and byte_size(value) == 55 do
+  @doc """
+  `value` when it is a well-formed W3C `traceparent` (version-00 style, 55
+  characters, lowercase hex, non-zero ids, version not `ff`), else `nil`.
+  The server reads `_meta.traceparent` through it, and the client checks
+  what it propagates with it.
+
+      iex> ConduitMcp.Era.traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+      "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+
+      iex> ConduitMcp.Era.traceparent("00-00000000000000000000000000000000-00f067aa0ba902b7-01")
+      nil
+  """
+  @spec traceparent(term()) :: String.t() | nil
+  def traceparent(value) when is_binary(value) and byte_size(value) == 55 do
     with true <- Regex.match?(@traceparent, value),
          [version, trace_id, parent_id, _flags] <- String.split(value, "-"),
          true <- version != "ff",
@@ -275,7 +288,7 @@ defmodule ConduitMcp.Era do
     end
   end
 
-  defp traceparent(_value), do: nil
+  def traceparent(_value), do: nil
 
   defp trace_text(value) when is_binary(value) and byte_size(value) <= @trace_cap_bytes do
     if Regex.match?(@printable_ascii, value), do: value, else: nil

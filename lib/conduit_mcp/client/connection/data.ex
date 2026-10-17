@@ -51,7 +51,10 @@ defmodule ConduitMcp.Client.Connection.Data do
     queued: 0,
     attempt: 0,
     reason: nil,
-    log_level: nil,
+    # The modern `logLevel` set with `set_log_level` (`level`), and the
+    # budget of inbound `notifications/message` (`limiter`,
+    # `ConduitMcp.Client.RateLimit`, from `:log_rate_limit`).
+    log: %{level: nil, limiter: nil},
     # The health check in flight: `{request id | nil, consecutive misses}`.
     health: {nil, 0},
     # The client's `ConduitMcp.Client.Cache` table (this process writes it).
@@ -108,6 +111,7 @@ defmodule ConduitMcp.Client.Connection.Data do
   def new(%Config{} = config, task_sup, tstate) do
     {transport, _opts} = config.transport
     rate = config.input_rate_limit
+    log_rate = config.log_rate_limit
 
     %__MODULE__{
       config: config,
@@ -118,6 +122,7 @@ defmodule ConduitMcp.Client.Connection.Data do
       era_hint: if(config.prior == :legacy, do: :legacy),
       cache: Cache.new(),
       listen: Listen.new(),
+      log: %{level: nil, limiter: RateLimit.new(log_rate[:per_second], log_rate[:burst])},
       input: %{
         handler: config.handler,
         sampling: config.sampling,
@@ -226,7 +231,7 @@ defmodule ConduitMcp.Client.Connection.Data do
       version: data.version,
       client_capabilities: client_capabilities(data, era),
       client_info: data.config.client_info,
-      log_level: data.log_level
+      log_level: data.log.level
     }
     |> Map.merge(info)
     |> put_extensions()

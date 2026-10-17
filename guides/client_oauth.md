@@ -76,7 +76,7 @@ naming it. The transport fills in `:server_url` from its `:url`.
 | `:allow_insecure_oauth` | `false` | Development and tests: admit plain `http` metadata and authorization-server URLs on loopback hosts |
 | `:allow_private` | `[]` | CIDRs the URL policy admits for OAuth requests although they are private |
 | `:resolver` | `nil` | The DNS resolver the URL policy uses (tests) |
-| `:transport_opts` | `[]` | TLS options for OAuth requests (Mint `:transport_opts`, for example `cacerts:`) |
+| `:transport_opts` | `[]` | TLS options for OAuth requests (Mint `:transport_opts`, for example `cacerts:`). Certificates are always verified: `verify:` other than `:verify_peer`, and `verify_fun:`, are refused |
 | `:request_timeout` | `10_000` | Milliseconds for each OAuth HTTP request |
 | `:clock` | `nil` | `fn -> unix_seconds end` (tests) |
 

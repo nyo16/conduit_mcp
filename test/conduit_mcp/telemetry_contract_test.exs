@@ -17,11 +17,15 @@ defmodule ConduitMcp.TelemetryContractTest do
 
   alias ConduitMcp.Client
   alias ConduitMcp.Client.{Adapters, Hub, Secret, ToolResult}
+  alias ConduitMcp.Client.OAuth
+  alias ConduitMcp.Client.OAuth.TokenStore
   alias ConduitMcp.Client.Transport.{InProcess, StreamableHTTP}
   alias ConduitMcp.TelemetryTestHelper
-  alias ConduitMcp.Test.Client.{FakeTransport, HTTPServers}
+  alias ConduitMcp.Test.Client.{FakeTransport, HTTPServers, OAuthFake}
 
   @token "contract-token"
+  @cimd "https://app.example.com/oauth/client.json"
+  @redirect "http://127.0.0.1:9/callback"
 
   defmodule Server do
     use ConduitMcp.Server
@@ -99,6 +103,52 @@ defmodule ConduitMcp.TelemetryContractTest do
       do: {:ok, %{"content" => [%{"type" => "text", "text" => name}]}}
   end
 
+  # Our own server behind `ConduitMcp.Plugs.OAuth`: one open tool, one
+  # needing a scope the first authorization does not grant (step-up).
+  defmodule ScopedServer do
+    use ConduitMcp.Server
+
+    tool "echo", "Echoes the message" do
+      param(:message, :string, "Message", required: true)
+      handle(fn _conn, %{"message" => message} -> text(message) end)
+    end
+
+    tool "admin_op", "Needs the admin scope" do
+      scope("admin")
+      handle(fn _conn, _params -> text("admin ok") end)
+    end
+  end
+
+  # A token store that raises on the operations named in `:raise` and
+  # otherwise delegates to the store in `:delegate`: the OAuth spans'
+  # `:exception` path, reached from inside real flows.
+  defmodule RaisingStore do
+    @behaviour TokenStore
+
+    @impl true
+    def fetch_tokens(key, opts), do: run(opts, :fetch_tokens, &TokenStore.fetch_tokens(&1, key))
+
+    @impl true
+    def put_tokens(key, tokens, opts),
+      do: run(opts, :put_tokens, &TokenStore.put_tokens(&1, key, tokens))
+
+    @impl true
+    def fetch_client(issuer, opts),
+      do: run(opts, :fetch_client, &TokenStore.fetch_client(&1, issuer))
+
+    @impl true
+    def put_client(issuer, client, opts),
+      do: run(opts, :put_client, &TokenStore.put_client(&1, issuer, client))
+
+    @impl true
+    def delete(key, what, opts), do: run(opts, :delete, &TokenStore.delete(&1, key, what))
+
+    defp run(opts, op, fun) do
+      if op in Keyword.get(opts, :raise, []), do: raise("token store #{op} failed")
+      fun.(Keyword.fetch!(opts, :delegate))
+    end
+  end
+
   # The Ext.Tasks janitor's store, without touching the node's task table.
   defmodule NullStore do
     def cleanup(_ttl), do: 0
@@ -152,6 +202,7 @@ defmodule ConduitMcp.TelemetryContractTest do
       governance_flows(collector)
       hub_flows(collector)
       janitor_flows(collector)
+      oauth_flows(collector)
     end)
 
     emitted = collected(collector)
@@ -389,9 +440,7 @@ defmodule ConduitMcp.TelemetryContractTest do
       id: hub
     )
 
-    eventually(fn ->
-      Enum.all?(["alpha", "beta"], &(Client.await_ready(Hub.client(hub, &1), 1_000) == :ok))
-    end)
+    await_hub_ready(hub, ["alpha", "beta"])
 
     assert {:ok, _listing} = Adapters.tools(hub, :openai, api: :chat)
     await_event(collector, [:conduit_mcp, :client, :hub, :collision])
@@ -428,5 +477,94 @@ defmodule ConduitMcp.TelemetryContractTest do
           [:conduit_mcp, :tasks, :cleanup]
         ],
         do: await_event(collector, event)
+  end
+
+  # --- client OAuth -------------------------------------------------------------
+
+  defp oauth_flows(collector) do
+    fake = OAuthFake.start(jwt: true) |> OAuthFake.serve_as()
+    url = OAuthFake.serve_mcp(fake, ScopedServer, scopes_supported: ["read"])
+    name = {__MODULE__, make_ref()}
+    test = self()
+
+    oauth = [
+      redirect_uri: @redirect,
+      client_metadata_url: @cimd,
+      allow_insecure_oauth: true,
+      on_authorization_required: fn challenge -> send(test, {:authorize, name, challenge}) end
+    ]
+
+    start_supervised!(
+      {Client,
+       name: name,
+       protocol: :modern,
+       transport: {StreamableHTTP, url: url <> "/", auth: {:oauth, oauth}},
+       backoff: fn _ -> 0 end},
+      id: name
+    )
+
+    # A 401: discovery, the host told (`authorization_required`), then the
+    # host authorizes (registration via CIMD, the code exchange).
+    assert_receive {:authorize, ^name, challenge}, 5_000
+    {:ok, authorize_url, pending} = OAuth.authorize_url(name, challenge: challenge)
+    params = OAuthFake.approve(fake, authorize_url)
+    assert {:ok, _tokens} = OAuth.handle_callback(pending, params, client: name)
+    assert :ok = Client.await_ready(name, 5_000)
+    assert {:ok, _tokens} = OAuth.refresh(name)
+
+    # A 403 insufficient_scope: step-up.
+    assert {:error, %Client.Error{reason: :authorization_required}} =
+             Client.call_tool(name, "admin_op", %{})
+
+    await_event(collector, [:conduit_mcp, :client, :oauth, :step_up, :stop])
+    oauth_exceptions(fake, url, TokenStore.ETS.default(name))
+  end
+
+  # Each span's `:exception`: a raising resolver (discovery), a raising
+  # token store (registration, the code exchange, a refresh). The step-up
+  # span runs in the connection on data no host code touches, so its
+  # `:exception` is driven through the same emitter directly.
+  defp oauth_exceptions(fake, url, client_store) do
+    ets = {TokenStore.ETS, name: {__MODULE__, make_ref()}}
+    start_supervised!(ets)
+
+    config = fn opts ->
+      OAuth.Config.new!(
+        Keyword.merge(
+          [server_url: url, redirect_uri: @redirect, allow_insecure_oauth: true],
+          opts
+        )
+      )
+    end
+
+    unresolvable =
+      config.(server_url: "https://mcp.example.test/", resolver: fn _ -> raise "no dns" end)
+
+    assert_raise RuntimeError, fn -> OAuth.authorize_url(unresolvable) end
+
+    dcr = config.(store: {RaisingStore, delegate: ets, raise: [:fetch_client]})
+    assert_raise RuntimeError, fn -> OAuth.authorize_url(dcr) end
+
+    exchange =
+      config.(
+        client_metadata_url: @cimd,
+        store: {RaisingStore, delegate: ets, raise: [:put_tokens]}
+      )
+
+    {:ok, authorize_url, pending} = OAuth.authorize_url(exchange)
+    params = OAuthFake.approve(fake, authorize_url)
+    assert_raise RuntimeError, fn -> OAuth.handle_callback(pending, params, config: exchange) end
+
+    refresh =
+      config.(
+        client_metadata_url: @cimd,
+        store: {RaisingStore, delegate: client_store, raise: [:put_tokens]}
+      )
+
+    assert_raise RuntimeError, fn -> OAuth.refresh(refresh) end
+
+    assert_raise RuntimeError, fn ->
+      OAuth.Telemetry.span(:step_up, OAuth.Telemetry.base(refresh), fn -> raise "step-up" end)
+    end
   end
 end

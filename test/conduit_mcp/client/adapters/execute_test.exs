@@ -3,7 +3,7 @@ defmodule ConduitMcp.Client.Adapters.ExecuteTest do
   # hub and a single client over `ConduitMcp.Client.Transport.InProcess`.
   use ExUnit.Case, async: true
 
-  import ConduitMcp.Test.Client.Harness, only: [eventually: 1]
+  import ConduitMcp.Test.Client.Harness, only: [await_hub_ready: 2, eventually: 1]
 
   alias ConduitMcp.Client
   alias ConduitMcp.Client.{Adapters, Hub, ToolCall, ToolSet}
@@ -76,9 +76,7 @@ defmodule ConduitMcp.Client.Adapters.ExecuteTest do
        ]}
     )
 
-    eventually(fn ->
-      Enum.all?(["alpha", "beta"], &(Client.await_ready(Hub.client(hub, &1), 1_000) == :ok))
-    end)
+    await_hub_ready(hub, ["alpha", "beta"])
   end
 
   defp use_block(id, name, input \\ %{}),

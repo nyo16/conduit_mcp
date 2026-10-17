@@ -202,10 +202,12 @@ defmodule ConduitMcp.Client.OAuth.Config do
               doc: "The DNS resolver for the URL policy (see `ConduitMcp.Client.URLPolicy`)."
             ],
             transport_opts: [
-              type: :keyword_list,
+              type: {:custom, __MODULE__, :validate_transport_opts, []},
               default: [],
               doc:
-                "TLS options for OAuth requests (Mint `:transport_opts`, for example `cacerts:`)."
+                "TLS options for OAuth requests (Mint `:transport_opts`, for example " <>
+                  "`cacerts:`). Certificates are always verified: `verify:` other than " <>
+                  "`:verify_peer`, and `verify_fun:`, are refused."
             ],
             request_timeout: [
               type: :pos_integer,
@@ -523,6 +525,27 @@ defmodule ConduitMcp.Client.OAuth.Config do
   end
 
   def validate_store(_other), do: {:error, "expected {module, opts} or nil"}
+
+  @doc false
+  # HT-8: OAuth requests always verify the peer; no option turns it off.
+  @spec validate_transport_opts(term()) :: {:ok, keyword()} | {:error, String.t()}
+  def validate_transport_opts(opts) when is_list(opts) do
+    cond do
+      not Keyword.keyword?(opts) ->
+        {:error, "expected a keyword list"}
+
+      Enum.any?(Keyword.get_values(opts, :verify), &(&1 != :verify_peer)) ->
+        {:error, "only verify: :verify_peer is accepted: OAuth requests always verify TLS"}
+
+      Keyword.has_key?(opts, :verify_fun) ->
+        {:error, "verify_fun is refused: OAuth requests always verify TLS"}
+
+      true ->
+        {:ok, opts}
+    end
+  end
+
+  def validate_transport_opts(_other), do: {:error, "expected a keyword list"}
 
   defimpl Inspect do
     # The fields hold Secrets (inspect-safe) and functions; keep the shape

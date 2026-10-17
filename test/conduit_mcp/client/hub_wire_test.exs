@@ -6,7 +6,7 @@ defmodule ConduitMcp.Client.HubWireTest do
 
   import ConduitMcp.Test.Client.Harness
 
-  alias ConduitMcp.Client.{Hub, ToolResult, ToolSet}
+  alias ConduitMcp.Client.{Error, Hub, ToolResult, ToolSet}
   alias ConduitMcp.Test.Client.FakeTransport
 
   @tools_changed "notifications/tools/list_changed"
@@ -21,23 +21,38 @@ defmodule ConduitMcp.Client.HubWireTest do
     end
   end
 
+  # Answers `roots/list` from the client's own assigns: the per-server
+  # roots configuration.
+  defmodule Rooted do
+    @behaviour ConduitMcp.Client.Handler
+
+    @impl true
+    def list_roots(ctx), do: {:ok, %{"roots" => ctx.assigns.roots}}
+  end
+
   setup do
     {:ok, hub: {__MODULE__, make_ref()}}
   end
 
   defp tool(name), do: %{"name" => name, "inputSchema" => %{"type" => "object"}}
 
-  # Starts the hub and completes each server's modern handshake; returns
-  # `%{server_id => connection pid}`.
+  # Starts the hub and completes each server's handshake (modern unless
+  # `ready:` says otherwise); returns `%{server_id => connection pid}`.
+  # `server_opts:` maps a server id to client options merged over the
+  # defaults.
   defp start_hub(hub, ids, opts \\ []) do
+    {server_opts, opts} = Keyword.pop(opts, :server_opts, %{})
+    {ready, opts} = Keyword.pop(opts, :ready, &ready_modern/2)
+
     servers =
       for id <- ids do
-        {id,
-         [
-           transport: {FakeTransport, test_pid: self(), tag: id},
-           backoff: fn _attempt -> 0 end,
-           handler: Sampler
-         ]}
+        defaults = [
+          transport: {FakeTransport, test_pid: self(), tag: id},
+          backoff: fn _attempt -> 0 end,
+          handler: Sampler
+        ]
+
+        {id, Keyword.merge(defaults, Map.get(server_opts, id, []))}
       end
 
     start_supervised!({Hub, [name: hub, policy: :allow_all, servers: servers] ++ opts})
@@ -50,15 +65,10 @@ defmodule ConduitMcp.Client.HubWireTest do
 
     for {id, conn} <- conns do
       assert_receive {:fake_transport, ^conn, :connect}
-      ready_modern(Hub.client(hub, id), conn)
+      ready.(Hub.client(hub, id), conn)
     end
 
-    # Ready as the hub sees it, or a listing right away may leave a server out.
-    eventually(fn ->
-      {:ok, status} = Hub.status(hub)
-      Enum.all?(status, &(&1.state == :ready))
-    end)
-
+    await_hub_ready(hub, ids)
     conns
   end
 
@@ -166,5 +176,82 @@ defmodule ConduitMcp.Client.HubWireTest do
     serve_tools(a, [tool("t"), tool("new")])
     assert {:ok, toolset} = Task.await(task)
     assert ToolSet.names(toolset) == ["a__t", "a__new", "b__t"]
+  end
+
+  describe "roots per server (SC-5)" do
+    @roots %{
+      "a" => [%{"uri" => "file:///srv/a", "name" => "a"}],
+      "b" => [%{"uri" => "file:///srv/b", "name" => "b"}]
+    }
+
+    defp rooted(ids) do
+      Map.new(ids, &{&1, [handler: Rooted, assigns: %{roots: Map.get(@roots, &1)}]})
+    end
+
+    test "modern: a multi-round-trip roots/list is answered with the asking server's roots",
+         %{hub: hub} do
+      %{"a" => a, "b" => b, "c" => c} =
+        start_hub(hub, ["a", "b", "c"], server_opts: rooted(["a", "b"]))
+
+      toolset = list(hub, [{a, [tool("t")]}, {b, [tool("t")]}, {c, [tool("t")]}])
+      call = fn name -> Task.async(fn -> Hub.call_tool(hub, name, %{}, toolset: toolset) end) end
+      calls = %{"a" => call.("a__t"), "b" => call.("b__t"), "c" => call.("c__t")}
+
+      ask = %{
+        "resultType" => "input_required",
+        "inputRequests" => %{"r" => %{"method" => "roots/list"}}
+      }
+
+      firsts =
+        for {id, conn} <- [{"a", a}, {"b", b}, {"c", c}], into: %{} do
+          {call_id, first, _opts} = expect_request(conn, "tools/call")
+          {id, {call_id, first}}
+        end
+
+      # Only the servers configured with roots are told the client has them.
+      for {id, {_call_id, first}} <- firsts do
+        caps = first["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"]
+        assert Map.has_key?(caps, "roots") == (id != "c"), id
+      end
+
+      # Asked in reverse order, so no answer follows request order.
+      for {id, conn} <- [{"c", c}, {"b", b}, {"a", a}] do
+        {call_id, _first} = firsts[id]
+        reply(conn, call_id, ask)
+      end
+
+      for {id, conn} <- [{"a", a}, {"b", b}] do
+        {retry_id, retry, _opts} = expect_request(conn, "tools/call")
+        expected = @roots[id]
+        assert %{"r" => %{"roots" => ^expected}} = retry["params"]["inputResponses"]
+        reply(conn, retry_id, %{"content" => [%{"type" => "text", "text" => id}]})
+      end
+
+      assert {:ok, %ToolResult{content: [%{"text" => "a"}]}} = Task.await(calls["a"])
+      assert {:ok, %ToolResult{content: [%{"text" => "b"}]}} = Task.await(calls["b"])
+
+      # The server without roots configured gets no roots at all, nor anyone
+      # else's: its call fails without a retry.
+      assert {:error, %Error{reason: {:undeclared_input_request, _}}} = Task.await(calls["c"])
+      refute_received {:fake_transport, ^c, {:request, %{"method" => "tools/call"}, _}}
+    end
+
+    test "legacy: a server's roots/list request is answered with its own roots", %{hub: hub} do
+      server_opts =
+        Map.new(rooted(["a", "b"]), fn {id, opts} -> {id, [protocol: :legacy] ++ opts} end)
+
+      %{"a" => a, "b" => b} =
+        start_hub(hub, ["a", "b"], server_opts: server_opts, ready: &ready_legacy/2)
+
+      request = %{"jsonrpc" => "2.0", "id" => 7, "method" => "roots/list", "params" => %{}}
+      FakeTransport.push(b, {:server_request, 7, request, nil})
+      FakeTransport.push(a, {:server_request, 7, request, nil})
+
+      for {id, conn} <- [{"a", a}, {"b", b}] do
+        assert_receive {:fake_transport, ^conn, {:respond, %{"id" => 7} = response}}, 1_000
+        expected = @roots[id]
+        assert %{"result" => %{"roots" => ^expected}} = response
+      end
+    end
   end
 end

@@ -8,10 +8,12 @@ defmodule ConduitMcp.Client.SecretScanTest do
   # zero.
   #
   # Secrets: a static bearer token, tool arguments, a sealed MRTR
-  # `requestState` (elicitation round), a legacy `Mcp-Session-Id`, and a
-  # stdio child's `env` value. OAuth secrets (access/refresh token, code,
-  # state, PKCE verifier) join `secrets` once the OAuth client lands: add
-  # its flow to `run_flows/1` and its values to the returned list.
+  # `requestState` (elicitation round), a legacy `Mcp-Session-Id`, a stdio
+  # child's `env` value, and OAuth's (OA-8): every access and refresh token
+  # (rotated ones included), authorization code, `state` and PKCE verifier
+  # of three interactive authorizations (the first 401, a 401 from `:ready`
+  # after the refresh token was revoked, a 403 step-up), and a
+  # client-credentials secret and token.
   #
   # `async: false`: the default handlers are global, and `capture_log/2`
   # sees every process.
@@ -23,6 +25,8 @@ defmodule ConduitMcp.Client.SecretScanTest do
   import ExUnit.CaptureLog
 
   alias ConduitMcp.Client
+  alias ConduitMcp.Client.OAuth
+  alias ConduitMcp.Client.OAuth.TokenStore
   alias ConduitMcp.Client.Registry
   alias ConduitMcp.Client.Secret
   alias ConduitMcp.Client.ToolResult
@@ -30,6 +34,7 @@ defmodule ConduitMcp.Client.SecretScanTest do
   alias ConduitMcp.Client.Transport.StreamableHTTP
   alias ConduitMcp.TelemetryTestHelper
   alias ConduitMcp.Test.Client.HTTPServers
+  alias ConduitMcp.Test.Client.OAuthFake
   alias ConduitMcp.Test.Client.StdioFixture
 
   if Stdio.windows?(), do: @moduletag(skip: "the stdio fixtures are POSIX scripts")
@@ -37,6 +42,9 @@ defmodule ConduitMcp.Client.SecretScanTest do
   @token "TOKEN-c0nduit-7f3a9e51"
   @arg "ARG-c0nduit-41d2bb07"
   @env "ENV-c0nduit-93c1aa6d"
+  @client_secret "CLIENT-SECRET-c0nduit-5be0c2f4"
+  @redirect "http://127.0.0.1:9/callback"
+  @cimd "https://app.example.com/oauth/client.json"
 
   defmodule Server do
     use ConduitMcp.Server
@@ -82,6 +90,20 @@ defmodule ConduitMcp.Client.SecretScanTest do
     end
   end
 
+  defmodule ScopedServer do
+    use ConduitMcp.Server
+
+    tool "store", "Stores a secret" do
+      param(:secret, :string, "Secret", required: true)
+      handle(fn _conn, _params -> text("stored") end)
+    end
+
+    tool "admin_op", "Needs the admin scope" do
+      scope("admin")
+      handle(fn _conn, _params -> text("admin ok") end)
+    end
+  end
+
   defmodule Approver do
     @behaviour ConduitMcp.Client.Handler
 
@@ -121,13 +143,23 @@ defmodule ConduitMcp.Client.SecretScanTest do
           [:conduit_mcp, :client, :input_request, :stop],
           [:conduit_mcp, :client, :tool_call, :stop],
           [:conduit_mcp, :client, :request, :stop],
-          [:conduit_mcp, :client, :connection, :transition]
+          [:conduit_mcp, :client, :connection, :transition],
+          [:conduit_mcp, :client, :oauth, :discovery, :stop],
+          [:conduit_mcp, :client, :oauth, :registration, :stop],
+          [:conduit_mcp, :client, :oauth, :token_exchange, :stop],
+          [:conduit_mcp, :client, :oauth, :refresh, :stop],
+          [:conduit_mcp, :client, :oauth, :step_up, :stop],
+          [:conduit_mcp, :client, :oauth, :authorization_required]
         ] do
       assert event in emitted, inspect(event)
     end
 
     assert log =~ "terminating"
-    assert length(secrets) == 5
+    # 5 + 3 authorizations x (code, state, verifier, access, refresh) + a
+    # rotated pair + the client-credentials secret and token.
+    assert length(secrets) == 24
+    assert Enum.all?(secrets, &(is_binary(&1) and byte_size(&1) >= 8))
+    assert length(Enum.uniq(secrets)) == 24
 
     haystacks =
       [{"logs", log}] ++
@@ -212,7 +244,123 @@ defmodule ConduitMcp.Client.SecretScanTest do
     Process.exit(stdio_conn, :kill)
     assert {:error, _down} = Task.await(pending)
 
-    {[@token, @arg, @env, request_state, session_id], statuses}
+    {oauth_secrets, oauth_statuses} = oauth_flows()
+
+    {[@token, @arg, @env, request_state, session_id] ++ oauth_secrets, statuses ++ oauth_statuses}
+  end
+
+  # OAuth (OA-8): the code flow with PKCE through `authorize_url/2` and
+  # `handle_callback/3`, a refresh with rotation, a 401 from `:ready` (the
+  # `:authorizing` episode), a 403 step-up and client credentials; then the
+  # connection and its `TokenStore.ETS` crash.
+  defp oauth_flows do
+    fake = OAuthFake.start(jwt: true) |> OAuthFake.serve_as()
+    url = OAuthFake.serve_mcp(fake, ScopedServer, scopes_supported: ["read"])
+    name = {__MODULE__, make_ref()}
+    test = self()
+
+    oauth = [
+      redirect_uri: @redirect,
+      client_metadata_url: @cimd,
+      allow_insecure_oauth: true,
+      on_authorization_required: fn challenge -> send(test, {:authorize, name, challenge}) end
+    ]
+
+    start_supervised!(
+      {Client,
+       name: name,
+       protocol: :modern,
+       transport: {StreamableHTTP, url: url <> "/", auth: {:oauth, oauth}},
+       backoff: fn _ -> 60_000 end},
+      id: name
+    )
+
+    first = authorize(fake, name)
+    assert :ok = Client.await_ready(name, 5_000)
+    assert {:ok, %ToolResult{}} = Client.call_tool(name, "store", %{"secret" => @arg})
+
+    assert {:ok, rotated} = OAuth.refresh(name)
+    rotated = [Secret.expose(rotated.access_token), Secret.expose(rotated.refresh_token)]
+
+    # A 401 from `:ready`: the token expired and the refresh token is gone.
+    store = TokenStore.ETS.default(name)
+    key = {nil, fake.issuer, url}
+    {:ok, tokens} = TokenStore.fetch_tokens(store, key)
+    :ok = TokenStore.put_tokens(store, key, %{tokens | expires_at: 0})
+    OAuthFake.revoke_refresh_tokens(fake)
+
+    assert {:error, %Client.Error{reason: :authorization_required}} =
+             Client.call_tool(name, "store", %{"secret" => @arg})
+
+    assert {:authorizing, _data} = :sys.get_state(connection(name))
+    again = authorize(fake, name)
+    assert :ok = Client.await_ready(name, 5_000)
+
+    # A 403 insufficient_scope: step-up, then the call succeeds.
+    assert {:error, %Client.Error{reason: :authorization_required}} =
+             Client.call_tool(name, "admin_op", %{})
+
+    step_up = authorize(fake, name)
+
+    assert {:ok, %ToolResult{content: [%{"text" => "admin ok"}]}} =
+             Client.call_tool(name, "admin_op", %{})
+
+    {cc_secrets, cc_status} = client_credentials(fake, url)
+
+    conn = connection(name)
+    {:ok, store_pid, _value} = Registry.lookup({:token_store, {:client, name}})
+    statuses = [:sys.get_status(conn), :sys.get_status(store_pid), cc_status]
+    :ok = :sys.terminate(conn, :scan_crash)
+    :ok = :sys.terminate(store_pid, :scan_crash)
+
+    {first ++ rotated ++ again ++ step_up ++ cc_secrets, statuses}
+  end
+
+  # The host's side: the callback reported a challenge; the URL, the user's
+  # approval at the fake, the callback. Returns the flow's secrets.
+  defp authorize(fake, name) do
+    assert_receive {:authorize, ^name, challenge}, 5_000
+    {:ok, url, pending} = OAuth.authorize_url(name, challenge: challenge)
+    params = OAuthFake.approve(fake, url)
+    assert {:ok, tokens} = OAuth.handle_callback(pending, params, client: name)
+
+    [
+      params["code"],
+      params["state"],
+      Secret.expose(pending.verifier),
+      Secret.expose(tokens.access_token),
+      Secret.expose(tokens.refresh_token)
+    ]
+  end
+
+  defp client_credentials(fake, url) do
+    OAuthFake.register_client(fake, "svc", {:secret, @client_secret})
+    name = {__MODULE__, make_ref()}
+
+    start_supervised!(
+      {Client,
+       name: name,
+       protocol: :modern,
+       transport:
+         {StreamableHTTP,
+          url: url <> "/",
+          auth:
+            {:client_credentials,
+             client_id: "svc",
+             client_secret: @client_secret,
+             scopes: ["read"],
+             allow_insecure_oauth: true}},
+       backoff: fn _ -> 60_000 end},
+      id: name
+    )
+
+    assert :ok = Client.await_ready(name, 5_000)
+    assert {:ok, %ToolResult{}} = Client.call_tool(name, "store", %{"secret" => @arg})
+
+    {:ok, tokens} =
+      TokenStore.fetch_tokens(TokenStore.ETS.default(name), {nil, fake.issuer, url})
+
+    {[@client_secret, Secret.expose(tokens.access_token)], :sys.get_status(connection(name))}
   end
 
   defp start_ready(transport, opts) do

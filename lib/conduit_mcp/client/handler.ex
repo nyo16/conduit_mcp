@@ -87,6 +87,15 @@ defmodule ConduitMcp.Client.Handler do
   one notification at a time in arrival order; a raise is logged and
   skipped, and beyond 1 000 waiting notifications new ones are dropped.
 
+  A server's log entries (`notifications/message`) are limited per
+  connection by the client's `:log_rate_limit` (50 per second, bursts of
+  100); the rest are dropped. Those that pass reach `handle_log/3` and
+  notification subscribers sanitized: only `level`, `logger` and `data` are
+  kept, every string in them goes through `ConduitMcp.Reflect.text/2` (no
+  control, bidi or line-separator characters; `data` strings clamped to
+  4 096 characters, nesting cut below 16 levels), and a `level` outside the
+  RFC 5424 set becomes `"info"`.
+
   ## Context
 
   Every callback receives a context map (notification callbacks get only
@@ -142,9 +151,9 @@ defmodule ConduitMcp.Client.Handler do
   @callback handle_notification(method :: String.t(), params :: map(), ctx()) :: any()
 
   @doc """
-  Called with each `notifications/message` log entry: `level` is the wire
-  level string (`"debug"` … `"emergency"`), `params` the full params. The
-  return value is ignored.
+  Called with each `notifications/message` log entry: `level` is one of
+  `"debug"` … `"emergency"` (clamped), `params` the sanitized params (see
+  "Notifications" above). The return value is ignored.
   """
   @callback handle_log(level :: String.t(), params :: map(), ctx()) :: any()
 

@@ -294,6 +294,11 @@ defmodule ConduitMcp.Client.Telemetry do
     )
   end
 
+  @doc "A `notifications/message` over the connection's `:log_rate_limit` was dropped."
+  @spec log_dropped(base()) :: :ok
+  def log_dropped(base),
+    do: :telemetry.execute([:conduit_mcp, :client, :log, :dropped], %{count: 1}, base)
+
   @doc """
   A listed tool was excluded at intake. `tool_name` is already sanitized
   (or `nil` when the server sent no string name).

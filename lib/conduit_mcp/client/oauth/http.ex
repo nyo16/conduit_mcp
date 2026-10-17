@@ -178,10 +178,13 @@ if Code.ensure_loaded?(Finch) do
       end
     end
 
+    # Verification cannot be turned off here (HT-8): `Config` refuses the
+    # options that would, and they are dropped again for any other caller.
     defp tls_opts(ctx) do
       ctx
       |> Map.get(:transport_opts, [])
-      |> Keyword.put_new(:verify, :verify_peer)
+      |> Keyword.drop([:verify, :verify_fun])
+      |> Keyword.put(:verify, :verify_peer)
     end
 
     defp path(%URI{path: path, query: query}) do

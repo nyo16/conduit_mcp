@@ -840,6 +840,38 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
 
       assert conn.status == 401
     end
+
+    # SV-12: the modern handshake is not an unauthenticated side door. An
+    # anonymous `server/discover` gets the same 401 + RFC 9728 challenge a
+    # legacy `ping` does, so a modern client can start OAuth discovery from it.
+    test "an unauthenticated modern server/discover gets 401 with resource_metadata" do
+      body = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "server/discover",
+        "params" => %{
+          "_meta" => %{
+            "io.modelcontextprotocol/protocolVersion" => "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities" => %{}
+          }
+        }
+      }
+
+      conn =
+        post_json(body, @oauth_opts, [
+          {"mcp-method", "server/discover"},
+          {"mcp-protocol-version", "2026-07-28"}
+        ])
+
+      assert conn.status == 401
+      assert [challenge] = get_resp_header(conn, "www-authenticate")
+      assert challenge =~ "Bearer"
+
+      assert challenge =~
+               ~s(resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource")
+
+      refute JSON.decode!(conn.resp_body)["result"]
+    end
   end
 
   describe "origin validation" do

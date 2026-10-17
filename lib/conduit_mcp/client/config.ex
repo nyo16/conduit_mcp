@@ -207,6 +207,20 @@ defmodule ConduitMcp.Client.Config do
               sampling `:rejection_code` and the others with `-32000`.
               """
             ],
+            log_rate_limit: [
+              type: :keyword_list,
+              default: [],
+              keys: [
+                per_second: [type: :pos_integer, default: 50],
+                burst: [type: :pos_integer, default: 100]
+              ],
+              doc: """
+              The per-connection budget of `notifications/message` log entries
+              from the server. Over it, entries are dropped before they reach
+              subscribers or `handle_log/3`, and each drop emits
+              `[:conduit_mcp, :client, :log, :dropped]`.
+              """
+            ],
             sampling: [
               type: :keyword_list,
               default: [],
@@ -438,6 +452,7 @@ defmodule ConduitMcp.Client.Config do
     :handler_timeout,
     :max_server_requests,
     :input_rate_limit,
+    :log_rate_limit,
     :sampling,
     :elicitation,
     :roots,
@@ -469,6 +484,7 @@ defmodule ConduitMcp.Client.Config do
           handler_timeout: keyword(),
           max_server_requests: pos_integer(),
           input_rate_limit: keyword(),
+          log_rate_limit: keyword(),
           sampling: keyword(),
           elicitation: keyword(),
           roots: keyword(),

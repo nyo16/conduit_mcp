@@ -116,6 +116,25 @@ defmodule ConduitMcp.Test.Client.Harness do
     end
   end
 
+  @doc """
+  Waits until `hub` reports each of `ids` `:ready` (`ConduitMcp.Client.Hub.status/1`).
+
+  A server's client can be ready before the hub's manager has recorded it
+  as running (the record is written once `start_child` returns), and
+  `Hub.list_tools/2` and `Hub.call_tool/4` only use running servers, so
+  waiting on `ConduitMcp.Client.await_ready/2` alone races the manager.
+  """
+  def await_hub_ready(hub, ids, timeout_ms \\ 5_000) do
+    eventually(
+      fn ->
+        {:ok, statuses} = ConduitMcp.Client.Hub.status(hub)
+        ready = for %{id: id, state: :ready} <- statuses, do: id
+        Enum.all?(ids, &(&1 in ready))
+      end,
+      timeout_ms
+    )
+  end
+
   @doc "Nothing outlives a test: no pending request, monitor, server request or task."
   def assert_no_leaks(name, conn) do
     data = state(conn)

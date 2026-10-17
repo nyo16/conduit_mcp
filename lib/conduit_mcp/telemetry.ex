@@ -65,6 +65,7 @@ defmodule ConduitMcp.Telemetry do
                  {[:conduit_mcp, :client, :response, :dropped], [:count], client ++ [:request_id],
                   []},
                  {[:conduit_mcp, :client, :notification], [:count], client ++ [:method], []},
+                 {[:conduit_mcp, :client, :log, :dropped], [:count], client, []},
                  {[:conduit_mcp, :client, :transport, :mailbox], [:message_queue_len], client,
                   []},
                  {[:conduit_mcp, :subscription, :start], [:system_time, :resource_subscriptions],
@@ -582,6 +583,17 @@ defmodule ConduitMcp.Telemetry do
 
   **Metadata:** the common keys, plus `:method` (String.t, sanitized;
   server-supplied, so never use it as a metric tag).
+
+  #### `[:conduit_mcp, :client, :log, :dropped]`
+
+  A server `notifications/message` was dropped: the connection's
+  `:log_rate_limit` (50 per second, bursts of 100 by default) was spent.
+  Entries within the budget reach subscribers and `handle_log/3` with every
+  string sanitized and the level clamped to the RFC 5424 set.
+
+  **Measurements:** `:count` (always `1`).
+
+  **Metadata:** the common keys.
 
   #### `[:conduit_mcp, :ext_tasks, :cleanup]`
 
@@ -1337,6 +1349,11 @@ defmodule ConduitMcp.Telemetry do
     Logger.debug(
       "MCP client notification: client=#{client_text(metadata)} method=#{ConduitMcp.Reflect.text(metadata.method)}"
     )
+  end
+
+  defp handle_event([:conduit_mcp, :client, :log, :dropped], _measurements, metadata, _config) do
+    require Logger
+    Logger.debug("MCP client dropped a server log entry: client=#{client_text(metadata)}")
   end
 
   defp handle_event([:conduit_mcp, :subscription, :start], measurements, metadata, _config) do

@@ -5,7 +5,7 @@ defmodule ConduitMcp.Client.HubTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
 
-  import ConduitMcp.Test.Client.Harness, only: [eventually: 1]
+  import ConduitMcp.Test.Client.Harness, only: [await_hub_ready: 2, eventually: 1]
   import ExUnit.CaptureLog
 
   alias ConduitMcp.Client
@@ -71,16 +71,7 @@ defmodule ConduitMcp.Client.HubTest do
     await_servers(hub, Enum.map(servers, &elem(&1, 0)))
   end
 
-  # Ready as the hub sees it (`Hub.status/1`): the manager marks a server's
-  # row running only after its client started, so a client can be ready a
-  # moment before the hub lists its tools.
-  defp await_servers(hub, ids) do
-    eventually(fn ->
-      {:ok, status} = Hub.status(hub)
-      ready = for %{id: id, state: :ready} <- status, do: id
-      Enum.all?(ids, &(&1 in ready))
-    end)
-  end
+  defp await_servers(hub, ids), do: await_hub_ready(hub, ids)
 
   defp names(hub, opts \\ []) do
     {:ok, toolset} = Hub.list_tools(hub, opts)
