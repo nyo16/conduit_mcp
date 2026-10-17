@@ -176,6 +176,14 @@ defmodule ConduitMcp.HeadersTest do
       refute Headers.name_header_required?("tools/list")
       refute Headers.name_header_required?("Tools/Call")
     end
+
+    test "the tasks extension's methods mirror params.taskId" do
+      for method <- ["tasks/get", "tasks/update", "tasks/cancel"] do
+        assert Headers.name_header_required?(method)
+        assert Headers.name_param(method) == "taskId"
+        assert Headers.name_header(method, %{"taskId" => "abc_-1"}) == {"mcp-name", "abc_-1"}
+      end
+    end
   end
 
   @nested_schema %{

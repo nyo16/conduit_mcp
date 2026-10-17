@@ -1,9 +1,10 @@
 defmodule Examples.ObanTasks.Migrator do
   @moduledoc """
-  Runs migrations at boot — Oban's own schema plus a tiny `mcp_tasks`
-  table for the task store. No `priv/repo/migrations` directory is
-  needed; both migrations are defined inline here so the example is
-  self-contained.
+  Runs migrations at boot — Oban's own schema, a tiny `mcp_tasks` table
+  for the legacy (`2025-11-25`) task store, and an `ext_tasks` table for
+  the modern tasks-extension store (`Examples.ObanTasks.ExtStore`). No
+  `priv/repo/migrations` directory is needed; the migrations are defined
+  inline here so the example is self-contained.
 
   Idempotent — safe to run on every boot.
   """
@@ -36,7 +37,8 @@ defmodule Examples.ObanTasks.Migrator do
   defp migrations do
     [
       {1, Examples.ObanTasks.Migrations.CreateObanSchema},
-      {2, Examples.ObanTasks.Migrations.CreateMcpTasks}
+      {2, Examples.ObanTasks.Migrations.CreateMcpTasks},
+      {3, Examples.ObanTasks.Migrations.CreateExtTasks}
     ]
   end
 end
@@ -69,5 +71,21 @@ defmodule Examples.ObanTasks.Migrations.CreateMcpTasks do
 
     create(index(:mcp_tasks, [:status]))
     create(index(:mcp_tasks, [:oban_job_id]))
+  end
+end
+
+defmodule Examples.ObanTasks.Migrations.CreateExtTasks do
+  @moduledoc false
+  use Ecto.Migration
+
+  def change do
+    create table(:ext_tasks, primary_key: false) do
+      add(:task_id, :string, primary_key: true)
+      add(:owner, :string)
+      add(:status, :string, null: false)
+      add(:created_at, :bigint, null: false)
+      add(:version, :integer, null: false, default: 0)
+      add(:record, :binary, null: false)
+    end
   end
 end

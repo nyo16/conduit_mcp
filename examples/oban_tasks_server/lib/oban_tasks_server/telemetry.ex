@@ -4,9 +4,10 @@ defmodule Examples.ObanTasks.Telemetry do
 
   When a worker raises (or is force-killed past `max_attempts`), Oban
   emits `[:oban, :job, :exception]`. This module attaches a handler
-  that marks the corresponding `mcp_tasks` row as `"failed"` with an
-  error description, so `tasks/get` and `tasks/result` reflect the
-  actual outcome without the worker needing a try/rescue.
+  that marks the corresponding task as `"failed"` — a legacy `mcp_tasks`
+  row, or (for a modern job) the `ConduitMcp.Ext.Tasks` task with a
+  `-32603` error — so `tasks/get` reflects the actual outcome without the
+  worker needing a try/rescue.
   """
 
   require Logger
@@ -36,19 +37,28 @@ defmodule Examples.ObanTasks.Telemetry do
     # on the final attempt so earlier raises fall through and Oban can retry.
     if job.attempt >= job.max_attempts do
       msg = format_reason(reason)
-
-      Tasks.update(task_id, %{
-        "status" => "failed",
-        "error" => %{"message" => msg}
-      })
-
-      Logger.warning("ObanTasks: task #{task_id} failed permanently: #{msg}")
+      mark_failed(job.args, task_id, msg)
     end
 
     :ok
   end
 
   def handle_event(_, _, _, _), do: :ok
+
+  # A modern task id is a bearer token: keep it out of the log.
+  defp mark_failed(%{"era" => "modern"}, task_id, msg) do
+    _ = ConduitMcp.Ext.Tasks.fail(task_id, {-32_603, "Internal error"}, status_message: msg)
+    Logger.warning("ObanTasks: an extension task failed permanently: #{msg}")
+  end
+
+  defp mark_failed(_args, task_id, msg) do
+    Tasks.update(task_id, %{
+      "status" => "failed",
+      "error" => %{"message" => msg}
+    })
+
+    Logger.warning("ObanTasks: task #{task_id} failed permanently: #{msg}")
+  end
 
   defp format_reason(%{__struct__: _} = exception),
     do: Exception.message(exception)

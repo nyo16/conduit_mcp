@@ -117,6 +117,14 @@ defmodule ConduitMcp.Endpoint do
         component_scopes(resources, &resource_uri/1)
       )
 
+    # Each component's `:cache` option, in registration order; resolved per
+    # request by `ConduitMcp.CacheHints`.
+    cache_hints = %{
+      tools: component_cache_map(tools),
+      prompts: component_cache_map(prompts),
+      resources: Enum.map(resources, &{resource_uri(&1), component_cache(&1)})
+    }
+
     key_conversion =
       generate_key_conversion(build_key_maps(tools), build_key_maps(prompts))
 
@@ -147,6 +155,7 @@ defmodule ConduitMcp.Endpoint do
       tool_validation_clauses: tool_validation_clauses,
       prompt_validation_clauses: prompt_validation_clauses,
       scope_clauses: scope_clauses,
+      cache_hints: cache_hints,
       key_conversion: key_conversion,
       endpoint_config: endpoint_config,
       instructions_clause: instructions_clause,
@@ -234,6 +243,10 @@ defmodule ConduitMcp.Endpoint do
 
       # --- Scope lookup ---
       unquote(parts.scope_clauses)
+
+      # --- Cache hints ---
+      @doc false
+      def __cache_hints__, do: unquote(Macro.escape(parts.cache_hints))
 
       # --- Key maps for atom conversion ---
 
@@ -481,6 +494,20 @@ defmodule ConduitMcp.Endpoint do
   end
 
   defp resource_uri(mod), do: Keyword.fetch!(mod.__component_opts__(), :uri)
+
+  defp component_cache_map(components) do
+    for mod <- components,
+        hint = component_cache(mod),
+        hint != nil,
+        into: %{},
+        do: {mod.__component_name__(), hint}
+  end
+
+  # Already validated when the component compiled; normalized here.
+  defp component_cache(mod) do
+    opts = mod.__component_opts__()
+    ConduitMcp.CacheHints.validate!(Keyword.get(opts, :cache), mod, Keyword.get(opts, :scope))
+  end
 
   # Emit one `__key_map__(name)` clause per component with a non-empty key
   # map, plus the conversion helper that consults it.

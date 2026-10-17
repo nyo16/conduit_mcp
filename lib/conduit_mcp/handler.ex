@@ -81,6 +81,16 @@ defmodule ConduitMcp.Handler do
   `ConduitMcp.MRTR`. On the legacy path that return is answered with
   `-32603` ("MRTR input requests require protocol 2026-07-28").
 
+  ## Tasks extension
+
+  With `ConduitMcp.Ext.Tasks` enabled, the modern era also routes
+  `tasks/get`, `tasks/update` and `tasks/cancel`, and a `tools/call`
+  callback may return `{:task, attrs}`; the client must declare
+  `io.modelcontextprotocol/tasks` in the request's capability extensions
+  (`-32021` otherwise) and gets a `CreateTaskResult`. Anywhere else —
+  other methods, the legacy era, the extension disabled — that return is
+  answered with `-32603`.
+
   ## Cancellation
 
   The handler stashes the request id into `conn.assigns[:mcp_request_id]`
@@ -130,10 +140,14 @@ defmodule ConduitMcp.Handler do
   returned; by the time it reaches `ConduitMcp.Protocol.Modern` its `state`
   has been sealed into the `requestState` token. Only the modern era shapes
   it: the legacy era answers it with `-32603` before shaping.
+
+  `{:task, task}` is a `ConduitMcp.Ext.Tasks` task created for a modern
+  `tools/call` (its wire `Task` map), shaped into a `CreateTaskResult`.
   """
   @type result ::
           {:ok, map()}
           | {:input_required, %{optional(String.t()) => map()}, term()}
+          | {:task, map()}
           | {:error, integer(), String.t(), map() | nil}
 
   @typedoc """

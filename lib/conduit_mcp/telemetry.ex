@@ -330,6 +330,16 @@ defmodule ConduitMcp.Telemetry do
 
   **Metadata:** none (`%{}`).
 
+  #### `[:conduit_mcp, :ext_tasks, :cleanup]`
+
+  From the `ConduitMcp.Ext.Tasks` janitor (a `ConduitMcp.Session.Janitor`,
+  started only when the experimental tasks extension is enabled) evicting
+  expired tasks.
+
+  **Measurements:** `:removed` (integer) - Tasks evicted.
+
+  **Metadata:** `:store` (module) - The `ConduitMcp.Ext.Tasks.Store` swept.
+
   ## Common Use Cases
 
   ### Logging Request Activity
@@ -577,6 +587,7 @@ defmodule ConduitMcp.Telemetry do
         [:conduit_mcp, :cancellation, :janitor],
         [:conduit_mcp, :session, :cleanup],
         [:conduit_mcp, :tasks, :cleanup],
+        [:conduit_mcp, :ext_tasks, :cleanup],
         [:conduit_mcp, :mrtr, :input_required]
       ]
   """
@@ -595,6 +606,7 @@ defmodule ConduitMcp.Telemetry do
       [:conduit_mcp, :cancellation, :janitor],
       [:conduit_mcp, :session, :cleanup],
       [:conduit_mcp, :tasks, :cleanup],
+      [:conduit_mcp, :ext_tasks, :cleanup],
       [:conduit_mcp, :mrtr, :input_required]
     ]
   end
@@ -752,7 +764,8 @@ defmodule ConduitMcp.Telemetry do
        when {scope, event} in [
               {:cancellation, :janitor},
               {:session, :cleanup},
-              {:tasks, :cleanup}
+              {:tasks, :cleanup},
+              {:ext_tasks, :cleanup}
             ] do
     require Logger
 

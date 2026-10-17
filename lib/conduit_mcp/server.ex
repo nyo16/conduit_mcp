@@ -195,6 +195,13 @@ defmodule ConduitMcp.Server do
   @type input_required ::
           {:input_required, input_requests :: %{optional(String.t()) => map()}, state :: term()}
 
+  @typedoc """
+  A `ConduitMcp.Ext.Tasks` task request from `handle_call_tool/3`: create a
+  task and answer with a `CreateTaskResult` (modern era, extension enabled
+  and declared by the client). See `ConduitMcp.Ext.Tasks` for `attrs`.
+  """
+  @type task :: {:task, attrs :: keyword() | map()}
+
   @doc """
   Handle listing available tools.
 
@@ -210,10 +217,11 @@ defmodule ConduitMcp.Server do
   Handle tool execution.
 
   May return `{:input_required, input_requests, state}` on a modern-era
-  request; see "Multi round-trip requests (MRTR)" in the moduledoc.
+  request; see "Multi round-trip requests (MRTR)" in the moduledoc. May
+  return `{:task, attrs}` to run as a task (`ConduitMcp.Ext.Tasks`).
   """
   @callback handle_call_tool(conn(), tool_name(), tool_params()) ::
-              {:ok, result :: map()} | {:error, error :: map()} | input_required()
+              {:ok, result :: map()} | {:error, error :: map()} | input_required() | task()
 
   @doc """
   Handle listing available resources.

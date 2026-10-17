@@ -78,6 +78,9 @@ defmodule ConduitMcp.Component do
     lacking the scope is rejected before `execute/2` runs, and a request with
     no principal fails closed.
   - `:annotations` — Optional keyword list of tool annotations (e.g., `destructive: true`)
+  - `:cache` — Optional modern-era cache hints, `[ttl_ms: non_neg_integer, scope:
+    :private | :public]`; see `ConduitMcp.CacheHints`. `scope: :public` with a
+    `:scope` is a compile error.
 
   ## Generated Functions
 
@@ -236,6 +239,7 @@ defmodule ConduitMcp.Component do
     end
 
     validate_scope!(Keyword.get(opts, :scope), module)
+    ConduitMcp.CacheHints.validate!(Keyword.get(opts, :cache), module, Keyword.get(opts, :scope))
   end
 
   # Delegated so the DSL and Component authoring modes cannot disagree about

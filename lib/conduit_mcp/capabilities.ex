@@ -13,11 +13,14 @@ defmodule ConduitMcp.Capabilities do
       when the base set advertises `resources` at all.
     * `completions: %{}` — `handle_complete/3`.
     * `logging: %{}` — `handle_set_log_level/2`.
+    * `extensions: %{"io.modelcontextprotocol/tasks" => %{}}` — modern era
+      only, while `ConduitMcp.Ext.Tasks` is enabled.
 
   Used for both the legacy `initialize` reply and the modern
   `server/discover` result (`ConduitMcp.Discover`), so the two eras
-  advertise the same set, with one exception: `resources.subscribe` is
-  legacy-only, because the modern era has no `resources/subscribe` method.
+  advertise the same set, with two exceptions: `resources.subscribe` is
+  legacy-only, because the modern era has no `resources/subscribe` method,
+  and the tasks extension is modern-only.
   """
 
   alias ConduitMcp.ServerMeta
@@ -28,7 +31,7 @@ defmodule ConduitMcp.Capabilities do
   Options:
 
     * `:era` — `:legacy` (default) or `:modern`. Modern omits
-      `resources.subscribe`.
+      `resources.subscribe` and may add the tasks extension.
 
   ## Examples
 
@@ -46,6 +49,7 @@ defmodule ConduitMcp.Capabilities do
     |> maybe_put_subscribe(server_module, Keyword.get(opts, :era, :legacy))
     |> maybe_put_completions(server_module)
     |> maybe_put_logging(server_module)
+    |> maybe_put_tasks_extension(Keyword.get(opts, :era, :legacy))
   end
 
   defp base(server_module) do
@@ -85,4 +89,19 @@ defmodule ConduitMcp.Capabilities do
       caps
     end
   end
+
+  defp maybe_put_tasks_extension(caps, :modern) do
+    if ConduitMcp.Ext.Tasks.enabled?() do
+      Map.update(
+        caps,
+        "extensions",
+        %{ConduitMcp.Ext.Tasks.extension() => %{}},
+        &Map.put(&1, ConduitMcp.Ext.Tasks.extension(), %{})
+      )
+    else
+      caps
+    end
+  end
+
+  defp maybe_put_tasks_extension(caps, _era), do: caps
 end

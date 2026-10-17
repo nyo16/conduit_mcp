@@ -114,6 +114,7 @@ defmodule ConduitMcp.DSL do
       @mcp_current_tool_icons nil
       @mcp_current_tool_output_schema nil
       @mcp_current_tool_task_support nil
+      @mcp_current_cache nil
 
       unquote(block)
 
@@ -129,7 +130,8 @@ defmodule ConduitMcp.DSL do
         title: @mcp_current_tool_title,
         icons: @mcp_current_tool_icons,
         output_schema: @mcp_current_tool_output_schema,
-        task_support: @mcp_current_tool_task_support
+        task_support: @mcp_current_tool_task_support,
+        cache: @mcp_current_cache
       }
 
       # Clean up
@@ -144,6 +146,7 @@ defmodule ConduitMcp.DSL do
       Module.delete_attribute(__MODULE__, :mcp_current_tool_icons)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_output_schema)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_task_support)
+      Module.delete_attribute(__MODULE__, :mcp_current_cache)
     end
   end
 
@@ -254,6 +257,29 @@ defmodule ConduitMcp.DSL do
     quote do
       ConduitMcp.DSL.__assert_in_declaration__(__MODULE__, :scope)
       @mcp_current_scope unquote(scope_string)
+    end
+  end
+
+  @doc """
+  Declares cache hints for the enclosing tool, resource or prompt on the
+  modern (`2026-07-28`) era: `ttl_ms` (non-negative integer) and `scope`
+  (`:private` or `:public`), each falling back to the global
+  `config :conduit_mcp, cache_ttl_ms: ..., cache_scope: ...`.
+
+      tool "catalog", "Lists the public catalog" do
+        cache ttl_ms: 5_000, scope: :public
+        handle fn _conn, _params -> text("...") end
+      end
+
+  A list result takes the minimum TTL of its items and is private if any
+  item is private or scoped; see `ConduitMcp.CacheHints`. `scope: :public`
+  together with `scope/1` is a compile error (a scoped response must stay
+  private).
+  """
+  defmacro cache(opts) do
+    quote do
+      ConduitMcp.DSL.__assert_in_declaration__(__MODULE__, :cache)
+      @mcp_current_cache unquote(opts)
     end
   end
 
@@ -910,6 +936,7 @@ defmodule ConduitMcp.DSL do
       @mcp_current_prompt_handler nil
       @mcp_current_prompt_completions []
       @mcp_current_scope nil
+      @mcp_current_cache nil
 
       unquote(block)
 
@@ -919,7 +946,8 @@ defmodule ConduitMcp.DSL do
         args: Enum.reverse(@mcp_current_prompt_args),
         handler: @mcp_current_prompt_handler,
         completions: @mcp_current_prompt_completions,
-        scope: @mcp_current_scope
+        scope: @mcp_current_scope,
+        cache: @mcp_current_cache
       }
 
       Module.delete_attribute(__MODULE__, :mcp_current_prompt_name)
@@ -928,6 +956,7 @@ defmodule ConduitMcp.DSL do
       Module.delete_attribute(__MODULE__, :mcp_current_prompt_handler)
       Module.delete_attribute(__MODULE__, :mcp_current_prompt_completions)
       Module.delete_attribute(__MODULE__, :mcp_current_scope)
+      Module.delete_attribute(__MODULE__, :mcp_current_cache)
     end
   end
 
@@ -1042,6 +1071,7 @@ defmodule ConduitMcp.DSL do
       @mcp_current_resource_handler nil
       @mcp_current_resource_completions []
       @mcp_current_scope nil
+      @mcp_current_cache nil
 
       unquote(block)
 
@@ -1051,7 +1081,8 @@ defmodule ConduitMcp.DSL do
         mime_type: @mcp_current_resource_mime_type,
         handler: @mcp_current_resource_handler,
         completions: @mcp_current_resource_completions,
-        scope: @mcp_current_scope
+        scope: @mcp_current_scope,
+        cache: @mcp_current_cache
       }
 
       Module.delete_attribute(__MODULE__, :mcp_current_resource_uri)
@@ -1060,6 +1091,7 @@ defmodule ConduitMcp.DSL do
       Module.delete_attribute(__MODULE__, :mcp_current_resource_handler)
       Module.delete_attribute(__MODULE__, :mcp_current_resource_completions)
       Module.delete_attribute(__MODULE__, :mcp_current_scope)
+      Module.delete_attribute(__MODULE__, :mcp_current_cache)
     end
   end
 
@@ -1183,6 +1215,7 @@ defmodule ConduitMcp.DSL do
       @mcp_current_scope nil
       @mcp_current_tool_meta nil
       @mcp_current_app_view nil
+      @mcp_current_cache nil
 
       unquote(block)
 
@@ -1211,7 +1244,8 @@ defmodule ConduitMcp.DSL do
         handler: @mcp_current_tool_handler,
         annotations: @mcp_current_tool_annotations,
         scope: @mcp_current_scope,
-        meta: @mcp_current_tool_meta
+        meta: @mcp_current_tool_meta,
+        cache: @mcp_current_cache
       }
 
       # Store the resource for the UI HTML — use :app_view handler type which
@@ -1225,7 +1259,8 @@ defmodule ConduitMcp.DSL do
         mime_type: "text/html;profile=mcp-app",
         handler: {:app_view, app_view_path},
         completions: [],
-        scope: @mcp_current_scope
+        scope: @mcp_current_scope,
+        cache: @mcp_current_cache
       }
 
       # Clean up
@@ -1237,6 +1272,7 @@ defmodule ConduitMcp.DSL do
       Module.delete_attribute(__MODULE__, :mcp_current_scope)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_meta)
       Module.delete_attribute(__MODULE__, :mcp_current_app_view)
+      Module.delete_attribute(__MODULE__, :mcp_current_cache)
     end
   end
 
@@ -1310,6 +1346,12 @@ defmodule ConduitMcp.DSL do
     prompt_scopes = scope_entries(reversed_prompts, &to_string(&1.name))
     resource_scopes = scope_entries(readable_resources, & &1.uri)
 
+    cache_hints = %{
+      tools: cache_hint_map(reversed_tools, &to_string(&1.name)),
+      prompts: cache_hint_map(reversed_prompts, &to_string(&1.name)),
+      resources: Enum.map(readable_resources, &{&1.uri, cache_hint(&1, &1.uri)})
+    }
+
     templated_resource_clause? =
       Enum.any?(readable_resources, &ConduitMcp.DSL.SchemaBuilder.templated?/1)
 
@@ -1347,6 +1389,10 @@ defmodule ConduitMcp.DSL do
       unquote(
         ConduitMcp.DSL.__generate_scope_clauses__(tool_scopes, prompt_scopes, resource_scopes)
       )
+
+      # Per-declaration cache hints, resolved by `ConduitMcp.CacheHints`.
+      @doc false
+      def __cache_hints__, do: unquote(Macro.escape(cache_hints))
 
       # Always generate handle_list_tools (empty list if no tools)
       def handle_list_tools(_conn) do
@@ -1438,6 +1484,19 @@ defmodule ConduitMcp.DSL do
     |> Enum.reverse()
     |> Enum.filter(&(&1.handler != nil))
   end
+
+  # `%{name => hint}` for the declarations that declared a `cache`; also
+  # validates every declaration's hint (`ConduitMcp.CacheHints.validate!/3`).
+  defp cache_hint_map(entries, name_fun) do
+    for entry <- entries,
+        hint = cache_hint(entry, name_fun.(entry)),
+        hint != nil,
+        into: %{},
+        do: {name_fun.(entry), hint}
+  end
+
+  defp cache_hint(entry, subject),
+    do: ConduitMcp.CacheHints.validate!(Map.get(entry, :cache), subject, Map.get(entry, :scope))
 
   # One `{name, scope | nil}` entry per declaration, in the order given, which
   # is dispatch order. `__generate_scope_clauses__/4` decides which unscoped
