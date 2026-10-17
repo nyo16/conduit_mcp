@@ -58,15 +58,22 @@ defmodule ConduitMcp.Handler.Pipeline do
   Runs `fun` with the request marked in flight.
 
   Stashes `id` into `conn.assigns[:mcp_request_id]` (so tools can poll
-  `ConduitMcp.Cancellation.cancelled?/1`), tracks the request with
+  `ConduitMcp.Cancellation.cancelled?/1`) and a node-unique token into
+  `conn.assigns[:mcp_request_token]` (the key of the server's own
+  `ConduitMcp.Cancellation.cancel_request/2`), tracks the request with
   `ConduitMcp.Cancellation.track/2`, and untracks it and clears any
   cancellation flag once `fun` returns or raises.
   """
   @spec in_flight(Plug.Conn.t() | map(), term(), (Plug.Conn.t() -> result)) :: result
         when result: term()
   def in_flight(conn, id, fun) do
-    conn = Plug.Conn.assign(conn, :mcp_request_id, id)
+    conn =
+      conn
+      |> Plug.Conn.assign(:mcp_request_id, id)
+      |> Plug.Conn.assign(:mcp_request_token, System.unique_integer([:positive]))
+
     scope = Cancellation.scope(conn)
+    request_scope = Cancellation.request_scope(conn)
 
     Cancellation.track(id, scope)
 
@@ -75,6 +82,7 @@ defmodule ConduitMcp.Handler.Pipeline do
     after
       Cancellation.untrack(id, scope)
       Cancellation.clear(id, scope)
+      Cancellation.clear(id, request_scope)
     end
   end
 

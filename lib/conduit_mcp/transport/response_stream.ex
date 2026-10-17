@@ -59,7 +59,15 @@ defmodule ConduitMcp.Transport.ResponseStream do
       ref = make_ref()
       work_conn = StreamSpec.put_sink(work_conn, self(), ref, spec.progress_token)
       task = Task.async(fn -> execute(spec, work_conn) end)
-      state = %{spec: spec, ref: ref, task: task, mode: :pending, send_json: send_json}
+
+      state = %{
+        spec: spec,
+        work_conn: work_conn,
+        ref: ref,
+        task: task,
+        mode: :pending,
+        send_json: send_json
+      }
 
       try do
         conn
@@ -228,9 +236,11 @@ defmodule ConduitMcp.Transport.ResponseStream do
     respond(conn, state, response)
   end
 
-  defp cancel(%{spec: spec}, reason) do
-    _ = Cancellation.cancel(spec.request_id, reason, Cancellation.scope(spec.conn))
-    :ok
+  # The server cancels this one request, not `{scope, id}`: another request
+  # from the same client with the same id must neither see this nor clear it
+  # (`ConduitMcp.Cancellation.cancel_request/2`).
+  defp cancel(%{work_conn: work_conn}, reason) do
+    Cancellation.cancel_request(work_conn, reason)
   end
 
   # Gives a cancelled tool `timeout` to notice and return, then kills it.

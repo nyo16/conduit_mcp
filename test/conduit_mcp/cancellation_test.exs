@@ -195,6 +195,24 @@ defmodule ConduitMcp.CancellationTest do
       refute Cancellation.cancelled?(a)
       assert Cancellation.cancelled?(b)
     end
+
+    # Two clients behind one NAT both number their requests from 1, so on
+    # the modern era (no session) and without auth they share the
+    # `ip:` scope and the id. A stream disconnect is the server cancelling
+    # one specific request; the other request finishing - and clearing its
+    # own `{scope, id}` row - used to wipe that cancellation before the
+    # first request's tool could see it.
+    test "a server-side cancel survives a same-id request from the same client finishing" do
+      ConduitMcp.Handler.Pipeline.in_flight(client_conn([]), 1, fn a ->
+        assert :ok = Cancellation.cancel_request(a, "client disconnected")
+
+        ConduitMcp.Handler.Pipeline.in_flight(client_conn([]), 1, fn b ->
+          refute Cancellation.cancelled?(b)
+        end)
+
+        assert Cancellation.cancelled?(a)
+      end)
+    end
   end
 
   describe "row cap" do
