@@ -35,7 +35,9 @@ defmodule ConduitMcp.Application do
   are not `handle_call` gateways and must not become ones.
 
   `start/2` also seeds the validation config into `:persistent_term` for O(1)
-  reads on every request.
+  reads on every request, and, when `config :conduit_mcp, :mrtr_keys` is set,
+  validates that keyring with `ConduitMcp.MRTR.State.validate_keys!/1` so a
+  malformed key fails at boot rather than on the first MRTR request.
   """
 
   use Application
@@ -50,6 +52,7 @@ defmodule ConduitMcp.Application do
     # Seed validation config into persistent_term for O(1) reads on every request
     config = Application.get_env(:conduit_mcp, :validation, [])
     :persistent_term.put({ConduitMcp, :validation_config}, config)
+    validate_mrtr_keys!()
 
     children =
       always_started() ++
@@ -59,6 +62,15 @@ defmodule ConduitMcp.Application do
     # for other strategies and supported options
     opts = [strategy: :one_for_one, name: ConduitMcp.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  # Only when configured: MRTR is opt-in, and `MRTR.State.seal/3` raises its own
+  # clear error when a server uses it without keys.
+  defp validate_mrtr_keys! do
+    case Application.fetch_env(:conduit_mcp, :mrtr_keys) do
+      {:ok, keys} -> ConduitMcp.MRTR.State.validate_keys!(keys)
+      :error -> :ok
+    end
   end
 
   # Own the cancellation, in-flight and session ETS tables from long-lived
