@@ -215,6 +215,7 @@ defmodule ConduitMcp.Client.Config do
                 context: [type: :boolean, default: false],
                 tools: [type: :boolean, default: false],
                 allow_idle: [type: :boolean, default: false],
+                max_tool_iterations: [type: :pos_integer, default: 5],
                 rejection_code: [type: :integer, default: -1]
               ],
               doc: """
@@ -224,7 +225,10 @@ defmodule ConduitMcp.Client.Config do
               and lets `includeContext` through; otherwise it is coerced to
               `"none"`. `:tools` declares `sampling.tools`. `:allow_idle`
               accepts legacy sampling requests that arrive while no call is in
-              flight (refused by default). Refusals use `:rejection_code`.
+              flight (refused by default). `:max_tool_iterations` bounds a
+              sampling tool loop: a request whose `messages` already hold
+              more assistant `tool_use` turns than this is refused. Refusals
+              use `:rejection_code`.
               """
             ],
             elicitation: [

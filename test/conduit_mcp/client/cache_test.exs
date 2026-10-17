@@ -25,6 +25,11 @@ defmodule ConduitMcp.Client.CacheTest do
     view.cache
   end
 
+  defp serve_page_within(conn, tools, timeout) do
+    {id, _message, _opts} = expect_request(conn, "tools/list", timeout)
+    reply(conn, id, %{"tools" => tools})
+  end
+
   # Serves one `tools/list` page.
   defp serve_page(conn, tools, extra \\ %{}) do
     {id, message, _opts} = expect_request(conn, "tools/list")
@@ -276,6 +281,37 @@ defmodule ConduitMcp.Client.CacheTest do
       assert_receive {[:conduit_mcp, :client, :cache, :refresh, :stop], ^ref,
                       %{count: 1, pages: 1, rejected: 0}, %{kind: :tools, status: :ok}}
 
+      assert_no_leaks(name, conn)
+    end
+
+    test "a sustained list_changed flood refetches a list at most once a second (HB-4)",
+         %{name: name} do
+      conn = start_client(name)
+      ready_modern(name, conn)
+
+      task = Task.async(fn -> Client.list_all_tools(name) end)
+      serve_page(conn, [tool("a")], %{"ttlMs" => 60_000})
+      assert {:ok, _} = Task.await(task)
+
+      ref = attach(name, [[:conduit_mcp, :client, :cache, :refresh, :start]])
+      changed = fn -> FakeTransport.push(conn, {:notification, @tools_changed, %{}}) end
+
+      changed.()
+      serve_page(conn, [tool("a")])
+
+      assert_receive {[:conduit_mcp, :client, :cache, :refresh, :start], ^ref,
+                      %{monotonic_time: first}, %{trigger: :list_changed}}
+
+      # The flood goes on past the 250 ms coalescing window: its trailing
+      # notification is due well inside the second.
+      for _ <- 1..100, do: changed.()
+      serve_page_within(conn, [tool("a")], 2_000)
+
+      assert_receive {[:conduit_mcp, :client, :cache, :refresh, :start], ^ref,
+                      %{monotonic_time: second}, %{trigger: :list_changed}}
+
+      assert System.convert_time_unit(second - first, :native, :millisecond) >= 1_000
+      eventually(fn -> state(conn).refreshes == %{} end)
       assert_no_leaks(name, conn)
     end
 

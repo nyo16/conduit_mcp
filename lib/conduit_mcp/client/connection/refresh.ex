@@ -13,6 +13,9 @@ defmodule ConduitMcp.Client.Connection.Refresh do
   #     `ConduitMcp.Client.Connection.Inbound`): the list is marked stale
   #     and, if it was ever fetched, refreshed. One arriving while a refresh
   #     runs only schedules one more after it, so a burst costs at most two.
+  #     `list_changed` refreshes of one kind start at most once a second
+  #     (HB-4): one due sooner waits for the second to pass, so a sustained
+  #     storm costs one fetch per second per kind.
   #
   # Writing a tools list emits `[:conduit_mcp, :client, :tool,
   # :definition_changed]` for every known tool whose fingerprint changed.
@@ -23,6 +26,8 @@ defmodule ConduitMcp.Client.Connection.Refresh do
   alias ConduitMcp.Client.Connection.Requests
   alias ConduitMcp.Client.Error
   alias ConduitMcp.Client.Telemetry
+
+  @refetch_interval_ms 1_000
 
   @kinds_by_method %{
     "notifications/tools/list_changed" => [:tools],
@@ -52,7 +57,7 @@ defmodule ConduitMcp.Client.Connection.Refresh do
           put_refresh(data, kind, %{Map.fetch!(data.refreshes, kind) | again?: true})
 
         Cache.cached?(data.cache, kind) ->
-          start(kind, [], [], :list_changed, data)
+          refetch(kind, [], data)
 
         true ->
           data
@@ -60,8 +65,68 @@ defmodule ConduitMcp.Client.Connection.Refresh do
     end)
   end
 
+  @doc """
+  The once-a-second cap released `kind` (the connection is ready): refresh
+  it now, or after the refresh already running.
+  """
+  @spec deferred(Cache.kind(), Data.t()) :: Data.t()
+  def deferred(kind, data) do
+    data = drop_deferred(kind, data)
+
+    cond do
+      Map.has_key?(data.refreshes, kind) ->
+        put_refresh(data, kind, %{Map.fetch!(data.refreshes, kind) | again?: true})
+
+      Cache.cached?(data.cache, kind) ->
+        refetch(kind, [], data)
+
+      true ->
+        data
+    end
+  end
+
+  @doc "Forgets a held-back refresh (the connection is not ready; lists are stale)."
+  @spec drop_deferred(Cache.kind(), Data.t()) :: Data.t()
+  def drop_deferred(kind, data) do
+    case Map.fetch(data.coalesce, {:refetch, kind}) do
+      {:ok, entry} -> put_refetch(data, kind, %{entry | deferred?: false})
+      :error -> data
+    end
+  end
+
+  # A `list_changed` refresh, unless one started less than a second ago:
+  # then it is held back until the second has passed (once per kind). The
+  # last start lives in `data.coalesce` under `{:refetch, kind}`.
+  defp refetch(kind, opts, data) do
+    now = System.monotonic_time(:millisecond)
+
+    case Map.fetch(data.coalesce, {:refetch, kind}) do
+      {:ok, %{at: last, deferred?: true}} when now - last < @refetch_interval_ms ->
+        data
+
+      {:ok, %{at: last} = entry} when now - last < @refetch_interval_ms ->
+        Process.send_after(self(), {:"$mcp_refetch", kind}, @refetch_interval_ms - (now - last))
+        put_refetch(data, kind, %{entry | deferred?: true})
+
+      _never_or_long_ago ->
+        data = put_refetch(data, kind, %{at: now, deferred?: false})
+        start(kind, [], opts, :list_changed, data)
+    end
+  end
+
+  defp put_refetch(data, kind, entry),
+    do: %{data | coalesce: Map.put(data.coalesce, {:refetch, kind}, entry)}
+
   defp start(kind, waiters, opts, trigger, data) do
-    task = Task.Supervisor.async_nolink(data.task_sup, Fetch, :all, [data.name, kind, opts])
+    metadata = Telemetry.inherited_logger_metadata()
+    name = data.name
+
+    task =
+      Task.Supervisor.async_nolink(data.task_sup, fn ->
+        Logger.metadata(metadata)
+        Fetch.all(name, kind, opts)
+      end)
+
     Telemetry.cache_refresh_start(Data.telemetry(data), kind, trigger)
 
     refresh = %{
@@ -116,7 +181,7 @@ defmodule ConduitMcp.Client.Connection.Refresh do
     Enum.each(refresh.waiters, &Requests.reply(&1, reply))
 
     if refresh.again?,
-      do: start(kind, [], refresh.opts, :list_changed, data),
+      do: refetch(kind, refresh.opts, data),
       else: data
   end
 

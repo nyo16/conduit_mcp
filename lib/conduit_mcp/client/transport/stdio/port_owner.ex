@@ -58,6 +58,7 @@ defmodule ConduitMcp.Client.Transport.Stdio.PortOwner do
   @impl true
   def init(spec) do
     Process.flag(:trap_exit, true)
+    Logger.metadata(Map.get(spec, :logger_metadata, []))
 
     state = %{
       owner: spec.owner,
@@ -342,6 +343,10 @@ defmodule ConduitMcp.Client.Transport.Stdio.PortOwner do
 
   # No shell: the executable is resolved and run with an argument list. A
   # missing one means the process cannot be checked or signalled.
+  # sobelow_skip ["CI.System"]
+  # `command` is a literal "kill"/"taskkill" from the clauses above, resolved
+  # with System.find_executable/1; args are a signal flag and an integer OS
+  # pid. Nothing user- or server-supplied reaches it, and no shell runs.
   defp run(command, args) do
     case System.find_executable(command) do
       nil ->

@@ -1,6 +1,7 @@
 defmodule ConduitMcp.Client.Transport.StreamableHTTP do
   alias ConduitMcp.Client.Error
   alias ConduitMcp.Client.Secret
+  alias ConduitMcp.Client.Telemetry
   alias ConduitMcp.Client.URLPolicy
   alias ConduitMcp.Headers
   alias ConduitMcp.OptionalDeps
@@ -519,8 +520,14 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
     xref = make_ref()
     spec = %{spec | xref: xref}
     exchange = state.exchange
+    metadata = Telemetry.inherited_logger_metadata()
 
-    case Task.Supervisor.start_child(state.task_sup, fn -> exchange.run(spec) end) do
+    run = fn ->
+      Logger.metadata(metadata)
+      exchange.run(spec)
+    end
+
+    case Task.Supervisor.start_child(state.task_sup, run) do
       {:ok, pid} ->
         mon = Process.monitor(pid)
         entry = %{pid: pid, mon: mon, id: spec.id, era: spec.era, mode: spec.mode}
@@ -652,7 +659,14 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
       idle_timeout: state.opts[:listen_idle_timeout]
     }
 
-    case Task.Supervisor.start_child(state.task_sup, fn -> listener.run(spec) end) do
+    metadata = Telemetry.inherited_logger_metadata()
+
+    run = fn ->
+      Logger.metadata(metadata)
+      listener.run(spec)
+    end
+
+    case Task.Supervisor.start_child(state.task_sup, run) do
       {:ok, pid} -> %{state | listener: %{pid: pid, mon: Process.monitor(pid), xref: xref}}
       {:error, _reason} -> state
     end

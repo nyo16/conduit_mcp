@@ -20,8 +20,10 @@ defmodule ConduitMcp.Client.Connection.Notifier do
     if function_exported?(handler, :handle_notification, 3) or
          function_exported?(handler, :handle_log, 3) do
       owner = self()
+      metadata = ConduitMcp.Client.Telemetry.inherited_logger_metadata()
 
       spawn_link(fn ->
+        Logger.metadata(metadata)
         ref = Process.monitor(owner)
         loop(handler, ctx, ref)
       end)

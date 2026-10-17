@@ -61,8 +61,10 @@ defmodule ConduitMcp.Client.Handler do
       (4096); `includeContext` is coerced to `"none"` unless
       `sampling: [context: true]`; a legacy sampling request that arrives
       while no call is in flight is refused unless
-      `sampling: [allow_idle: true]`. Refusals (idle, over budget) use
-      `sampling: [rejection_code: _]` (default `-1`).
+      `sampling: [allow_idle: true]`; a request whose `messages` already
+      hold more than `sampling: [max_tool_iterations: _]` (5) assistant
+      `tool_use` turns is refused. Refusals (idle, tool loop, over budget)
+      use `sampling: [rejection_code: _]` (default `-1`).
     * **Elicitation**: the client never fetches or opens a URL. A mode the
       handler does not declare is refused with `-32602`. URL mode accepts
       only absolute `https` URLs without userinfo (`javascript:`, `http:`,

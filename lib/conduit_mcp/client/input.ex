@@ -17,7 +17,8 @@ defmodule ConduitMcp.Client.Input do
   #     `sampling: [allow_idle: true]`; `maxTokens` must be a positive
   #     integer and is clamped to `sampling: [max_tokens: _]` (4096);
   #     `includeContext` other than `"none"` becomes `"none"` unless
-  #     `sampling: [context: true]`;
+  #     `sampling: [context: true]`; a conversation already past
+  #     `sampling: [max_tool_iterations: _]` (5) tool rounds is refused;
   #   * elicitation: the mode (default `"form"`) must be one the handler
   #     declares (else `-32602`); a form schema must be the flat primitive
   #     subset and its secret-looking fields are flagged; a URL must be
@@ -33,6 +34,7 @@ defmodule ConduitMcp.Client.Input do
   alias ConduitMcp.Client.Error
   alias ConduitMcp.Client.Input.Elicitation
   alias ConduitMcp.Client.RateLimit
+  alias ConduitMcp.Client.Telemetry
   alias ConduitMcp.Reflect
 
   @invalid_params ConduitMcp.Errors.invalid_params()
@@ -66,6 +68,7 @@ defmodule ConduitMcp.Client.Input do
           required(:assigns) => map(),
           required(:client) => term(),
           required(:server_id) => String.t(),
+          required(:transport) => atom(),
           required(:era) => :modern | :legacy,
           required(:related_request_id) => term(),
           required(:idle?) => boolean(),
@@ -102,6 +105,7 @@ defmodule ConduitMcp.Client.Input do
     env(view.input, %{
       client: client,
       server_id: view.server_id,
+      transport: view.transport,
       era: :modern,
       assigns: assigns || view.input.assigns,
       related_request_id: nil,
@@ -144,15 +148,19 @@ defmodule ConduitMcp.Client.Input do
   Answers one input request: `{:ok, result}` to send, or `{:error, rpc_error}`
   (a JSON-RPC error object for a legacy response; the reason of an
   `:input_handler` error in MRTR). Callback exceptions are not caught here.
+  Runs in a `[:conduit_mcp, :client, :input_request, ...]` span.
   """
   @spec answer(String.t(), term(), env()) :: {:ok, map()} | {:error, rpc_error()}
   def answer(method, params, env) do
     params = if is_map(params), do: params, else: %{}
+    base = Telemetry.base(env.client, env.server_id, env.transport, env.era)
 
-    with :ok <- implemented(method, env.handler),
-         :ok <- within_budget(method, env) do
-      run(method, params, env)
-    end
+    Telemetry.input_request_span(base, method, fn ->
+      with :ok <- implemented(method, env.handler),
+           :ok <- within_budget(method, env) do
+        run(method, params, env)
+      end
+    end)
   end
 
   defp implemented(method, handler) do
@@ -189,17 +197,34 @@ defmodule ConduitMcp.Client.Input do
   defp sampling(params, env) do
     sampling = env.sampling
 
-    if env.idle? and not Keyword.fetch!(sampling, :allow_idle) do
-      sampling_rejected(env, "Sampling request refused: no request in flight")
-    else
-      with {:ok, params} <- clamp_tokens(params, Keyword.fetch!(sampling, :max_tokens)) do
-        params
-        |> coerce_context(Keyword.fetch!(sampling, :context))
-        |> env.handler.handle_sampling(ctx(env))
-        |> callback_result()
-      end
+    cond do
+      env.idle? and not Keyword.fetch!(sampling, :allow_idle) ->
+        sampling_rejected(env, "Sampling request refused: no request in flight")
+
+      tool_rounds(params) > Keyword.fetch!(sampling, :max_tool_iterations) ->
+        sampling_rejected(env, "Sampling request refused: tool-iteration limit reached")
+
+      true ->
+        with {:ok, params} <- clamp_tokens(params, Keyword.fetch!(sampling, :max_tokens)) do
+          params
+          |> coerce_context(Keyword.fetch!(sampling, :context))
+          |> env.handler.handle_sampling(ctx(env))
+          |> callback_result()
+        end
     end
   end
+
+  # The tool rounds a sampling conversation already went through: its
+  # assistant messages that asked for a tool (SC-2).
+  defp tool_rounds(%{"messages" => messages}) when is_list(messages),
+    do: Enum.count(messages, &tool_use?/1)
+
+  defp tool_rounds(_params), do: 0
+
+  defp tool_use?(%{"role" => "assistant", "content" => content}),
+    do: content |> List.wrap() |> Enum.any?(&match?(%{"type" => "tool_use"}, &1))
+
+  defp tool_use?(_message), do: false
 
   # --- elicitation ---------------------------------------------------------------
 

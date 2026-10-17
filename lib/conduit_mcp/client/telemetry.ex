@@ -7,12 +7,29 @@ defmodule ConduitMcp.Client.Telemetry do
   # name, era, transport kind, closed-set atoms and request ids. Never
   # arguments, results, `_meta`, tokens or raw error data.
   #
-  # Spans (`request`, `tool_call`) run in the caller, and `tool.rejected` in
-  # the process that fetched the list (a caller, or a cache refresh task);
-  # the rest run inside the connection process.
+  # Spans (`request`, `tool_call`, modern `input_request`) run in the
+  # caller, and `tool.rejected` in the process that fetched the list (a
+  # caller, or a cache refresh task); the rest run inside the connection
+  # process.
+  #
+  # Logger metadata (`mcp_client`, `mcp_server`, `mcp_transport`,
+  # `mcp_era`) is set only in processes the client spawns: the connection,
+  # its transport processes and its tasks. A caller's Logger metadata is
+  # never touched.
 
   alias ConduitMcp.Client.Error
   alias ConduitMcp.Reflect
+
+  @logger_keys [:mcp_client, :mcp_server, :mcp_transport, :mcp_era]
+
+  # `transport.mailbox` sampling: every this many transport messages, and
+  # emitted above this queue length.
+  @mailbox_every 64
+  @mailbox_limit 1_000
+
+  # The `input_request` span's `:method` is one of these or `nil`: a closed
+  # set, so it may be a metric tag.
+  @input_methods ["sampling/createMessage", "elicitation/create", "roots/list"]
 
   @type base :: %{
           client: term(),
@@ -25,6 +42,99 @@ defmodule ConduitMcp.Client.Telemetry do
   @spec base(term(), String.t(), atom(), :modern | :legacy | nil) :: base()
   def base(client, server_id, transport, era),
     do: %{client: client, server_id: server_id, transport: transport, era: era}
+
+  @doc "The Logger metadata of a process working for the client `base` describes."
+  @spec logger_metadata(base()) :: keyword()
+  def logger_metadata(%{client: client, server_id: server_id, transport: transport, era: era}) do
+    [
+      mcp_client: Reflect.text(client, 64),
+      mcp_server: server_id,
+      mcp_transport: transport,
+      mcp_era: era
+    ]
+  end
+
+  @doc """
+  The client Logger metadata of the current process (a client process), to
+  hand to a process it spawns: `Logger.metadata(md)` there.
+  """
+  @spec inherited_logger_metadata() :: keyword()
+  def inherited_logger_metadata, do: Keyword.take(Logger.metadata(), @logger_keys)
+
+  @doc """
+  Runs `fun` inside a `[:conduit_mcp, :client, :input_request, ...]` span.
+  `fun` returns `{:ok, _}` or `{:error, _}`.
+  """
+  @spec input_request_span(base(), term(), (-> result)) :: result when result: term()
+  def input_request_span(base, method, fun) do
+    meta = Map.put(base, :method, if(method in @input_methods, do: method))
+    start = System.monotonic_time()
+
+    :telemetry.execute(
+      [:conduit_mcp, :client, :input_request, :start],
+      %{monotonic_time: start, system_time: System.system_time()},
+      meta
+    )
+
+    try do
+      result = fun.()
+
+      :telemetry.execute(
+        [:conduit_mcp, :client, :input_request, :stop],
+        stop_measurements(start, %{}),
+        Map.put(meta, :status, if(match?({:ok, _}, result), do: :ok, else: :error))
+      )
+
+      result
+    catch
+      kind, reason ->
+        :telemetry.execute(
+          [:conduit_mcp, :client, :input_request, :exception],
+          stop_measurements(start, %{}),
+          Map.put(meta, :kind, kind)
+        )
+
+        :erlang.raise(kind, reason, __STACKTRACE__)
+    end
+  end
+
+  @doc """
+  Counts one transport message in the calling (connection) process; true
+  every #{@mailbox_every}th, when `mailbox/1` should sample the queue. The
+  count is an observability side channel, so it lives in the process
+  dictionary rather than the connection's state.
+  """
+  @spec mailbox_due?() :: boolean()
+  def mailbox_due? do
+    count = Process.get(:conduit_mcp_inbound, 0) + 1
+
+    if count >= @mailbox_every do
+      Process.put(:conduit_mcp_inbound, 0)
+      true
+    else
+      Process.put(:conduit_mcp_inbound, count)
+      false
+    end
+  end
+
+  @doc """
+  Emits `transport.mailbox` when the calling (connection) process holds
+  more than #{@mailbox_limit} messages.
+  """
+  @spec mailbox(base()) :: :ok
+  def mailbox(base) do
+    case Process.info(self(), :message_queue_len) do
+      {:message_queue_len, queued} when queued > @mailbox_limit ->
+        :telemetry.execute(
+          [:conduit_mcp, :client, :transport, :mailbox],
+          %{message_queue_len: queued},
+          base
+        )
+
+      _other ->
+        :ok
+    end
+  end
 
   @doc """
   Runs `fun` inside a `[:conduit_mcp, :client, :request, ...]` span. `fun`

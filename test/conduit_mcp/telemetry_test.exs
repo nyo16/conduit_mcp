@@ -451,6 +451,24 @@ defmodule ConduitMcp.TelemetryTest do
           })
         )
 
+        for {suffix, measurements, extra} <- [
+              {:start, %{monotonic_time: 1, system_time: 1}, %{}},
+              {:stop, span, %{status: :error}},
+              {:exception, span, %{kind: :exit}}
+            ] do
+          :telemetry.execute(
+            [:conduit_mcp, :client, :input_request, suffix],
+            measurements,
+            client |> Map.put(:method, "sampling/createMessage") |> Map.merge(extra)
+          )
+        end
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :transport, :mailbox],
+          %{message_queue_len: 1_024},
+          client
+        )
+
         hub = %{hub: {MyApp.Hub, "tenant\nforged"}, server_id: "github"}
 
         :telemetry.execute(

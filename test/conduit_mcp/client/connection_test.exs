@@ -407,6 +407,30 @@ defmodule ConduitMcp.Client.ConnectionTest do
       assert_no_leaks(name, conn)
     end
 
+    test "the 65th request in flight is :overloaded at the default cap, and starts nothing (HT-9)",
+         %{name: name} do
+      conn = start_client(name)
+      ready_modern(name, conn)
+      assert state(conn).config.max_in_flight == 64
+
+      tasks = for _ <- 1..64, do: Task.async(fn -> Client.call_tool(name, "slow", %{}) end)
+      ids = for _ <- 1..64, do: elem(expect_request(conn, "tools/call"), 0)
+
+      {:ok, task_sup, _value} = Registry.lookup({:task_sup, name})
+      children = Task.Supervisor.children(task_sup)
+
+      assert {:error, %Error{kind: :overloaded, reason: :max_in_flight}} =
+               Client.call_tool(name, "other", %{})
+
+      refute_received {:fake_transport, ^conn, {:request, _message, _opts}}
+      assert map_size(state(conn).pending) == 64
+      assert Task.Supervisor.children(task_sup) == children
+
+      for id <- ids, do: reply(conn, id, %{"content" => []})
+      for task <- tasks, do: assert({:ok, %ToolResult{}} = Task.await(task))
+      assert_no_leaks(name, conn)
+    end
+
     test "max_queued refuses requests beyond the queue while connecting", %{name: name} do
       conn = start_client(name, max_queued: 1)
       task = Task.async(fn -> Client.list_tools(name) end)

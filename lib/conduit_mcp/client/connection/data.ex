@@ -44,7 +44,9 @@ defmodule ConduitMcp.Client.Connection.Data do
     handshake: nil,
     # monitor ref => subscriber pid
     subscribers: %{},
-    # list_changed method => :quiet | {:again, params}
+    # list_changed method => :quiet | {:again, params}; and, per cached
+    # kind, {:refetch, kind} => %{at: last list_changed refresh start
+    # (monotonic ms), deferred?: held back by the once-a-second cap}
     coalesce: %{},
     queued: 0,
     attempt: 0,
@@ -143,9 +145,15 @@ defmodule ConduitMcp.Client.Connection.Data do
     }
   end
 
-  @doc "Writes the connection's state into the cache's `:status` and `:server` rows."
+  @doc """
+  Writes the connection's state into the cache's `:status` and `:server`
+  rows, and the era into the connection's Logger metadata (it runs in the
+  connection).
+  """
   @spec publish(t(), atom()) :: :ok
   def publish(data, state) do
+    Logger.metadata(mcp_era: data.era)
+
     Cache.put_status(data.cache, %{
       state: state,
       reason: if(state == :closed, do: data.reason),
@@ -259,9 +267,15 @@ defmodule ConduitMcp.Client.Connection.Data do
     end
   end
 
-  @doc "Tells the transport the negotiated session, when it wants to know."
+  @doc """
+  Tells the transport the negotiated session, when it wants to know. The
+  era goes into the connection's Logger metadata first, so processes the
+  transport starts for the session inherit it.
+  """
   @spec set_session(t()) :: t()
   def set_session(data) do
+    Logger.metadata(mcp_era: data.era)
+
     if function_exported?(data.transport, :set_session, 2),
       do: %{data | tstate: data.transport.set_session(data.tstate, session(data))},
       else: data

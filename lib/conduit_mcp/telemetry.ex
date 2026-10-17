@@ -1,4 +1,95 @@
 defmodule ConduitMcp.Telemetry do
+  # The single source of truth for every event: its name, its measurement
+  # keys, the metadata keys every emission carries, and the metadata keys
+  # only some emissions carry. `events/0`, the moduledoc's "Key reference"
+  # table and the test that pins emitted key sets
+  # (`test/conduit_mcp/telemetry_contract_test.exs`) are all derived from
+  # it, so the three cannot drift apart. A new event goes here first.
+  client = [:client, :server_id, :transport, :era]
+  span_start = [:monotonic_time, :system_time]
+  span_stop = [:duration, :monotonic_time]
+
+  @event_specs [
+    {[:conduit_mcp, :request, :stop], [:duration],
+     [
+       :method,
+       :server_module,
+       :status,
+       :era,
+       :protocol_version,
+       :traceparent,
+       :tracestate,
+       :baggage
+     ], []},
+    {[:conduit_mcp, :tool, :execute], [:duration], [:tool_name, :server_module, :status], []},
+    {[:conduit_mcp, :resource, :read], [:duration], [:uri, :server_module, :status], []},
+    {[:conduit_mcp, :prompt, :get], [:duration], [:prompt_name, :server_module, :status], []},
+    {[:conduit_mcp, :rate_limit, :check], [:duration], [:key, :status], [:count, :retry_after]},
+    {[:conduit_mcp, :message_rate_limit, :check], [:duration], [:key, :status, :method],
+     [:count, :retry_after]},
+    {[:conduit_mcp, :auth, :verify], [:duration], [:strategy, :status], [:reason]},
+    {[:conduit_mcp, :request, :cancelled], [:count], [:request_id, :scope, :reason], []},
+    {[:conduit_mcp, :cancellation, :cleanup], [:removed, :in_flight_removed], [], []},
+    {[:conduit_mcp, :cancellation, :janitor], [:removed], [:store], []},
+    {[:conduit_mcp, :session, :cleanup], [:removed], [:store], []},
+    {[:conduit_mcp, :tasks, :cleanup], [:removed], [], []},
+    {[:conduit_mcp, :mrtr, :input_required], [:count], [:method, :server_module, :round], []},
+    {[:conduit_mcp, :client, :request, :start], span_start, client ++ [:method], []},
+    {[:conduit_mcp, :client, :request, :stop], span_stop,
+     client ++ [:method, :status, :error_kind, :request_id], []},
+    {[:conduit_mcp, :client, :request, :exception], span_stop, client ++ [:method, :kind], []},
+    {[:conduit_mcp, :client, :tool_call, :start], span_start, client ++ [:tool_name], []},
+    {[:conduit_mcp, :client, :tool_call, :stop], span_stop ++ [:rounds],
+     client ++ [:tool_name, :status, :error_kind, :is_error], []},
+    {[:conduit_mcp, :client, :tool_call, :exception], span_stop, client ++ [:tool_name, :kind],
+     []},
+    {[:conduit_mcp, :client, :input_request, :start], span_start, client ++ [:method], []},
+    {[:conduit_mcp, :client, :input_request, :stop], span_stop, client ++ [:method, :status], []},
+    {[:conduit_mcp, :client, :input_request, :exception], span_stop, client ++ [:method, :kind],
+     []},
+    {[:conduit_mcp, :client, :connection, :transition], [:system_time],
+     client ++ [:from, :to, :reason, :attempt], []},
+    {[:conduit_mcp, :client, :request, :cancel], [:count],
+     client ++ [:method, :request_id, :reason], []},
+    {[:conduit_mcp, :client, :response, :dropped], [:count], client ++ [:request_id], []},
+    {[:conduit_mcp, :client, :notification], [:count], client ++ [:method], []},
+    {[:conduit_mcp, :client, :transport, :mailbox], [:message_queue_len], client, []},
+    {[:conduit_mcp, :subscription, :start], [:system_time, :resource_subscriptions],
+     [:filters, :server_module], []},
+    {[:conduit_mcp, :subscription, :stop], [:duration], [:filters, :server_module, :reason], []},
+    {[:conduit_mcp, :ext_tasks, :cleanup], [:removed], [:store], []},
+    {[:conduit_mcp, :client, :cache, :refresh, :start], span_start, client ++ [:kind, :trigger],
+     []},
+    {[:conduit_mcp, :client, :cache, :refresh, :stop], span_stop ++ [:count, :pages, :rejected],
+     client ++ [:kind, :trigger, :status, :error_kind], []},
+    {[:conduit_mcp, :client, :tool, :rejected], [:count], client ++ [:tool_name, :reason], []},
+    {[:conduit_mcp, :client, :tool, :definition_changed], [:count], client ++ [:tool_name], []},
+    {[:conduit_mcp, :client, :policy, :decision], [:count],
+     client ++ [:target, :decision, :source, :reason, :rule_id, :approval],
+     [:tool_name, :principal]},
+    {[:conduit_mcp, :client, :hook, :stop], span_stop, client ++ [:hook_id, :kind, :status],
+     [:tool_name]},
+    {[:conduit_mcp, :client, :hook, :exception], span_stop, client ++ [:hook_id, :kind, :reason],
+     [:tool_name]},
+    {[:conduit_mcp, :client, :hub, :server_failed], [:count, :delay],
+     [:hub, :server_id, :attempt, :reason], []},
+    {[:conduit_mcp, :client, :hub, :server_restarted], [:count], [:hub, :server_id, :attempt],
+     []},
+    {[:conduit_mcp, :client, :hub, :collision], [:count], [:hub, :exposed_name, :colliders], []},
+    {[:conduit_mcp, :client, :adapter, :strict_fallback], [:count],
+     [:client, :provider, :api, :tool_name, :reason], []}
+  ]
+
+  keys = fn
+    [] -> "-"
+    list -> Enum.map_join(list, ", ", &"`#{inspect(&1)}`")
+  end
+
+  @key_table Enum.map_join(@event_specs, "\n", fn {event, measurements, always, sometimes} ->
+               "| `#{inspect(event)}` | #{keys.(measurements)} | #{keys.(always)} | " <>
+                 "#{keys.(sometimes)} |"
+             end)
+
   @moduledoc """
   Telemetry integration for ConduitMCP.
 
@@ -392,12 +483,12 @@ defmodule ConduitMcp.Telemetry do
     * `:era` (:modern | :legacy | nil) - the negotiated era; `nil` before
       the first handshake
 
-  The `request` and `tool_call` spans, `policy.decision` and the `hook`
-  events are emitted **in the calling process**, so tracing bridges nest
-  them under the caller's span, and `tool.rejected` in the process that
-  fetched the tool list (a caller, or a cache refresh task). The other
-  client events are emitted inside the client's connection process: their
-  handlers must be fast.
+  The `request`, `tool_call` and `input_request` spans, `policy.decision`
+  and the `hook` events are emitted **in the calling process**, so tracing
+  bridges nest them under the caller's span, and `tool.rejected` in the
+  process that fetched the tool list (a caller, or a cache refresh task).
+  The other client events are emitted inside the client's connection
+  process: their handlers must be fast.
 
   #### `[:conduit_mcp, :client, :request, :start | :stop | :exception]`
 
@@ -557,6 +648,34 @@ defmodule ConduitMcp.Telemetry do
   **Metadata:** as for `hook.stop`, with `:reason` (:raise | :exit |
   :timeout | :bad_return) instead of `:status`.
 
+  #### `[:conduit_mcp, :client, :input_request, :start | :stop | :exception]`
+
+  One span per server-to-client input request the client's
+  `ConduitMcp.Client.Handler` answers (`sampling/createMessage`,
+  `elicitation/create`, `roots/list`), in either era: in the calling
+  process for a modern multi-round-trip input request, in the
+  connection's handler task for a legacy server request. The span covers
+  the safety checks and the handler callback; neither the request's
+  params nor the answer is included.
+
+  **Measurements:** as for `request`.
+
+  **Metadata:** the common keys, plus `:method` (one of the three
+  methods above, or `nil` for any other). `:stop` adds `:status` (:ok when
+  an answer is sent, :error when an error is); `:exception` (the handler
+  raised, threw or exited) adds `:kind`.
+
+  #### `[:conduit_mcp, :client, :transport, :mailbox]`
+
+  The connection's mailbox holds more than 1 000 messages: it is not
+  keeping up with what the server sends (a stdio port or an HTTP stream
+  has no back-pressure). Sampled once every 64 transport messages, so a
+  backlog emits it repeatedly until it drains.
+
+  **Measurements:** `:message_queue_len` (integer).
+
+  **Metadata:** the common keys.
+
   ### Hub and Adapter Events
 
   Emitted by `ConduitMcp.Client.Hub` and `ConduitMcp.Client.Adapters`. The
@@ -610,6 +729,18 @@ defmodule ConduitMcp.Telemetry do
   `:reason` (:unsupported_keyword, or the strict-mode limit exceeded:
   :max_properties | :max_depth | :max_chars | :max_enum_values |
   :max_enum_chars).
+
+  ### Key reference
+
+  Every event with the exact keys it carries. "Always" keys are in every
+  emission; "Sometimes" keys only where the event's section says. No
+  emission carries a key outside these two columns: a test pins each
+  emitted key set to this table, which is generated from the same list as
+  `events/0`.
+
+  | Event | Measurements | Metadata (always) | Metadata (sometimes) |
+  |---|---|---|---|
+  #{@key_table}
 
   ## Common Use Cases
 
@@ -840,93 +971,22 @@ defmodule ConduitMcp.Telemetry do
   """
 
   @doc """
-  Returns all telemetry event names emitted by ConduitMCP.
+  Returns all telemetry event names emitted by ConduitMCP, in the order of
+  the moduledoc's "Key reference" table.
 
   ## Example
 
-      iex> ConduitMcp.Telemetry.events()
-      [
-        [:conduit_mcp, :request, :stop],
-        [:conduit_mcp, :tool, :execute],
-        [:conduit_mcp, :resource, :read],
-        [:conduit_mcp, :prompt, :get],
-        [:conduit_mcp, :rate_limit, :check],
-        [:conduit_mcp, :message_rate_limit, :check],
-        [:conduit_mcp, :auth, :verify],
-        [:conduit_mcp, :request, :cancelled],
-        [:conduit_mcp, :cancellation, :cleanup],
-        [:conduit_mcp, :cancellation, :janitor],
-        [:conduit_mcp, :session, :cleanup],
-        [:conduit_mcp, :tasks, :cleanup],
-        [:conduit_mcp, :mrtr, :input_required],
-        [:conduit_mcp, :client, :request, :start],
-        [:conduit_mcp, :client, :request, :stop],
-        [:conduit_mcp, :client, :request, :exception],
-        [:conduit_mcp, :client, :tool_call, :start],
-        [:conduit_mcp, :client, :tool_call, :stop],
-        [:conduit_mcp, :client, :tool_call, :exception],
-        [:conduit_mcp, :client, :connection, :transition],
-        [:conduit_mcp, :client, :request, :cancel],
-        [:conduit_mcp, :client, :response, :dropped],
-        [:conduit_mcp, :client, :notification],
-        [:conduit_mcp, :subscription, :start],
-        [:conduit_mcp, :subscription, :stop],
-        [:conduit_mcp, :ext_tasks, :cleanup],
-        [:conduit_mcp, :client, :cache, :refresh, :start],
-        [:conduit_mcp, :client, :cache, :refresh, :stop],
-        [:conduit_mcp, :client, :tool, :rejected],
-        [:conduit_mcp, :client, :tool, :definition_changed],
-        [:conduit_mcp, :client, :policy, :decision],
-        [:conduit_mcp, :client, :hook, :stop],
-        [:conduit_mcp, :client, :hook, :exception],
-        [:conduit_mcp, :client, :hub, :server_failed],
-        [:conduit_mcp, :client, :hub, :server_restarted],
-        [:conduit_mcp, :client, :hub, :collision],
-        [:conduit_mcp, :client, :adapter, :strict_fallback]
-      ]
+      iex> [:conduit_mcp, :client, :tool_call, :stop] in ConduitMcp.Telemetry.events()
+      true
   """
   @spec events() :: [[:conduit_mcp, ...]]
-  def events do
-    [
-      [:conduit_mcp, :request, :stop],
-      [:conduit_mcp, :tool, :execute],
-      [:conduit_mcp, :resource, :read],
-      [:conduit_mcp, :prompt, :get],
-      [:conduit_mcp, :rate_limit, :check],
-      [:conduit_mcp, :message_rate_limit, :check],
-      [:conduit_mcp, :auth, :verify],
-      [:conduit_mcp, :request, :cancelled],
-      [:conduit_mcp, :cancellation, :cleanup],
-      [:conduit_mcp, :cancellation, :janitor],
-      [:conduit_mcp, :session, :cleanup],
-      [:conduit_mcp, :tasks, :cleanup],
-      [:conduit_mcp, :mrtr, :input_required],
-      [:conduit_mcp, :client, :request, :start],
-      [:conduit_mcp, :client, :request, :stop],
-      [:conduit_mcp, :client, :request, :exception],
-      [:conduit_mcp, :client, :tool_call, :start],
-      [:conduit_mcp, :client, :tool_call, :stop],
-      [:conduit_mcp, :client, :tool_call, :exception],
-      [:conduit_mcp, :client, :connection, :transition],
-      [:conduit_mcp, :client, :request, :cancel],
-      [:conduit_mcp, :client, :response, :dropped],
-      [:conduit_mcp, :client, :notification],
-      [:conduit_mcp, :subscription, :start],
-      [:conduit_mcp, :subscription, :stop],
-      [:conduit_mcp, :ext_tasks, :cleanup],
-      [:conduit_mcp, :client, :cache, :refresh, :start],
-      [:conduit_mcp, :client, :cache, :refresh, :stop],
-      [:conduit_mcp, :client, :tool, :rejected],
-      [:conduit_mcp, :client, :tool, :definition_changed],
-      [:conduit_mcp, :client, :policy, :decision],
-      [:conduit_mcp, :client, :hook, :stop],
-      [:conduit_mcp, :client, :hook, :exception],
-      [:conduit_mcp, :client, :hub, :server_failed],
-      [:conduit_mcp, :client, :hub, :server_restarted],
-      [:conduit_mcp, :client, :hub, :collision],
-      [:conduit_mcp, :client, :adapter, :strict_fallback]
-    ]
-  end
+  def events, do: for({event, _measurements, _always, _sometimes} <- @event_specs, do: event)
+
+  @doc false
+  # `{event, measurement_keys, always_metadata_keys, sometimes_metadata_keys}`
+  # for every event; what the key-set test pins emissions against.
+  @spec __event_specs__() :: [{[atom(), ...], [atom()], [atom()], [atom()]}]
+  def __event_specs__, do: @event_specs
 
   @doc """
   Attaches default logging handlers for all ConduitMCP telemetry events.
@@ -1103,7 +1163,7 @@ defmodule ConduitMcp.Telemetry do
   # `tool_name` may be server-supplied, so all go through `Reflect.text/2`.
   # Span starts are not logged; their stop or exception is.
   defp handle_event([:conduit_mcp, :client, span, :start], _measurements, _metadata, _config)
-       when span in [:request, :tool_call],
+       when span in [:request, :tool_call, :input_request],
        do: :ok
 
   defp handle_event([:conduit_mcp, :client, :request, :stop], measurements, metadata, _config) do
@@ -1123,11 +1183,37 @@ defmodule ConduitMcp.Telemetry do
   end
 
   defp handle_event([:conduit_mcp, :client, span, :exception], _measurements, metadata, _config)
-       when span in [:request, :tool_call] do
+       when span in [:request, :tool_call, :input_request] do
     require Logger
 
     Logger.warning(
       "MCP client #{span} raised in the caller: client=#{client_text(metadata)} kind=#{metadata.kind}"
+    )
+  end
+
+  defp handle_event(
+         [:conduit_mcp, :client, :input_request, :stop],
+         measurements,
+         metadata,
+         _config
+       ) do
+    require Logger
+
+    Logger.debug(
+      "MCP client input request: client=#{client_text(metadata)} method=#{ConduitMcp.Reflect.text(metadata.method)} status=#{metadata.status} duration=#{duration_ms(measurements)}ms"
+    )
+  end
+
+  defp handle_event(
+         [:conduit_mcp, :client, :transport, :mailbox],
+         measurements,
+         metadata,
+         _config
+       ) do
+    require Logger
+
+    Logger.warning(
+      "MCP client connection is falling behind: client=#{client_text(metadata)} message_queue_len=#{measurements.message_queue_len}"
     )
   end
 
