@@ -4,14 +4,20 @@ defmodule ConduitMcp.StreamSpec do
   of a single JSON body: the `{:stream, spec}` reply of
   `ConduitMcp.Handler.dispatch/3`.
 
-  `ConduitMcp.Handler.Modern` returns one for a modern `tools/call` whose
-  `_meta` carries a `progressToken` or `io.modelcontextprotocol/logLevel` —
-  the requests that can receive `notifications/progress` or
-  `notifications/message` while the tool runs. Every other request is
-  answered `{:reply, response}`.
+  `ConduitMcp.Handler.Modern` returns one of two kinds:
 
-  `run` produces the final JSON-RPC response map. What runs it decides how
-  the response travels:
+    * `:response` — a modern `tools/call` whose `_meta` carries a
+      `progressToken` or `io.modelcontextprotocol/logLevel`: the requests
+      that can receive `notifications/progress` or `notifications/message`
+      while the tool runs.
+    * `:listen` — a modern `subscriptions/listen` whose filter parsed: a
+      long-lived stream of change notifications that has no response until
+      the server ends it (`ConduitMcp.Subscriptions`).
+
+  Every other request is answered `{:reply, response}`.
+
+  A `:response` spec's `run` produces the final JSON-RPC response map. What
+  runs it decides how the response travels:
 
     * `ConduitMcp.Transport.Shared.dispatch_post/2` runs it in a task and,
       while it runs, relays the tool's notifications (`ConduitMcp.Progress`,
@@ -23,38 +29,48 @@ defmodule ConduitMcp.StreamSpec do
 
   Either way the request is tracked in flight for `run`'s duration, so the
   tool can poll `ConduitMcp.Cancellation.cancelled?/1`.
+
+  A `:listen` spec has no `run`: only a transport that can hold an SSE
+  stream open serves it (`ConduitMcp.Transport.Shared.dispatch_post/2`).
+  `ConduitMcp.Handler.handle_request/3` answers it `-32601`.
   """
 
   alias ConduitMcp.Handler.Pipeline
   alias ConduitMcp.Transport.SSEStream
 
-  @enforce_keys [:conn, :run]
+  @enforce_keys [:conn]
   defstruct kind: :response,
             request_id: nil,
             method: nil,
             progress_token: nil,
             conn: nil,
-            run: nil
+            run: nil,
+            subscription: nil
 
   @typedoc """
-    * `:kind` — `:response`: a finite response, preceded by notifications.
+    * `:kind` — `:response`: a finite response, preceded by notifications;
+      `:listen`: a `subscriptions/listen` stream.
     * `:request_id` — the JSON-RPC id being answered.
     * `:method` — the request method.
     * `:progress_token` — the request's `_meta.progressToken`, carried by
       every `notifications/progress`; `nil` when the request has none.
     * `:conn` — the conn `run` is called with (the request's
       `ConduitMcp.Ctx` is stored in it).
-    * `:run` — `(Plug.Conn.t() -> map())`, the work: returns the JSON-RPC
-      response map. It must not raise; `ConduitMcp.Handler.Modern` builds it
-      around the same guard as every other request.
+    * `:run` — `:response` only: `(Plug.Conn.t() -> map())`, the work:
+      returns the JSON-RPC response map. It must not raise;
+      `ConduitMcp.Handler.Modern` builds it around the same guard as every
+      other request.
+    * `:subscription` — `:listen` only: the honoured
+      `ConduitMcp.Subscriptions.Filter`.
   """
   @type t :: %__MODULE__{
-          kind: :response,
+          kind: :response | :listen,
           request_id: ConduitMcp.Protocol.json_rpc_id() | nil,
           method: String.t() | nil,
           progress_token: String.t() | integer() | nil,
           conn: Plug.Conn.t() | map(),
-          run: (Plug.Conn.t() | map() -> map())
+          run: (Plug.Conn.t() | map() -> map()) | nil,
+          subscription: ConduitMcp.Subscriptions.Filter.t() | nil
         }
 
   @sink :mcp_stream_sink

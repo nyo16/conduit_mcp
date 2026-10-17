@@ -22,6 +22,11 @@ defmodule ConduitMcp.Application do
     * `ConduitMcp.Transport.SSEStream.Owner` — always started; owns the slot
       table (one row per open stream) behind the HTTP transports'
       `:max_streams` cap on streamed POST responses.
+    * `ConduitMcp.Subscriptions` — always started; a `Registry` (duplicate
+      keys) of the `subscriptions/listen` streams served by this node, keyed
+      by the notification topics they deliver. The registry's own processes
+      only clean up after streams that die; publishing and registering go
+      straight to its ETS tables from the calling process.
     * `ConduitMcp.Session.Janitor` — always started against
       `ConduitMcp.Session.EtsStore`, under the name
       `ConduitMcp.Session.Janitor.Default` so it cannot collide with a janitor
@@ -95,7 +100,8 @@ defmodule ConduitMcp.Application do
       ConduitMcp.Transport.SSE.Owner,
       ConduitMcp.Transport.SSEStream.Owner,
       {Registry,
-       keys: :unique, name: ConduitMcp.Client.Registry, partitions: System.schedulers_online()}
+       keys: :unique, name: ConduitMcp.Client.Registry, partitions: System.schedulers_online()},
+      ConduitMcp.Subscriptions
     ]
   end
 

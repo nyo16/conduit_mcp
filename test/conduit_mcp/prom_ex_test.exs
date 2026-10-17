@@ -10,7 +10,7 @@ if Code.ensure_loaded?(PromEx) do
         metrics = PromEx.event_metrics(opts)
 
         assert is_list(metrics)
-        assert length(metrics) == 11
+        assert length(metrics) == 12
       end
 
       # Tool names and notification methods come from the server, and client
@@ -38,6 +38,20 @@ if Code.ensure_loaded?(PromEx) do
           |> MapSet.new(& &1.event_name)
 
         assert MapSet.new(ConduitMcp.Telemetry.events()) == metered
+      end
+
+      test "subscription metrics are tagged with the stop reason only" do
+        group =
+          [otp_app: :test_app]
+          |> PromEx.event_metrics()
+          |> Enum.find(&(&1.group_name == :conduit_mcp_subscription_metrics))
+
+        assert Enum.map(group.metrics, & &1.tags) == [[], [:reason], [:reason]]
+
+        for metric <- group.metrics, metric.tags != [] do
+          assert metric.tag_values.(%{reason: :idle_timeout, filters: [:tools_list_changed]}) ==
+                   %{reason: :idle_timeout}
+        end
       end
 
       test "cancellation and cleanup counts are tagged with low-cardinality values only" do

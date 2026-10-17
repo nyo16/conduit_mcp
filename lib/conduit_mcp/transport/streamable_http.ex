@@ -44,7 +44,10 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     Server-Sent Events stream: `notifications/progress` and
     `notifications/message` (`ConduitMcp.Progress`, `ConduitMcp.Log`), `:\\r\\n`
     keep-alive comments, then the response. Closing that stream cancels
-    the request (`ConduitMcp.Cancellation`).
+    the request (`ConduitMcp.Cancellation`). A `subscriptions/listen` is
+    answered with a long-lived stream of the change notifications it opted
+    in to (`ConduitMcp.Subscriptions`); it needs `text/event-stream` in
+    `Accept` (else 406).
   - **Legacy** (`2025-11-25`, `2025-06-18`): sessions, `initialize`, and
     JSON responses as before. A request whose `MCP-Protocol-Version` header
     names a version this server does not support is answered **400**
@@ -77,17 +80,29 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   - `:keep_alive_interval` — milliseconds between `:\\r\\n` keep-alive
     comments on a streamed response (default: 15 000).
   - `:max_streams` — maximum concurrent streamed responses (default:
-    1 000). A response that would open a stream past the cap is sent as
-    plain JSON instead, without its notifications.
+    1 000), `subscriptions/listen` streams included. A `tools/call` response
+    that would open a stream past the cap is sent as plain JSON instead,
+    without its notifications; a `subscriptions/listen` past the cap is
+    refused with HTTP 503.
   - `:max_stream_lifetime` — milliseconds after which a streamed request is
     cancelled (default: 1 hour); its response is then `-32603` unless the
-    tool returns within `:stream_cancel_timeout`.
+    tool returns within `:stream_cancel_timeout`. A `subscriptions/listen`
+    stream is ended gracefully at this age, or earlier at its OAuth bearer
+    token's `exp`.
   - `:stream_cancel_timeout` — milliseconds a cancelled streamed request's
     tool (client disconnect or `:max_stream_lifetime`) gets to notice
     `ConduitMcp.Cancellation.cancelled?/1` and return before it is killed
     (default: 5 000).
+  - `:max_listens_per_principal` — maximum concurrent `subscriptions/listen`
+    streams per principal (`ConduitMcp.Principal.rate_limit_key/1`: the
+    authenticated id, else the client's address) (default: 4). The next is
+    refused with HTTP 429.
+  - `:listen_idle_timeout` — milliseconds a `subscriptions/listen` stream
+    may go without delivering a notification before the server ends it
+    gracefully (default: 30 minutes). Keep-alives do not count. Checked on
+    each keep-alive tick, so it fires up to `:keep_alive_interval` late.
 
-    These four must be positive integers; anything else raises
+    These six must be positive integers; anything else raises
     `ArgumentError` at `init/1`.
   - `:session` — session-store configuration, a keyword list. **Sessions are
     off unless configured**: omitting `:session` (or passing `session: false`)

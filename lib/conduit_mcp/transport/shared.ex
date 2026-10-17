@@ -65,6 +65,7 @@ defmodule ConduitMcp.Transport.Shared do
   alias ConduitMcp.Protocol
   alias ConduitMcp.Reflect
   alias ConduitMcp.StreamSpec
+  alias ConduitMcp.Subscriptions
   alias ConduitMcp.Transport.ResponseStream
 
   import Plug.Conn
@@ -380,7 +381,9 @@ defmodule ConduitMcp.Transport.Shared do
     keep_alive_interval: 15_000,
     max_streams: 1_000,
     max_stream_lifetime: :timer.hours(1),
-    stream_cancel_timeout: 5_000
+    stream_cancel_timeout: 5_000,
+    max_listens_per_principal: 4,
+    listen_idle_timeout: :timer.minutes(30)
   ]
 
   # The bounds of every SSE stream these transports hold open (see
@@ -557,12 +560,15 @@ defmodule ConduitMcp.Transport.Shared do
   `ConduitMcp.Ctx` for) is dispatched with `ConduitMcp.Handler.dispatch/3`.
   Its response is sent at `ConduitMcp.Protocol.Modern.http_status/1` (400
   for `-32020`/`-32021`/`-32022`, 404 for an unknown method, else 200), with
-  the same 403 challenge. A `{:stream, spec}` dispatch — a `tools/call`
-  asking for progress or log notifications — is answered as a Server-Sent
-  Events stream when the request's `Accept` includes `text/event-stream`
-  (see `ConduitMcp.StreamSpec`), otherwise as plain JSON with its
-  notifications dropped. `prepare` never runs for a modern request: the
-  modern era has no sessions to mint.
+  the same 403 challenge. A `{:stream, spec}` dispatch of kind `:response` —
+  a `tools/call` asking for progress or log notifications — is answered as a
+  Server-Sent Events stream when the request's `Accept` includes
+  `text/event-stream` (see `ConduitMcp.StreamSpec`), otherwise as plain JSON
+  with its notifications dropped. One of kind `:listen` — a
+  `subscriptions/listen` — is served by `ConduitMcp.Subscriptions` as a
+  long-lived stream; without `text/event-stream` in `Accept` it is answered
+  `406` with a `-32600` error, since it has no JSON form. `prepare` never
+  runs for a modern request: the modern era has no sessions to mint.
 
   `prepare` runs after a successful legacy response map is produced and
   before it is sent, so a transport can attach transport-specific headers or
@@ -610,6 +616,23 @@ defmodule ConduitMcp.Transport.Shared do
 
       {:reply, response} ->
         send_modern_reply(conn, response)
+
+      {:stream, %StreamSpec{kind: :listen} = spec} ->
+        if accepts_event_stream?(conn) do
+          conn
+          |> put_protocol_version_header(%{})
+          |> Subscriptions.Stream.run(spec)
+        else
+          send_json(
+            conn,
+            406,
+            Protocol.error_response(
+              spec.request_id,
+              Protocol.invalid_request(),
+              "subscriptions/listen requires Accept: text/event-stream"
+            )
+          )
+        end
 
       {:stream, spec} ->
         if accepts_event_stream?(conn) do

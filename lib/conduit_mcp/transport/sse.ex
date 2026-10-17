@@ -70,8 +70,9 @@ defmodule ConduitMcp.Transport.SSE do
     always pass. See `ConduitMcp.Plugs.OriginValidation`.
   - `:keep_alive_interval` - milliseconds between `:\\r\\n` keep-alive
     comments, on `GET /sse` and on streamed POST responses (default: 15 000).
-  - `:max_streams`, `:max_stream_lifetime`, `:stream_cancel_timeout` - the
-    bounds on streamed modern POST responses; see
+  - `:max_streams`, `:max_stream_lifetime`, `:stream_cancel_timeout`,
+    `:max_listens_per_principal`, `:listen_idle_timeout` - the bounds on
+    streamed modern POST responses and `subscriptions/listen` streams; see
     `ConduitMcp.Transport.StreamableHTTP`.
   - `:max_connection_lifetime` - milliseconds after which an SSE stream is
     closed (default: 1 hour). A stream pins a process, a socket and a

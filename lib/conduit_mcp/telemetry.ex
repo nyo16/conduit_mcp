@@ -173,6 +173,54 @@ defmodule ConduitMcp.Telemetry do
   Neither the input requests, the state nor the `requestState` token is
   included.
 
+  ### Subscription Events
+
+  A modern `subscriptions/listen` stream (see `ConduitMcp.Subscriptions`)
+  emits these instead of `[:conduit_mcp, :request, :stop]`: its duration is
+  how long the stream stayed open, which would swamp a latency metric. A
+  listen refused before its stream opened (HTTP 406, 429 or 503) emits
+  neither.
+
+  #### `[:conduit_mcp, :subscription, :start]`
+
+  Emitted once the stream's SSE response has started, just before the
+  acknowledgment is written.
+
+  **Measurements:**
+
+    * `:system_time` (integer) - `System.system_time/0` at the start
+    * `:resource_subscriptions` (integer) - Number of resource URIs honoured
+
+  **Metadata:**
+
+    * `:filters` ([atom]) - The filter fields honoured, a subset of
+      `:tools_list_changed`, `:prompts_list_changed`,
+      `:resources_list_changed` and `:resource_subscriptions`
+    * `:server_module` (module) - The MCP server module
+
+  #### `[:conduit_mcp, :subscription, :stop]`
+
+  Emitted when the stream ends.
+
+  **Measurements:**
+
+    * `:duration` (integer) - How long the stream was open, in native time
+      units
+
+  **Metadata:**
+
+    * `:filters` ([atom]) - As on `:start`
+    * `:server_module` (module) - The MCP server module
+    * `:reason` (atom) - `:client_closed` (the client went away),
+      `:max_lifetime` (`:max_stream_lifetime` reached), `:token_expired`
+      (the bearer token's `exp` passed) or `:idle_timeout`
+      (`:listen_idle_timeout` without a notification). Every reason but
+      `:client_closed` ended with `notifications/cancelled` and the
+      graceful-closure result.
+
+  Neither event carries the resource URIs, the listen request id or the
+  principal.
+
   ### Rate Limiting Events
 
   #### `[:conduit_mcp, :rate_limit, :check]`
@@ -667,7 +715,9 @@ defmodule ConduitMcp.Telemetry do
         [:conduit_mcp, :client, :connection, :transition],
         [:conduit_mcp, :client, :request, :cancel],
         [:conduit_mcp, :client, :response, :dropped],
-        [:conduit_mcp, :client, :notification]
+        [:conduit_mcp, :client, :notification],
+        [:conduit_mcp, :subscription, :start],
+        [:conduit_mcp, :subscription, :stop]
       ]
   """
   @spec events() :: [[:conduit_mcp, ...]]
@@ -695,7 +745,9 @@ defmodule ConduitMcp.Telemetry do
       [:conduit_mcp, :client, :connection, :transition],
       [:conduit_mcp, :client, :request, :cancel],
       [:conduit_mcp, :client, :response, :dropped],
-      [:conduit_mcp, :client, :notification]
+      [:conduit_mcp, :client, :notification],
+      [:conduit_mcp, :subscription, :start],
+      [:conduit_mcp, :subscription, :stop]
     ]
   end
 
@@ -943,6 +995,24 @@ defmodule ConduitMcp.Telemetry do
 
     Logger.debug(
       "MCP client notification: client=#{client_text(metadata)} method=#{ConduitMcp.Reflect.text(metadata.method)}"
+    )
+  end
+
+  defp handle_event([:conduit_mcp, :subscription, :start], measurements, metadata, _config) do
+    require Logger
+
+    Logger.debug(
+      "Subscription started: filters=#{inspect(metadata.filters)} resource_subscriptions=#{measurements.resource_subscriptions}"
+    )
+  end
+
+  defp handle_event([:conduit_mcp, :subscription, :stop], measurements, metadata, _config) do
+    duration_ms = System.convert_time_unit(measurements.duration, :native, :millisecond)
+
+    require Logger
+
+    Logger.debug(
+      "Subscription stopped: reason=#{metadata.reason} filters=#{inspect(metadata.filters)} duration=#{duration_ms}ms"
     )
   end
 

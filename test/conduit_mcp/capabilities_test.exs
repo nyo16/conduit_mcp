@@ -77,4 +77,27 @@ defmodule ConduitMcp.CapabilitiesTest do
   test "uses an Endpoint's generated base, advertising only what it registers" do
     assert Capabilities.build(ToolsOnlyEndpoint) == %{"tools" => %{"listChanged" => false}}
   end
+
+  describe "era: :modern" do
+    test "sets listChanged on every advertised list and subscribe on resources" do
+      assert Capabilities.build(Bare, era: :modern) == %{
+               "tools" => %{"listChanged" => true},
+               "resources" => %{"listChanged" => true, "subscribe" => true},
+               "prompts" => %{"listChanged" => true}
+             }
+    end
+
+    test "adds no capability the base set lacks" do
+      assert Capabilities.build(ToolsOnlyEndpoint, era: :modern) ==
+               %{"tools" => %{"listChanged" => true}}
+
+      assert Capabilities.build(SubscribeWithoutResources, era: :modern) ==
+               %{"tools" => %{"listChanged" => true}}
+    end
+
+    test "keeps the completions and logging overlays" do
+      assert %{"completions" => %{}, "logging" => %{}} =
+               Capabilities.build(WithEverything, era: :modern)
+    end
+  end
 end

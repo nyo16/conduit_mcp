@@ -9,26 +9,38 @@ defmodule ConduitMcp.Capabilities do
   Flags for optional features are then overlaid according to which callbacks
   the server module exports:
 
-    * `resources.subscribe: true` — `handle_subscribe_resource/2`, and only
-      when the base set advertises `resources` at all.
+    * `resources.subscribe: true` (legacy) — `handle_subscribe_resource/2`,
+      and only when the base set advertises `resources` at all.
     * `completions: %{}` — `handle_complete/3`.
     * `logging: %{}` — `handle_set_log_level/2`.
 
   Used for both the legacy `initialize` reply and the modern
-  `server/discover` result (`ConduitMcp.Discover`), so the two eras
-  advertise the same set, with one exception: `resources.subscribe` is
-  legacy-only, because the modern era has no `resources/subscribe` method.
+  `server/discover` result (`ConduitMcp.Discover`). The two eras differ in
+  change notifications:
+
+    * **legacy** advertises the base set as is: this library has no
+      legacy delivery path for list-changed notifications, and
+      `resources.subscribe` means the server implements
+      `resources/subscribe`.
+    * **modern** sets `listChanged: true` on each of `tools`, `prompts` and
+      `resources` it advertises, and `subscribe: true` on `resources`:
+      every modern server answers `subscriptions/listen`
+      (`ConduitMcp.Subscriptions`, always running), whose
+      `toolsListChanged`/`promptsListChanged`/`resourcesListChanged`/
+      `resourceSubscriptions` filters deliver whatever the server pushes
+      with `ConduitMcp.notify_tools_changed/0` and friends.
   """
 
   alias ConduitMcp.ServerMeta
+
+  @list_changed ["tools", "prompts", "resources"]
 
   @doc """
   Returns the capabilities map advertised for `server_module`.
 
   Options:
 
-    * `:era` — `:legacy` (default) or `:modern`. Modern omits
-      `resources.subscribe`.
+    * `:era` — `:legacy` (default) or `:modern`; see the moduledoc.
 
   ## Examples
 
@@ -38,12 +50,21 @@ defmodule ConduitMcp.Capabilities do
       #     "resources" => %{"listChanged" => false},
       #     "prompts" => %{"listChanged" => false}
       #   }
+
+      ConduitMcp.Capabilities.build(MyServer, era: :modern)
+      #=> %{
+      #     "tools" => %{"listChanged" => true},
+      #     "resources" => %{"listChanged" => true, "subscribe" => true},
+      #     "prompts" => %{"listChanged" => true}
+      #   }
   """
   @spec build(module(), keyword()) :: map()
   def build(server_module, opts \\ []) do
+    era = Keyword.get(opts, :era, :legacy)
+
     server_module
     |> base()
-    |> maybe_put_subscribe(server_module, Keyword.get(opts, :era, :legacy))
+    |> put_change_notifications(server_module, era)
     |> maybe_put_completions(server_module)
     |> maybe_put_logging(server_module)
   end
@@ -60,9 +81,28 @@ defmodule ConduitMcp.Capabilities do
     end
   end
 
-  defp maybe_put_subscribe(caps, _server_module, :modern), do: caps
+  defp put_change_notifications(caps, _server_module, :modern) do
+    caps =
+      Enum.reduce(@list_changed, caps, fn key, caps ->
+        case caps do
+          %{^key => flags} when is_map(flags) ->
+            Map.put(caps, key, Map.put(flags, "listChanged", true))
 
-  defp maybe_put_subscribe(caps, server_module, :legacy) do
+          _ ->
+            caps
+        end
+      end)
+
+    case caps do
+      %{"resources" => flags} when is_map(flags) ->
+        Map.put(caps, "resources", Map.put(flags, "subscribe", true))
+
+      _ ->
+        caps
+    end
+  end
+
+  defp put_change_notifications(caps, server_module, :legacy) do
     if ServerMeta.has?(server_module, :subscribe) and Map.has_key?(caps, "resources") do
       Map.update!(caps, "resources", &Map.put(&1, "subscribe", true))
     else

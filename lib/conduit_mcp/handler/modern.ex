@@ -18,6 +18,10 @@ defmodule ConduitMcp.Handler.Modern do
   # into `run`, for the transport to execute while it relays them. The
   # version check runs first, so an unsupported version is still a plain
   # `{:reply, _}` error.
+  #
+  # `subscriptions/listen` is answered only as a stream: a `{:stream, spec}`
+  # of kind `:listen` once its filter parses (`ConduitMcp.Subscriptions.Filter`),
+  # otherwise a `{:reply, _}` error. It never reaches `handle_method/4`.
 
   require Logger
 
@@ -33,6 +37,7 @@ defmodule ConduitMcp.Handler.Modern do
   alias ConduitMcp.Handler.Tools
   alias ConduitMcp.Protocol
   alias ConduitMcp.StreamSpec
+  alias ConduitMcp.Subscriptions.Filter
 
   # The one modern routing table; `ConduitMcp.Handler.methods/1` publishes it.
   @request_methods %{
@@ -47,11 +52,14 @@ defmodule ConduitMcp.Handler.Modern do
     "completion/complete" => :complete
   }
 
+  # Methods answered only by `stream_spec/4`.
+  @stream_methods %{"subscriptions/listen" => :listen}
+
   @doc """
   Every method this era routes, mapped to its internal name.
   """
   @spec methods() :: %{optional(String.t()) => atom()}
-  def methods, do: @request_methods
+  def methods, do: Map.merge(@request_methods, @stream_methods)
 
   @doc """
   Handles a modern-era message; see `ConduitMcp.Handler.dispatch/3`.
@@ -63,6 +71,7 @@ defmodule ConduitMcp.Handler.Modern do
 
     case stream_spec(request, server_module, ctx, conn) do
       %StreamSpec{} = spec -> {:stream, spec}
+      {:reply, _response} = reply -> reply
       nil -> reply(request, server_module, ctx, conn)
     end
   end
@@ -121,6 +130,40 @@ defmodule ConduitMcp.Handler.Modern do
           end)
         end
       }
+    else
+      _ -> nil
+    end
+  end
+
+  # The filter is parsed here, before any stream exists, so a bad filter is a
+  # plain JSON-RPC error. Authorizing its resource URIs runs the server's
+  # scope lookups, hence the guard.
+  defp stream_spec(%{"method" => "subscriptions/listen"} = request, server_module, ctx, conn) do
+    with true <- Protocol.valid_request?(request),
+         :ok <- Era.check_version(ctx) do
+      id = Map.get(request, "id")
+      params = Map.get(request, "params", %{})
+
+      case Pipeline.guard("subscriptions/listen", id, fn ->
+             Filter.parse(params, server_module, conn)
+           end) do
+        {:ok, filter} ->
+          %StreamSpec{
+            kind: :listen,
+            request_id: id,
+            method: "subscriptions/listen",
+            conn: conn,
+            subscription: filter
+          }
+
+        {:error, _code, _message, _data} = error ->
+          response =
+            Pipeline.instrument(request, server_module, ctx, fn ->
+              Protocol.Modern.to_response(id, "subscriptions/listen", error)
+            end)
+
+          {:reply, response}
+      end
     else
       _ -> nil
     end
