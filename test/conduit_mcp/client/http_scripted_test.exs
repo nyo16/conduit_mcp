@@ -124,6 +124,23 @@ defmodule ConduitMcp.Client.HTTPScriptedTest do
 
   # --- legacy streams ------------------------------------------------------------
 
+  # 2025-11-25 transports: the client MUST send `MCP-Protocol-Version` on
+  # every HTTP request after `initialize`, `notifications/initialized`
+  # included (seen missing against server-everything 1.0.0).
+  test "notifications/initialized carries the negotiated MCP-Protocol-Version and the session" do
+    url =
+      ScriptedServer.start(legacy(fn _conn, _message -> :unreachable end, sid: fn -> "sid-I" end))
+
+    _name = ready(url, protocol: :legacy)
+
+    assert_received {:scripted, "initialize", init_headers, _}
+    refute List.keymember?(init_headers, "mcp-protocol-version", 0)
+
+    assert_receive {:scripted, "notifications/initialized", headers, _}, 2_000
+    assert {"mcp-protocol-version", "2025-11-25"} in headers
+    assert {"mcp-session-id", "sid-I"} in headers
+  end
+
   test "a legacy SSE response carries a sampling request; the handler's answer is POSTed with the session" do
     test = self()
 
