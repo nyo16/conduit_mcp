@@ -195,7 +195,8 @@ defmodule ConduitMcp.Telemetry do
 
     * `:filters` ([atom]) - The filter fields honoured, a subset of
       `:tools_list_changed`, `:prompts_list_changed`,
-      `:resources_list_changed` and `:resource_subscriptions`
+      `:resources_list_changed`, `:resource_subscriptions` and `:task_ids`
+      (`ConduitMcp.Ext.Tasks` enabled only)
     * `:server_module` (module) - The MCP server module
 
   #### `[:conduit_mcp, :subscription, :stop]`

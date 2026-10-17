@@ -312,13 +312,20 @@ defmodule ConduitMcp.Plugs.HeaderValidationTest do
     test "tool with invalid annotation is excluded, and logged when the cache is built" do
       HeaderValidation.invalidate(ParamServer)
 
+      # `capture_log/2` captures every process's log, and async tests in other
+      # modules log concurrently: any "1.5" of theirs failed the `refute`
+      # below. The plug runs in this process, so keep only this process's lines.
       log =
-        ExUnit.CaptureLog.capture_log(fn ->
+        [metadata: [:pid]]
+        |> ExUnit.CaptureLog.capture_log(fn ->
           refute run(
                    call_req(%{"ratio" => 1.5}, "bad"),
                    std("tools/call", [{"mcp-name", "bad"}])
                  ).halted
         end)
+        |> String.split("\n")
+        |> Enum.filter(&String.contains?(&1, "pid=#{:erlang.pid_to_list(self())}"))
+        |> Enum.join("\n")
 
       assert log =~ ~s(tool "bad" has invalid x-mcp-header annotations)
       assert log =~ ~s(x-mcp-header "Ratio" at #/properties/ratio)

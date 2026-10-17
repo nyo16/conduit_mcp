@@ -113,17 +113,23 @@ defmodule ConduitMcp.Handler.ExtTasks do
   defp input_responses(_params),
     do: {:error, Errors.invalid_params(), "inputResponses must be an object", nil}
 
-  defp declared?(%Ctx{extensions: extensions}) when is_map(extensions),
+  @doc false
+  # Whether the request declared the extension in its per-request client
+  # capabilities. Also the `taskIds` listen filter's check.
+  @spec declared?(Ctx.t() | nil) :: boolean()
+  def declared?(%Ctx{extensions: extensions}) when is_map(extensions),
     do: is_map_key(extensions, Tasks.extension())
 
-  defp declared?(_ctx), do: false
+  def declared?(_ctx), do: false
 
   defp not_found({:error, :not_found}),
     do: {:error, Errors.invalid_params(), "Failed to retrieve task: Task not found", nil}
 
   defp not_found({:error, _code, _message, _data} = error), do: error
 
-  defp missing_capability do
+  @doc false
+  @spec missing_capability() :: {:error, integer(), String.t(), map()}
+  def missing_capability do
     {:error, Errors.missing_required_client_capability(), "Missing required client capability",
      %{"requiredCapabilities" => %{"extensions" => %{Tasks.extension() => %{}}}}}
   end

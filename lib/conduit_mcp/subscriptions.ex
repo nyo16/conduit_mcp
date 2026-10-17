@@ -24,9 +24,16 @@ defmodule ConduitMcp.Subscriptions do
   | `:prompts` | `promptsListChanged` | `notifications/prompts/list_changed` |
   | `:resources` | `resourcesListChanged` | `notifications/resources/list_changed` |
   | `{:resource, uri}` | `resourceSubscriptions` | `notifications/resources/updated` |
+  | `{:task, owner, task_id}` | `taskIds` | `notifications/tasks` |
 
   A resource topic matches its URI exactly: `notify_resource_updated/1` for
   `"file:///a/b"` does not reach a stream subscribed to `"file:///a"`.
+
+  A task topic carries the task's owner (`ConduitMcp.Principal.id/1`, `nil`
+  when unauthenticated), and a stream subscribes under its own principal's
+  id, so a task's changes reach only its owner's streams (SV-1). They are
+  published by `ConduitMcp.Ext.Tasks.ListenNotifier`, the default notifier
+  of `ConduitMcp.Ext.Tasks`.
 
   ## Node-local
 
@@ -61,7 +68,12 @@ defmodule ConduitMcp.Subscriptions do
   alias ConduitMcp.Notifications
 
   @typedoc "What a stream subscribes to; see the Topics table."
-  @type topic :: :tools | :prompts | :resources | {:resource, String.t()}
+  @type topic ::
+          :tools
+          | :prompts
+          | :resources
+          | {:resource, String.t()}
+          | {:task, String.t() | nil, String.t()}
 
   @doc """
   The child spec of the registry, started by `ConduitMcp.Application`.
@@ -129,6 +141,13 @@ defmodule ConduitMcp.Subscriptions do
   def subscribers(topic) do
     for {pid, _ref} <- Registry.lookup(__MODULE__, topic), do: pid
   end
+
+  @doc """
+  The topic of `task_id`'s changes for streams of the principal `owner`
+  (`ConduitMcp.Principal.id/1`; `nil` when unauthenticated).
+  """
+  @spec task_topic(String.t() | nil, String.t()) :: topic()
+  def task_topic(owner, task_id), do: {:task, owner, task_id}
 
   # --- stream-side registration (ConduitMcp.Subscriptions.Stream) -----------
 

@@ -25,7 +25,7 @@ defmodule ConduitMcp.Ext.Tasks do
         store: MyApp.TaskStore,        # default ConduitMcp.Ext.Tasks.EtsStore
         janitor: [interval: 30_000],   # Session.Janitor options, or false
         max_rows: 10_000,              # row cap passed to create/2, or :infinity
-        notifier: MyApp.TaskNotifier   # ConduitMcp.Ext.Tasks.Notifier, optional
+        notifier: MyApp.TaskNotifier   # default ConduitMcp.Ext.Tasks.ListenNotifier; nil for none
 
   The value is validated when `:conduit_mcp` starts. When enabled, the
   application starts `ConduitMcp.Ext.Tasks.EtsStore.Owner` (default store
@@ -103,11 +103,22 @@ defmodule ConduitMcp.Ext.Tasks do
   `{:error, :terminal}`); the worker should check `cancelled?/1` and stop.
 
   Terminal states — `completed`, `failed`, `cancelled` — are final.
+
+  ## Status notifications
+
+  Every change is handed to the configured `ConduitMcp.Ext.Tasks.Notifier`.
+  The default, `ConduitMcp.Ext.Tasks.ListenNotifier`, sends it as
+  `notifications/tasks` (the full task state, `to_wire/1`) to the
+  `subscriptions/listen` streams that named the task in their `taskIds`
+  filter, and only to those whose principal owns the task (SV-1; see
+  `ConduitMcp.Subscriptions.Filter`). A custom notifier replaces it;
+  `notifier: nil` turns notifications off.
   """
 
   require Logger
 
   alias ConduitMcp.Ext.Tasks.EtsStore
+  alias ConduitMcp.Ext.Tasks.ListenNotifier
   alias ConduitMcp.Ext.Tasks.Store
 
   @extension "io.modelcontextprotocol/tasks"
@@ -179,7 +190,7 @@ defmodule ConduitMcp.Ext.Tasks do
     raise ArgumentError,
           "config :conduit_mcp, :ext_tasks accepts true, false or a keyword list of " <>
             "#{inspect(@config_keys)} (store: module, janitor: boolean | keyword, " <>
-            "max_rows: pos_integer | :infinity, notifier: module); got #{inspect(detail)}"
+            "max_rows: pos_integer | :infinity, notifier: module | nil); got #{inspect(detail)}"
   end
 
   # Read at runtime so tests and releases can change it; validated at boot.
@@ -472,7 +483,7 @@ defmodule ConduitMcp.Ext.Tasks do
   defp notified({:error, _reason} = error), do: error
 
   defp notify(record) do
-    case Keyword.get(options() || [], :notifier) do
+    case Keyword.get(options() || [], :notifier, ListenNotifier) do
       nil -> :ok
       notifier -> notifier.task_changed(record)
     end
