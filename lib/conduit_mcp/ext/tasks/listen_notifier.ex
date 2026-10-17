@@ -36,6 +36,11 @@ defmodule ConduitMcp.Ext.Tasks.ListenNotifier do
   alias ConduitMcp.Ext.Tasks
   alias ConduitMcp.Subscriptions
 
+  @doc """
+  Publishes `notifications/tasks` with the task's state to the listen
+  streams of the task's owner. Call it from a custom notifier to keep
+  listen delivery.
+  """
   @impl true
   def task_changed(%{task_id: task_id, owner: owner} = task) do
     Subscriptions.publish(

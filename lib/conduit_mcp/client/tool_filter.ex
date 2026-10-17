@@ -62,8 +62,10 @@ defmodule ConduitMcp.Client.ToolFilter do
   @type pattern ::
           String.t() | {String.t(), Regex.t()} | (Tool.t(), map() -> boolean())
 
+  @typep matcher :: Pattern.matcher()
+
   @typedoc "A compiled filter. Treat as opaque."
-  @type t :: %__MODULE__{include: [Pattern.matcher()], exclude: [Pattern.matcher()]}
+  @type t :: %__MODULE__{include: [matcher()], exclude: [matcher()]}
 
   @allowed [:name, :regex, :fun]
 

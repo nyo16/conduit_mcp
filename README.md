@@ -2,17 +2,18 @@
 
 # ConduitMCP
 
-An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) specification (2025-11-25). Build MCP servers to expose tools, resources, and prompts to LLM applications like Claude Desktop, VS Code, and Cursor.
+An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) specification, serving both protocol eras from one server: modern **2026-07-28** and legacy **2025-11-25** / **2025-06-18**. Build MCP servers to expose tools, resources, and prompts to LLM applications like Claude Desktop, VS Code, and Cursor — and connect to MCP servers from Elixir with the built-in client.
 
 [![CI](https://github.com/nyo16/conduit_mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/nyo16/conduit_mcp/actions/workflows/ci.yml)
 [![Hex.pm](https://img.shields.io/hexpm/v/conduit_mcp.svg)](https://hex.pm/packages/conduit_mcp)
-[![MCP Spec](https://img.shields.io/badge/MCP-2025--11--25-purple)]()
+[![MCP Spec](https://img.shields.io/badge/MCP-2026--07--28%20%2B%202025--11--25%20%2F%202025--06--18-purple)](https://modelcontextprotocol.io/specification/)
 
 ## Features
 
 - **MCP Apps** — Tools can return interactive UI rendered as sandboxed iframes in host clients
 - **Three Ways to Build** — DSL macros, raw callbacks, or component modules — pick your level of control
-- **Full MCP Spec** — Tools, resources, prompts, completion, logging, subscriptions (MCP 2025-11-25 + 2025-06-18)
+- **Dual-era MCP** — One server answers modern 2026-07-28 clients (`server/discover`, MRTR, `subscriptions/listen`, streamed responses, cache hints, header validation) and legacy 2025-11-25 / 2025-06-18 clients; the era is chosen per request
+- **MCP Client** — Supervised client for stdio and Streamable HTTP servers in both eras, with a multi-server hub, policy and hooks, LLM provider adapters, and OAuth 2.1
 - **Runtime Validation** — NimbleOptions-powered param validation with type coercion and custom constraints
 - **Stateless Architecture** — Pure functions, no processes, maximum concurrency via Bandit
 - **Authentication** — Bearer tokens, API keys, OAuth 2.1 (RFC 9728), custom verification
@@ -27,7 +28,7 @@ An Elixir implementation of the [Model Context Protocol (MCP)](https://modelcont
 ```elixir
 def deps do
   [
-    {:conduit_mcp, "~> 0.10"}
+    {:conduit_mcp, "~> 0.11"}
   ]
 end
 ```
@@ -46,6 +47,8 @@ need before you configure the feature:
 | `ConduitMcp.OAuth.KeyProvider.JWKS` — fetch signing keys from a JWKS URI | `:req` | `{:req, "~> 0.6.1 or ~> 0.7"}` |
 | `ConduitMcp.Plugs.RateLimit` / `ConduitMcp.Plugs.MessageRateLimit` ([guide](guides/rate_limiting.md)) | `:hammer` | `{:hammer, "~> 7.2"}` |
 | `ConduitMcp.PromEx` — Prometheus metrics | `:prom_ex` | `{:prom_ex, "~> 1.11"}` |
+| Client Streamable HTTP transport and client OAuth ([guide](guides/client.md)) | `:finch` | `{:finch, "~> 0.21"}` |
+| Client JSON Schema validation (`validate:`) ([guide](guides/client_permissions_and_hooks.md)) | `:jsv` | `{:jsv, "~> 0.26"}` |
 
 > **Adding one of these later requires a forced rebuild.** These modules are
 > guarded by `if Code.ensure_loaded?(Dep)`, which is evaluated once — when
@@ -100,11 +103,14 @@ For multi-tool servers, authentication, sessions, OAuth, MCP Apps, and more, see
 
 ConduitMCP is pre-1.0. Most APIs are stable; the following are explicitly experimental and may change before 1.0:
 
-- `ConduitMcp.Tasks` and `ConduitMcp.Tasks.Janitor` — task lifecycle is new in MCP spec 2025-11-25 and the surface area may evolve.
-- `ConduitMcp.Client` — message builders for server-to-client requests (sampling, elicitation, roots). The bidirectional transport these depend on is not yet wired through Streamable HTTP.
+- `ConduitMcp.Tasks` and `ConduitMcp.Tasks.Janitor` — legacy (2025-11-25) task lifecycle. Frozen: no new features; modern servers use `ConduitMcp.Ext.Tasks`.
+- `ConduitMcp.Ext.Tasks` — the `io.modelcontextprotocol/tasks` extension for 2026-07-28. Off by default and experimental while the extension itself evolves.
+- `ConduitMcp.Client.Adapters.Gemini` — the Gemini function-calling adapter is experimental; the Anthropic and OpenAI adapters are not.
 - `ConduitMcp.Cancellation` — the cooperative cancellation model may grow a more direct preemption path.
 
 Breaking changes between minor versions will be called out in [CHANGELOG.md](CHANGELOG.md).
+
+Server-to-client input (sampling, elicitation, roots) is built with `ConduitMcp.MRTR` (`elicit/2`, `sample/2`, `list_roots/0`) and returned as `{:input_required, requests, state}`; notification payloads come from `ConduitMcp.Notifications`. `ConduitMcp.Client` is now the MCP client, not a set of message builders.
 
 ## Three Ways to Define Servers
 
@@ -309,7 +315,8 @@ All tool/resource/prompt handlers return `{:ok, map()}` or `{:error, map()}`. He
 |--------|----------------|----------|
 | `text("hello")` | `{:ok, %{"content" => [%{"type" => "text", "text" => "hello"}]}}` | Plain text responses |
 | `json(%{a: 1})` | `{:ok, %{"content" => [%{"type" => "text", "text" => "{\"a\":1}"}]}}` | Structured data (Jason-encoded) |
-| `image(base64_data)` | `{:ok, %{"content" => [%{"type" => "image", "data" => ...}]}}` | Images (base64) |
+| `image(url_or_base64)` | `{:ok, %{"content" => [%{"type" => "image", ...}]}}` | A URL becomes a `resource_link`; PNG/JPEG/GIF/WebP base64 gets its `mimeType` |
+| `image(data, "image/png")` | `{:ok, %{"content" => [%{"type" => "image", "data" => ..., "mimeType" => ...}]}}` | Images with an explicit MIME type |
 | `audio(data, "audio/wav")` | `{:ok, %{"content" => [%{"type" => "audio", "data" => ..., "mimeType" => ...}]}}` | Audio clips |
 | `error("fail")` | `{:error, %{"code" => -32000, "message" => "fail"}}` | Error with default code |
 | `error("fail", -32602)` | `{:error, %{"code" => -32602, "message" => "fail"}}` | Error with custom code |
@@ -370,7 +377,9 @@ Standard JSON-RPC 2.0 error codes used by the protocol:
 | `-32602` | Invalid params |
 | `-32603` | Internal error |
 | `-32000` | Tool/server error (default for `error/1`) |
-| `-32002` | Resource not found |
+| `-32002` | Resource not found (legacy era; modern 2026-07-28 clients receive `-32602`) |
+
+Return `ConduitMcp.Protocol.Legacy.resource_not_found()` from `handle_read_resource/2`; the library rewrites it to `-32602` for modern requests. The modern era also uses `-32020` (header mismatch), `-32021` (missing client capability) and `-32022` (unsupported protocol version), from `ConduitMcp.Errors`.
 
 ## Parameter Validation
 
@@ -553,23 +562,76 @@ Optional Prometheus metrics via `ConduitMcp.PromEx` — see module docs.
 }
 ```
 
+## Building an MCP client
+
+`ConduitMcp.Client` is one supervised connection to one MCP server. It probes `server/discover` and falls back to `initialize`, so it talks to modern and legacy servers alike. The application starts no clients; add them to your own supervision tree.
+
+```elixir
+children = [
+  # A local server over stdio (no shell; allowlisted environment)
+  {ConduitMcp.Client,
+   name: MyApp.Files,
+   transport:
+     {ConduitMcp.Client.Transport.Stdio,
+      command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "/srv/data"]}},
+
+  # A remote server over Streamable HTTP (needs :finch)
+  {ConduitMcp.Client,
+   name: MyApp.GitHub,
+   transport: {ConduitMcp.Client.Transport.StreamableHTTP, url: "https://mcp.example.com/mcp"}}
+]
+
+:ok = ConduitMcp.Client.await_ready(MyApp.Files, 10_000)
+{:ok, tools} = ConduitMcp.Client.list_all_tools(MyApp.Files)
+{:ok, result} = ConduitMcp.Client.call_tool(MyApp.Files, "read_file", %{"path" => "/srv/data/a.txt"})
+```
+
+To give a model the tools of several servers, run a `ConduitMcp.Client.Hub`. It requires a `:policy`, names tools `server__tool`, and routes every call through the governed pipeline (policy, approval, hooks):
+
+```elixir
+{ConduitMcp.Client.Hub,
+ name: MyApp.Hub,
+ policy: [deny: ["*/delete_*"], allow: ["github/get_*", "fs/read_*"]],
+ servers: [
+   github: [transport: {ConduitMcp.Client.Transport.StreamableHTTP, url: "https://mcp.example.com/mcp"}],
+   fs: [transport: {ConduitMcp.Client.Transport.Stdio, command: "mcp-fs"}]
+ ]}
+
+{:ok, toolset} = ConduitMcp.Client.Hub.list_tools(MyApp.Hub)
+{:ok, result} = ConduitMcp.Client.Hub.call_tool(MyApp.Hub, "github__get_issue", %{"number" => 1}, toolset: toolset)
+```
+
+Guides: [Client](guides/client.md), [Permissions and hooks](guides/client_permissions_and_hooks.md), [Hub](guides/client_hub.md), [LLM adapters](guides/client_llm_adapters.md) (Anthropic, OpenAI, Gemini), [OAuth](guides/client_oauth.md), [Security](guides/client_security.md).
+
 ## MCP Spec Coverage
 
-ConduitMCP implements the full [MCP specification](https://modelcontextprotocol.io/specification/):
+ConduitMCP implements the [MCP specification](https://modelcontextprotocol.io/specification/) in both eras. The server picks the era per request; the client negotiates it per connection.
 
 | Feature | Status | Spec Version |
 |---------|--------|-------------|
-| Tools (list, call) | Supported | 2025-06-18 |
-| Resources (list, read, subscribe) | Supported | 2025-06-18 |
-| Prompts (list, get) | Supported | 2025-06-18 |
-| Completion | Supported | 2025-06-18 |
-| Logging | Supported | 2025-06-18 |
-| Protocol negotiation | Supported | 2025-11-25 |
+| Tools (list, call) | Supported | 2025-06-18, 2026-07-28 |
+| Resources (list, read, templates) | Supported | 2025-06-18, 2026-07-28 |
+| Prompts (list, get) | Supported | 2025-06-18, 2026-07-28 |
+| Completion | Supported | 2025-06-18, 2026-07-28 |
+| Logging | Supported | 2025-06-18 (`logging/setLevel`), 2026-07-28 (per-request `logLevel`) |
+| Protocol negotiation (`initialize`) | Supported | 2025-11-25, 2025-06-18 |
+| `server/discover` | Supported | 2026-07-28 |
 | Session management | Supported | 2025-11-25 |
-| OAuth 2.1 (RFC 9728) | Supported | 2025-11-25 |
-| StreamableHTTP transport | Supported | 2025-11-25 |
+| Resource subscriptions (`resources/subscribe`) | Supported | 2025-06-18 |
+| `subscriptions/listen` (list changes, resource updates, task status) | Supported | 2026-07-28 |
+| Multi round-trip requests (MRTR: elicitation, sampling, roots) | Supported | 2026-07-28 |
+| Streamed tool responses (progress, log notifications) | Supported | 2026-07-28 |
+| Cache hints (`ttlMs`, `cacheScope`) | Supported | 2026-07-28 |
+| Header validation (`Mcp-Method`, `Mcp-Name`, `Mcp-Param-*`) | Supported | 2026-07-28 |
+| Tasks (`tasks/*`) | Supported (frozen) | 2025-11-25 |
+| Tasks extension (`io.modelcontextprotocol/tasks`) | Experimental | 2026-07-28 extension |
+| OAuth 2.1 (RFC 9728) resource server | Supported | 2025-11-25, 2026-07-28 |
+| StreamableHTTP transport | Supported | 2025-11-25, 2026-07-28 |
 | SSE transport (legacy) | Supported | 2025-06-18 |
 | MCP Apps (ext-apps) | Supported | Extension |
+| Client: stdio and Streamable HTTP transports | Supported | 2025-06-18, 2025-11-25, 2026-07-28 |
+| Client: sampling, elicitation, roots, tasks | Supported | 2025-06-18, 2025-11-25, 2026-07-28 |
+| Client: OAuth 2.1 (PKCE, CIMD, DCR, step-up, client credentials) | Supported | 2025-11-25, 2026-07-28 |
 
 ## Guides
 
@@ -580,6 +642,11 @@ ConduitMCP implements the full [MCP specification](https://modelcontextprotocol.
 - [Multi-Node Sessions](guides/multi_node_sessions.md) — Redis, PostgreSQL, Mnesia session stores
 - [Oban Tasks](guides/oban_tasks.md) — Long-running tasks with Oban
 - [MCP Apps](guides/mcp_apps.md) — Interactive UI from MCP tools
+- [Protocol Eras](guides/protocol_eras.md) — How one server serves 2026-07-28 and 2025-11-25 / 2025-06-18
+- [MRTR](guides/mrtr.md) — Asking the client for input from a tool, resource or prompt
+- [Subscriptions](guides/subscriptions.md) — `subscriptions/listen` and `ConduitMcp.notify_*`
+- [Tasks Extension](guides/tasks_extension.md) — `ConduitMcp.Ext.Tasks` (experimental)
+- [Client](guides/client.md), [Hub](guides/client_hub.md), [Permissions and Hooks](guides/client_permissions_and_hooks.md), [LLM Adapters](guides/client_llm_adapters.md), [Client OAuth](guides/client_oauth.md), [Client Security](guides/client_security.md)
 
 ## Documentation
 

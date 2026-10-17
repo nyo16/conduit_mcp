@@ -38,8 +38,8 @@ defmodule ConduitMcp.Transport.SSEStream do
   Every message is received and handed to `:on_message`, so anything a
   callback does not care about is drained and the mailbox cannot grow
   without bound over a long-lived stream. The one exception is
-  `{:bandit, _}`: under HTTP/2 the plug runs inside
-  `Bandit.HTTP2.StreamProcess`, and the connection process delivers
+  `{:bandit, _}`: under HTTP/2 the plug runs inside Bandit's per-stream
+  process (Bandit.HTTP2.StreamProcess), and the connection process delivers
   `{:send_window_update, delta}` and `{:rst_stream, code}` to *this*
   mailbox for `chunk/2` to read back with a selective receive. Draining
   them would discard flow-control credit (eventually a

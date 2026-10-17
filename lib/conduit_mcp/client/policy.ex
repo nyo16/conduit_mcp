@@ -132,8 +132,10 @@ defmodule ConduitMcp.Client.Policy do
             allow_new_tools: false,
             trusted: MapSet.new()
 
+  @typep matcher :: Pattern.matcher()
+
   @typedoc "A compiled rule: its id, matcher, and whether it names one exact target."
-  @type rule :: {term(), Pattern.matcher(), boolean()}
+  @type rule :: {term(), matcher(), boolean()}
 
   @type scope :: :tools | :resources | :prompts
 

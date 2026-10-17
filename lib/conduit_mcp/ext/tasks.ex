@@ -37,8 +37,8 @@ defmodule ConduitMcp.Ext.Tasks do
 
   ## Returning a task
 
-  A `tools/call` callback (`ConduitMcp.Server.handle_call_tool/3`, a DSL
-  `handle`, a `ConduitMcp.Component.execute/2`) returns `{:task, attrs}`:
+  A `tools/call` callback (`c:ConduitMcp.Server.handle_call_tool/3`, a DSL
+  `handle`, a `c:ConduitMcp.Component.execute/2`) returns `{:task, attrs}`:
 
       def handle_call_tool(_conn, "build", %{"ref" => ref}) do
         {:task,

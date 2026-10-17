@@ -107,7 +107,7 @@ defmodule ConduitMcp.OptionalDeps do
 
   @doc """
   Returns the module that runs the client's OAuth flow for a connection
-  (`ConduitMcp.Client.OAuth.Session`, compiled only with `:finch`), raising
+  (an internal module compiled only with `:finch`), raising
   `ConduitMcp.OptionalDependencyError` naming `{:finch, "~> 0.21"}` when it
   was not compiled in. Called when a client configured with
   `auth: {:oauth, ...}` starts.
