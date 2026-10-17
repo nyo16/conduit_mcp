@@ -14,6 +14,11 @@ defmodule ConduitMcp.Client.Transport do
 
   ## Lifecycle
 
+    0. `c:validate_options/1` (optional) - checks the options without side
+       effects when `ConduitMcp.Client.Config.new!/1` runs, so a bad option
+       raises an `ArgumentError` naming it in `child_spec/1` or
+       `start_link/1` instead of failing the connection later. It returns
+       the options `c:init/2` will get (with defaults filled in).
     1. `c:init/2` - once per connection attempt. Validates options and builds
        the state; no I/O. The first call happens while the client starts, so
        an `{:error, reason}` there fails `ConduitMcp.Client.start_link/1`.
@@ -117,6 +122,12 @@ defmodule ConduitMcp.Client.Transport do
   @doc "The transport family; see the moduledoc."
   @callback kind() :: :stdio | :http | :in_process
 
+  @doc """
+  Checks `opts` without side effects; see "Lifecycle" in the moduledoc. The
+  error message names the offending key.
+  """
+  @callback validate_options(opts :: keyword()) :: {:ok, keyword()} | {:error, String.t()}
+
   @doc "Validates `opts` and builds the transport state. Must not block."
   @callback init(opts :: keyword(), init_context()) :: {:ok, state()} | {:error, term()}
 
@@ -154,5 +165,5 @@ defmodule ConduitMcp.Client.Transport do
   @doc "Releases everything the transport holds. Bounded by the connection's shutdown."
   @callback close(state(), reason :: term()) :: :ok
 
-  @optional_callbacks respond: 2, set_session: 2
+  @optional_callbacks respond: 2, set_session: 2, validate_options: 1
 end
