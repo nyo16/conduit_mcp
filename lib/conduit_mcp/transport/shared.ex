@@ -13,11 +13,23 @@ defmodule ConduitMcp.Transport.Shared do
     * the `Plug.Router` pipeline up to the transport-specific plugs,
     * `init/1` and `call/2`,
     * the shared plug functions (`add_cors_headers`, `authenticate`,
-      `rate_limit`, `message_rate_limit`),
+      `rate_limit`, `classify_era`, `message_rate_limit`),
 
   and `shared_routes/0` generates the shared routes (`options _`,
   `get "/health"`, `get "/.well-known/oauth-protected-resource"`, `match _`).
   No function body exists in both transports.
+
+  ## Protocol eras
+
+  `classify_era` runs on POST and DELETE after `authenticate` and
+  `rate_limit`, and before `message_rate_limit`, so a request it rejects is
+  never counted against the client. It runs
+  `ConduitMcp.Plugs.HeaderValidation`, which classifies the body
+  (`ConduitMcp.Era.classify/2`): a modern request has its
+  `ConduitMcp.Ctx` stored and its request-metadata headers validated (any
+  rejection is HTTP 400); a legacy request whose `MCP-Protocol-Version`
+  header names an unsupported version is answered 400 (`initialize`
+  excepted). `dispatch_post/2` then dispatches each era its own way.
 
   ## Plugs are resolved once
 
@@ -45,12 +57,15 @@ defmodule ConduitMcp.Transport.Shared do
 
   require Logger
 
+  alias ConduitMcp.Ctx
   alias ConduitMcp.Handler
   alias ConduitMcp.Handler.Common
   alias ConduitMcp.OptionalDeps
   alias ConduitMcp.Plugs
   alias ConduitMcp.Protocol
   alias ConduitMcp.Reflect
+  alias ConduitMcp.StreamSpec
+  alias ConduitMcp.Transport.ResponseStream
 
   import Plug.Conn
 
@@ -84,6 +99,9 @@ defmodule ConduitMcp.Transport.Shared do
       plug(Plug.Parsers, parsers: [:json], json_decoder: JSON, length: 1_000_000)
       plug(:authenticate)
       plug(:rate_limit)
+      # Before `:message_rate_limit`, so a request rejected for its era
+      # metadata or headers is never counted against the client.
+      plug(:classify_era)
       plug(:message_rate_limit)
 
       for extra <- unquote(extra_plugs) do
@@ -114,6 +132,7 @@ defmodule ConduitMcp.Transport.Shared do
       defp add_cors_headers(conn, _opts), do: Shared.add_cors_headers(conn)
       defp authenticate(conn, _opts), do: Shared.authenticate(conn)
       defp rate_limit(conn, _opts), do: Shared.run_plug(conn, :rate_limit_plug)
+      defp classify_era(conn, _opts), do: Shared.classify_era(conn)
 
       defp message_rate_limit(conn, _opts),
         do: Shared.run_plug(conn, :message_rate_limit_plug)
@@ -352,7 +371,32 @@ defmodule ConduitMcp.Transport.Shared do
       instructions: Keyword.get(opts, :instructions)
     }
 
-    Map.merge(shared, transport.__transport_private__(opts))
+    shared
+    |> Map.merge(stream_private(opts))
+    |> Map.merge(transport.__transport_private__(opts))
+  end
+
+  @stream_defaults [
+    keep_alive_interval: 15_000,
+    max_streams: 1_000,
+    max_stream_lifetime: :timer.hours(1),
+    stream_cancel_timeout: 5_000
+  ]
+
+  # The bounds of every SSE stream these transports hold open (see
+  # `ConduitMcp.Transport.SSEStream`). Checked at boot: a non-integer
+  # compares greater than every count and every deadline, so it would
+  # silently disable the bound.
+  defp stream_private(opts) do
+    Map.new(@stream_defaults, fn {key, default} ->
+      case Keyword.get(opts, key, default) do
+        value when is_integer(value) and value > 0 ->
+          {key, value}
+
+        value ->
+          raise ArgumentError, "#{inspect(key)} must be a positive integer; got #{inspect(value)}"
+      end
+    end)
   end
 
   # --- call/2 -----------------------------------------------------------
@@ -426,20 +470,104 @@ defmodule ConduitMcp.Transport.Shared do
     end
   end
 
+  @doc false
+  # The `:classify_era` plug, run on POST and DELETE after authentication and
+  # before `:message_rate_limit`.
+  #
+  # `ConduitMcp.Plugs.HeaderValidation` classifies the body
+  # (`ConduitMcp.Era.classify/2`). A modern request has its `ConduitMcp.Ctx`
+  # stored and its `MCP-Protocol-Version` / `Mcp-*` headers validated; every
+  # rejection is a 400 with a modern JSON-RPC error. A legacy request gets
+  # check_legacy_version/1. Its context is built later, by the handler, once
+  # `:validate_session` has resolved its session.
+  @spec classify_era(Plug.Conn.t()) :: Plug.Conn.t()
+  def classify_era(%Plug.Conn{method: method} = conn) when method in ["POST", "DELETE"] do
+    conn = Plugs.HeaderValidation.call(conn, [])
+
+    if conn.halted or modern?(conn), do: conn, else: check_legacy_version(conn)
+  end
+
+  def classify_era(conn), do: conn
+
+  @doc false
+  # Whether `:classify_era` classified this request as modern. The modern
+  # path skips `:validate_session` and never mints a session.
+  @spec modern?(Plug.Conn.t()) :: boolean()
+  def modern?(conn), do: match?(%Ctx{era: :modern}, Ctx.from_conn(conn))
+
+  # 2025-11-25 (and 2025-06-18) Streamable HTTP: a request whose
+  # `MCP-Protocol-Version` names an invalid or unsupported version MUST get
+  # 400 Bad Request; a request without the header is served as before (the
+  # specification's default is 2025-03-26 when the server cannot tell the
+  # version otherwise). `initialize` is exempt: the header is defined for the
+  # requests *after* initialization, and a client probing with a newer header
+  # must reach version negotiation, not a 400.
+  defp check_legacy_version(conn) do
+    case get_req_header(conn, "mcp-protocol-version") do
+      [] ->
+        conn
+
+      [version] when is_binary(version) ->
+        if version in Protocol.supported_versions() or initialize?(conn),
+          do: conn,
+          else: reject_legacy_version(conn)
+
+      _several ->
+        if initialize?(conn), do: conn, else: reject_legacy_version(conn)
+    end
+  end
+
+  defp initialize?(%Plug.Conn{body_params: %{"method" => "initialize"}}), do: true
+  defp initialize?(_conn), do: false
+
+  # The rejected value is never echoed: it is client input.
+  defp reject_legacy_version(conn) do
+    id =
+      case conn.body_params do
+        %{"id" => id} when is_binary(id) or is_integer(id) -> id
+        _ -> nil
+      end
+
+    conn
+    |> send_json(
+      400,
+      Protocol.error_response(
+        id,
+        Protocol.invalid_request(),
+        "Unsupported MCP-Protocol-Version header",
+        %{"supported" => Protocol.supported_versions()}
+      )
+    )
+    |> halt()
+  end
+
   @doc """
   The shared JSON-RPC POST body dispatch.
 
   A notification or a JSON-RPC response is answered `202 Accepted` with no
   body. A request is answered with its JSON-RPC response and an
-  `mcp-protocol-version` header (see `put_protocol_version_header/2`) — at
-  HTTP 200, except that under `strategy: :oauth` an insufficient-scope error
-  is answered 403 with an `insufficient_scope` Bearer challenge
-  (`ConduitMcp.Plugs.OAuth.forbidden/4`), so the client can step up.
+  `mcp-protocol-version` header (see `put_protocol_version_header/2`).
 
-  `prepare` runs after a successful response map is produced and before it is
-  sent, so a transport can attach transport-specific headers or state. It
-  returns `{:ok, conn}` to continue, or `{:error, conn}` when it has already
-  sent a response of its own.
+  A **legacy** request's response is sent at HTTP 200, except that under
+  `strategy: :oauth` an insufficient-scope error is answered 403 with an
+  `insufficient_scope` Bearer challenge (`ConduitMcp.Plugs.OAuth.forbidden/4`),
+  so the client can step up.
+
+  A **modern** request (one the `:classify_era` plug stored a modern
+  `ConduitMcp.Ctx` for) is dispatched with `ConduitMcp.Handler.dispatch/3`.
+  Its response is sent at `ConduitMcp.Protocol.Modern.http_status/1` (400
+  for `-32020`/`-32021`/`-32022`, 404 for an unknown method, else 200), with
+  the same 403 challenge. A `{:stream, spec}` dispatch — a `tools/call`
+  asking for progress or log notifications — is answered as a Server-Sent
+  Events stream when the request's `Accept` includes `text/event-stream`
+  (see `ConduitMcp.StreamSpec`), otherwise as plain JSON with its
+  notifications dropped. `prepare` never runs for a modern request: the
+  modern era has no sessions to mint.
+
+  `prepare` runs after a successful legacy response map is produced and
+  before it is sent, so a transport can attach transport-specific headers or
+  state. It returns `{:ok, conn}` to continue, or `{:error, conn}` when it
+  has already sent a response of its own.
   """
   @spec dispatch_post(Plug.Conn.t(), (Plug.Conn.t(), map() ->
                                         {:ok, Plug.Conn.t()} | {:error, Plug.Conn.t()})) ::
@@ -452,9 +580,15 @@ defmodule ConduitMcp.Transport.Shared do
           id: Reflect.text(params["id"], 64)
         )
 
-        params
-        |> Handler.handle_request(conn.private[:server_module], conn)
-        |> send_reply(conn, prepare)
+        case Ctx.from_conn(conn) do
+          %Ctx{era: :modern} = ctx ->
+            dispatch_modern(conn, params, ctx)
+
+          _legacy ->
+            params
+            |> Handler.handle_request(conn.private[:server_module], conn)
+            |> send_reply(conn, prepare)
+        end
 
       _ ->
         send_json(
@@ -467,6 +601,40 @@ defmodule ConduitMcp.Transport.Shared do
           )
         )
     end
+  end
+
+  defp dispatch_modern(conn, params, ctx) do
+    case Handler.dispatch(params, conn.private[:server_module], ctx) do
+      :noreply ->
+        send_resp(conn, 202, "")
+
+      {:reply, response} ->
+        send_modern_reply(conn, response)
+
+      {:stream, spec} ->
+        if accepts_event_stream?(conn) do
+          conn
+          |> put_protocol_version_header(%{})
+          |> ResponseStream.run(spec, &send_modern_reply/2)
+        else
+          send_modern_reply(conn, StreamSpec.run(spec))
+        end
+    end
+  end
+
+  defp send_modern_reply(conn, response) do
+    conn = put_protocol_version_header(conn, response)
+
+    case insufficient_scope_challenge(conn, response) do
+      {:sent, conn} -> conn
+      :continue -> send_json(conn, Protocol.Modern.http_status(response), response)
+    end
+  end
+
+  defp accepts_event_stream?(conn) do
+    conn
+    |> get_req_header("accept")
+    |> Enum.any?(&String.contains?(&1, "text/event-stream"))
   end
 
   # A notification or a client's response: accepted, nothing to return.
@@ -508,17 +676,24 @@ defmodule ConduitMcp.Transport.Shared do
   @doc """
   Sets `mcp-protocol-version` on the response to request `response_map`.
 
-  The value is the version this connection negotiated, most specific source
-  first: an `initialize` result's own `protocolVersion`; then the version
-  recorded on the request's session; then the request's
-  `mcp-protocol-version` header; then `ConduitMcp.Protocol.protocol_version/0`.
-  A session or header value is used only when it is in
-  `ConduitMcp.Protocol.supported_versions/0`, so client input is never echoed
-  unvalidated.
+  A modern request is answered with the version its `_meta` named (already
+  validated by `ConduitMcp.Plugs.HeaderValidation`). Otherwise the value is
+  the version this connection negotiated, most specific source first: an
+  `initialize` result's own `protocolVersion`; then the version recorded on
+  the request's session; then the request's `mcp-protocol-version` header;
+  then `ConduitMcp.Protocol.protocol_version/0`. A session or header value is
+  used only when it is in `ConduitMcp.Protocol.supported_versions/0`, so
+  client input is never echoed unvalidated.
   """
   @spec put_protocol_version_header(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def put_protocol_version_header(conn, response_map) do
-    put_resp_header(conn, "mcp-protocol-version", negotiated_version(conn, response_map))
+    version =
+      case Ctx.from_conn(conn) do
+        %Ctx{era: :modern, version: version} when is_binary(version) -> version
+        _ -> negotiated_version(conn, response_map)
+      end
+
+    put_resp_header(conn, "mcp-protocol-version", version)
   end
 
   defp negotiated_version(

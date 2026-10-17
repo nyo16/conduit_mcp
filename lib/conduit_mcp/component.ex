@@ -156,6 +156,7 @@ defmodule ConduitMcp.Component do
 
     # Build schemas from fields at compile time
     json_schema = build_json_schema(type, name, description, fields, opts)
+    validate_headers!(type, name, json_schema, fields, module)
     validation_schema = build_validation_schema(fields)
 
     quote do
@@ -182,6 +183,15 @@ defmodule ConduitMcp.Component do
       def __component_opts__, do: unquote(opts)
     end
   end
+
+  # `header:` is checked once the schema is final, here rather than in
+  # `ConduitMcp.Component.Schema.field/5`: a duplicate name is a property of
+  # the whole schema, which no single field sees.
+  defp validate_headers!(:tool, _name, json_schema, _fields, module),
+    do: ConduitMcp.DSL.__validate_x_mcp_headers__!(module, json_schema)
+
+  defp validate_headers!(type, name, _json_schema, fields, module),
+    do: ConduitMcp.DSL.__reject_headers__!(module, to_string(type), name, fields)
 
   @doc false
   def __derive_name__(module, nil) do

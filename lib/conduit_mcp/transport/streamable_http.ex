@@ -24,6 +24,34 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     validated exactly like a POST: an unknown session id is 404, a missing
     one 400. With sessions off it is **405**.
 
+  ## Protocol eras
+
+  `POST /` serves both eras; the request body decides
+  (`ConduitMcp.Era.classify/2`), after authentication and before the
+  message rate limit:
+
+  - **Modern** (`2026-07-28`, `_meta` carries the protocol version and
+    client capabilities): `ConduitMcp.Plugs.HeaderValidation` checks
+    `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` and `Mcp-Param-*`
+    against the body; every rejection is HTTP 400 and is not counted by
+    `:message_rate_limit`. No session is ever minted or required, and
+    `Mcp-Session-Id` and `Last-Event-ID` are ignored — except that a session
+    id naming a live session bound to another principal is rejected (400).
+    The response echoes the request's version in `mcp-protocol-version` and
+    is sent at `ConduitMcp.Protocol.Modern.http_status/1`. A `tools/call`
+    whose `_meta` carries a `progressToken` or a `logLevel`, from a client
+    whose `Accept` includes `text/event-stream`, may be answered as a
+    Server-Sent Events stream: `notifications/progress` and
+    `notifications/message` (`ConduitMcp.Progress`, `ConduitMcp.Log`), `:\\r\\n`
+    keep-alive comments, then the response. Closing that stream cancels
+    the request (`ConduitMcp.Cancellation`).
+  - **Legacy** (`2025-11-25`, `2025-06-18`): sessions, `initialize`, and
+    JSON responses as before. A request whose `MCP-Protocol-Version` header
+    names a version this server does not support is answered **400**
+    (`initialize` excepted); a request without the header is served.
+
+  GET and DELETE carry no `_meta` and keep legacy semantics.
+
   ## Differences from `ConduitMcp.Transport.SSE`
 
   - **Sessions are Streamable-HTTP-only, by design.** `Mcp-Session-Id` is
@@ -46,6 +74,21 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   - `:rate_limit` — HTTP-level rate limit configuration. See `ConduitMcp.Plugs.RateLimit`.
   - `:message_rate_limit` — per-message rate limit configuration. See
     `ConduitMcp.Plugs.MessageRateLimit`.
+  - `:keep_alive_interval` — milliseconds between `:\\r\\n` keep-alive
+    comments on a streamed response (default: 15 000).
+  - `:max_streams` — maximum concurrent streamed responses (default:
+    1 000). A response that would open a stream past the cap is sent as
+    plain JSON instead, without its notifications.
+  - `:max_stream_lifetime` — milliseconds after which a streamed request is
+    cancelled (default: 1 hour); its response is then `-32603` unless the
+    tool returns within `:stream_cancel_timeout`.
+  - `:stream_cancel_timeout` — milliseconds a cancelled streamed request's
+    tool (client disconnect or `:max_stream_lifetime`) gets to notice
+    `ConduitMcp.Cancellation.cancelled?/1` and return before it is killed
+    (default: 5 000).
+
+    These four must be positive integers; anything else raises
+    `ArgumentError` at `init/1`.
   - `:session` — session-store configuration, a keyword list. **Sessions are
     off unless configured**: omitting `:session` (or passing `session: false`)
     means no `Mcp-Session-Id` is issued or checked. Pass `session: []` to
@@ -152,10 +195,16 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   # already rejected anything but that, `nil` or `false`. Matches
   # `create_session_for_initialize/2`. `DELETE` is validated exactly like a
   # POST, so a session can only be ended by a request that could have used it.
+  #
+  # A modern (`2026-07-28`) request has no session: `Mcp-Session-Id` is
+  # ignored - neither required nor looked up, so an unknown id is not a 404 -
+  # except that `ConduitMcp.Era.classify/2` has already checked a live
+  # session's principal binding (R12).
   defp validate_session(conn, _opts) do
     session_config = conn.private[:session_config]
 
-    if is_list(session_config) and conn.method in ["POST", "DELETE"] do
+    if is_list(session_config) and conn.method in ["POST", "DELETE"] and
+         not Shared.modern?(conn) do
       validate_session_header(conn, session_config)
     else
       conn

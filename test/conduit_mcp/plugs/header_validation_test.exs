@@ -119,10 +119,12 @@ defmodule ConduitMcp.Plugs.HeaderValidationTest do
     do: req("tools/call", %{"name" => name, "arguments" => args})
 
   describe "pass-through" do
-    test "legacy request passes untouched without headers" do
+    test "legacy request passes untouched without headers, and stores no context" do
       conn = run(req("tools/list", %{}, nil), [])
       refute conn.halted
       assert conn.status == nil
+      # Its context depends on the session a later transport plug resolves.
+      assert Ctx.from_conn(conn) == nil
     end
 
     test "era-exempt server/discover without _meta passes without headers" do
@@ -307,11 +309,20 @@ defmodule ConduitMcp.Plugs.HeaderValidationTest do
              ]).halted
     end
 
-    test "tool with invalid annotation is ignored" do
-      refute run(
-               call_req(%{"ratio" => 1.5}, "bad"),
-               std("tools/call", [{"mcp-name", "bad"}])
-             ).halted
+    test "tool with invalid annotation is excluded, and logged when the cache is built" do
+      HeaderValidation.invalidate(ParamServer)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          refute run(
+                   call_req(%{"ratio" => 1.5}, "bad"),
+                   std("tools/call", [{"mcp-name", "bad"}])
+                 ).halted
+        end)
+
+      assert log =~ ~s(tool "bad" has invalid x-mcp-header annotations)
+      assert log =~ ~s(x-mcp-header "Ratio" at #/properties/ratio)
+      refute log =~ "1.5"
     end
   end
 

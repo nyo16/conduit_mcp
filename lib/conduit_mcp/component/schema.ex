@@ -49,6 +49,13 @@ defmodule ConduitMcp.Component.Schema do
     nested fields and `true` when it does not, and drives
     `"additionalProperties"` in the generated JSON Schema so the published
     schema matches what is enforced.
+  - `header: "Name"` — Tool components only: publishes `"x-mcp-header":
+    "Name"` on the property, so `2026-07-28` clients mirror the argument
+    into an `Mcp-Param-Name` request header (see `ConduitMcp.DSL.param/4`).
+    The component fails to compile unless the annotation is valid: a
+    top-level or nested-object `:string`, `:integer` or `:boolean` field
+    (never inside array `items`), with a name that is an RFC 9110 token
+    unique case-insensitively within the component.
 
   ## Nested Objects and Array Items
 
@@ -133,6 +140,7 @@ defmodule ConduitMcp.Component.Schema do
 
   defmacro field(name, type, description, opts, nil) do
     assert_no_block!(name, description, opts, __CALLER__)
+    {description, opts} = split_blockless_opts(description, opts)
 
     quote do
       field_def = %{
@@ -156,6 +164,11 @@ defmodule ConduitMcp.Component.Schema do
   defp split_description_opts([]), do: {nil, []}
   defp split_description_opts([{key, _} | _] = opts) when is_atom(key), do: {nil, opts}
   defp split_description_opts(description), do: {description, []}
+
+  # The blockless form has the same trap: `field :region, :string, header:
+  # "Region"` leaves `opts` empty and the keywords in the description position.
+  defp split_blockless_opts(description, []), do: split_description_opts(description)
+  defp split_blockless_opts(description, opts), do: {description, opts}
 
   # The clauses that route a trailing `[do: ...]` to the block form depend on
   # argument positions that only the default-injecting header produces. Change a
