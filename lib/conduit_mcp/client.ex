@@ -159,7 +159,14 @@ defmodule ConduitMcp.Client do
   `:closed` state and is `nil` otherwise.
   """
   @type status :: %{
-          state: :connecting | :discovering | :initializing | :ready | :reconnecting | :closed,
+          state:
+            :connecting
+            | :discovering
+            | :initializing
+            | :ready
+            | :authorizing
+            | :reconnecting
+            | :closed,
           era: :modern | :legacy | nil,
           version: String.t() | nil,
           reason: term()

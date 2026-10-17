@@ -17,8 +17,9 @@ defmodule ConduitMcp.Client.Registry do
       and the request functions read both without messaging the
       connection.
     * `{:token_store, name}` - a `ConduitMcp.Client.OAuth.TokenStore.ETS`
-      (`name` is `{:client, client_name}` for a client's default store).
-      Its value is the id of its `:protected` table, read directly.
+      (`name` is `{:client, client_name}` for a client's default store,
+      `{:hub, hub_name}` for a hub's shared one). Its value is the id of its
+      `:protected` table, read directly.
 
   A `ConduitMcp.Client.Hub` registers under its `:name` too:
 

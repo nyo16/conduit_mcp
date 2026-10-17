@@ -110,7 +110,8 @@ defmodule ConduitMcp.Client.OAuth.Config do
               doc: """
               The `ConduitMcp.Client.OAuth.TokenStore` as `{module, opts}`.
               Default: an in-memory `ConduitMcp.Client.OAuth.TokenStore.ETS`
-              started under the client's supervisor.
+              started under the client's supervisor, or, for a
+              `ConduitMcp.Client.Hub` server, the hub's, shared by its servers.
               """
             ],
             on_authorization_required: [

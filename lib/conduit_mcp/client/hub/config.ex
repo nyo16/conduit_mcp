@@ -109,6 +109,8 @@ defmodule ConduitMcp.Client.Hub.Config do
   """
 
   alias ConduitMcp.Client.{Backoff, Config, Hooks, Naming, Policy, ToolFilter}
+  alias ConduitMcp.Client.OAuth.Config, as: OAuthConfig
+  alias ConduitMcp.Client.OAuth.TokenStore
 
   @governance_keys [
     :policy,
@@ -185,7 +187,9 @@ defmodule ConduitMcp.Client.Hub.Config do
   @doc """
   The `ConduitMcp.Client` config of server `server_id` of the hub: the hub's
   governance options overridden by `opts` (hooks and filters combined), named
-  `{:hub_server, hub, server_id}`. Raises `ArgumentError` on a bad option.
+  `{:hub_server, hub, server_id}`, with the hub's token store
+  (`token_store/1`) when its OAuth options name no `:store`. Raises
+  `ArgumentError` on a bad option.
   """
   @spec server_config!(t(), String.t(), keyword()) :: Config.t()
   def server_config!(%__MODULE__{} = hub, server_id, opts) when is_list(opts) do
@@ -216,16 +220,37 @@ defmodule ConduitMcp.Client.Hub.Config do
           policy
       end
 
-    Config.new!(
-      [name: {:hub_server, hub.name, server_id}, server_id: server_id] ++
-        Keyword.put(merged, :policy, policy)
-    )
+    [name: {:hub_server, hub.name, server_id}, server_id: server_id]
+    |> Kernel.++(Keyword.put(merged, :policy, policy))
+    |> Config.new!()
+    |> share_token_store(hub.name)
   end
 
   def server_config!(_hub, server_id, opts) do
     raise ArgumentError,
           "options for hub server #{inspect(server_id)} must be a keyword list, " <>
             "got: #{inspect(opts)}"
+  end
+
+  @doc """
+  The in-memory `ConduitMcp.Client.OAuth.TokenStore.ETS` that hub `name`
+  starts and gives every server whose OAuth options name no `:store`.
+  """
+  @spec token_store(term()) :: TokenStore.store()
+  def token_store(name), do: {TokenStore.ETS, name: {:hub, name}}
+
+  # The transport has already turned `auth: {:oauth | :client_credentials,
+  # opts}` into `{:oauth, %OAuth.Config{}}`; with no store there, the client
+  # would start its own, lost with it.
+  defp share_token_store(%Config{transport: {module, opts}} = config, hub_name) do
+    case opts[:auth] do
+      {:oauth, %OAuthConfig{store: nil} = oauth} ->
+        auth = {:oauth, %{oauth | store: token_store(hub_name)}}
+        %{config | transport: {module, Keyword.put(opts, :auth, auth)}}
+
+      _other ->
+        config
+    end
   end
 
   # Both levels as keyword lists, merged per event (hub hooks first), so the

@@ -30,7 +30,7 @@ calls (policy, hooks, approvals) is covered in
 [client_permissions_and_hooks.md](client_permissions_and_hooks.md), handing
 tools to a model in [client_llm_adapters.md](client_llm_adapters.md), and
 the threat model in [client_security.md](client_security.md). OAuth is
-covered in the client OAuth guide (`client_oauth.md`).
+covered in [client_oauth.md](client_oauth.md).
 
 ## Starting a client
 
@@ -552,7 +552,7 @@ it starts.
 | Option | Default | Meaning |
 |---|---|---|
 | `:url` | required | The MCP endpoint: an absolute `http`/`https` URL, no user info, no fragment |
-| `:auth` | `nil` | `{:bearer, token}` (a string or a `ConduitMcp.Client.Secret`), or a one-arity function called before each request with `%{url: url, method: method}`, returning `{:ok, token}`, `{:ok, nil}` or `{:error, reason}` (the request fails with `kind: :auth`). Never sent over `http` to a non-loopback host: that configuration raises |
+| `:auth` | `nil` | `{:bearer, token}` (a string or a `ConduitMcp.Client.Secret`), or a one-arity function called before each request with `%{url: url, method: method}`, returning `{:ok, token}`, `{:ok, nil}` or `{:error, reason}` (the request fails with `kind: :auth`), or `{:oauth, opts}` / `{:client_credentials, opts}` ([client_oauth.md](client_oauth.md)). Never sent over `http` to a non-loopback host: that configuration raises |
 | `:headers` | `[]` | Extra `{name, value}` headers; a value may be a `Secret`. Headers the transport owns (`accept`, `authorization`, `content-type`, `mcp-*`, `last-event-id`, hop-by-hop) are refused |
 | `:finch` | `nil` | The name of a `Finch` pool you started |
 | `:pool_size` | 100 | Connections in the library-started pool. Each open event stream holds one |
@@ -607,7 +607,8 @@ that ends early after an event id is resumed with `Last-Event-ID` up to five
 times; a modern stream that ends without a response fails the request and is
 never replayed.
 
-For OAuth-protected servers, see the client OAuth guide (`client_oauth.md`).
+For OAuth-protected servers (`auth: {:oauth, ...}` and
+`auth: {:client_credentials, ...}`), see [client_oauth.md](client_oauth.md).
 
 ## stdio
 
