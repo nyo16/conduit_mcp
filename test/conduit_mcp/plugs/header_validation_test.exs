@@ -314,9 +314,13 @@ defmodule ConduitMcp.Plugs.HeaderValidationTest do
 
       # `capture_log/2` captures every process's log, and async tests in other
       # modules log concurrently: any "1.5" of theirs failed the `refute`
-      # below. The plug runs in this process, so keep only this process's lines.
+      # below. The plug runs in this process, so keep only this process's
+      # lines - and format them without the timestamp, whose "11.554" also
+      # contains "1.5".
+      me = "pid=#{:erlang.pid_to_list(self())} "
+
       log =
-        [metadata: [:pid]]
+        [metadata: [:pid], format: "$metadata$message\n"]
         |> ExUnit.CaptureLog.capture_log(fn ->
           refute run(
                    call_req(%{"ratio" => 1.5}, "bad"),
@@ -324,8 +328,8 @@ defmodule ConduitMcp.Plugs.HeaderValidationTest do
                  ).halted
         end)
         |> String.split("\n")
-        |> Enum.filter(&String.contains?(&1, "pid=#{:erlang.pid_to_list(self())}"))
-        |> Enum.join("\n")
+        |> Enum.filter(&String.starts_with?(&1, me))
+        |> Enum.map_join("\n", &String.replace_prefix(&1, me, ""))
 
       assert log =~ ~s(tool "bad" has invalid x-mcp-header annotations)
       assert log =~ ~s(x-mcp-header "Ratio" at #/properties/ratio)
