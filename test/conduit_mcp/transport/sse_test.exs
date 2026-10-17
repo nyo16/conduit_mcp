@@ -14,6 +14,7 @@ defmodule ConduitMcp.Transport.SSETest do
 
   alias ConduitMcp.TestServer
   alias ConduitMcp.Transport.SSE
+  alias ConduitMcp.Transport.SSEStream
 
   @opts SSE.init(server_module: TestServer)
 
@@ -126,7 +127,7 @@ defmodule ConduitMcp.Transport.SSETest do
       # returns and the accumulated chunks are inspectable.
       assert conn.state == :chunked
       assert conn.resp_body =~ "event: endpoint"
-      assert conn.resp_body =~ ": keepalive"
+      assert conn.resp_body =~ ":\r\n"
     end
 
     test "sends no connection-specific header" do
@@ -189,7 +190,7 @@ defmodule ConduitMcp.Transport.SSETest do
              "mailbox never drained: #{inspect(Process.info(sse_pid, :message_queue_len))}"
 
       conn = Task.await(task, 5_000)
-      assert conn.resp_body =~ ": keepalive"
+      assert conn.resp_body =~ ":\r\n"
     end
 
     @tag timeout: 15_000
@@ -245,7 +246,7 @@ defmodule ConduitMcp.Transport.SSETest do
       table = :"conduit_mcp_sse_connections_missing_#{System.unique_integer([:positive])}"
       assert :ets.whereis(table) == :undefined
 
-      refute SSE.__acquire_slot__(table, 1_000),
+      refute SSEStream.acquire_slot(table, 1_000),
              "an unavailable slot table granted the slot: the cap is disabled, not enforced"
     end
 
@@ -381,7 +382,7 @@ defmodule ConduitMcp.Transport.SSETest do
   # Against a private table, so these can race nothing in the global one.
   describe "slot sweeping at the cap" do
     setup do
-      %{table: :ets.new(:sse_slots, SSE.connections_table_opts() -- [:named_table])}
+      %{table: :ets.new(:sse_slots, SSEStream.slot_table_opts() -- [:named_table])}
     end
 
     test "a stream killed at the cap is reclaimed once the sweep window has passed",
@@ -396,11 +397,11 @@ defmodule ConduitMcp.Transport.SSETest do
       # Within the window a fruitless sweep is not repeated, so the dead row
       # still counts - this is what keeps a flood of rejected connects from
       # walking the table on every request.
-      refute SSE.__acquire_slot__(table, 1),
+      refute SSEStream.acquire_slot(table, 1),
              "a rejected connect re-swept within the window of a sweep that freed nothing"
 
       # Past the window (0 ms here) the next connect sweeps and takes the slot.
-      assert SSE.__acquire_slot__(table, 1, 0),
+      assert SSEStream.acquire_slot(table, 1, 0),
              "the killed stream's slot was never reclaimed"
     end
 
@@ -414,14 +415,14 @@ defmodule ConduitMcp.Transport.SSETest do
       second = start_holder(table, 1)
       kill(second)
 
-      assert SSE.__acquire_slot__(table, 1),
+      assert SSEStream.acquire_slot(table, 1),
              "a fruitless sweep's verdict outlived the release that invalidated it"
     end
 
     test "a sweep that frees a slot admits the connect that ran it", %{table: table} do
       kill(start_holder(table, 1))
 
-      assert SSE.__acquire_slot__(table, 1)
+      assert SSEStream.acquire_slot(table, 1)
       # And it is counted: the next connect is over the cap.
       refute acquire_elsewhere(table, 1)
     end
@@ -962,10 +963,10 @@ defmodule ConduitMcp.Transport.SSETest do
 
     pid =
       spawn(fn ->
-        send(parent, {:acquired, self(), SSE.__acquire_slot__(table, max)})
+        send(parent, {:acquired, self(), SSEStream.acquire_slot(table, max)})
 
         receive do
-          :release -> SSE.__release_slot__(table)
+          :release -> SSEStream.release_slot(table)
         end
       end)
 
@@ -990,7 +991,7 @@ defmodule ConduitMcp.Transport.SSETest do
 
   # Tries for a slot from a short-lived process, which exits right after.
   defp acquire_elsewhere(table, max) do
-    fn -> SSE.__acquire_slot__(table, max) end
+    fn -> SSEStream.acquire_slot(table, max) end
     |> Task.async()
     |> Task.await()
   end

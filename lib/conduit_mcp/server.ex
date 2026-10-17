@@ -25,6 +25,8 @@ defmodule ConduitMcp.Server do
   - `ConduitMcp.Session.EtsStore.Owner` — sessions
   - `ConduitMcp.Transport.SSE.Owner` — the SSE slot table (one row per live
     stream)
+  - `ConduitMcp.Transport.SSEStream.Owner` — the slot table of streamed POST
+    responses (one row per open stream)
   - `ConduitMcp.Session.Janitor` (as `ConduitMcp.Session.Janitor.Default`) —
     sweeps expired sessions; disable with
     `config :conduit_mcp, :session_janitor, false`

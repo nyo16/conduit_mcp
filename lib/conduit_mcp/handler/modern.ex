@@ -11,6 +11,13 @@ defmodule ConduitMcp.Handler.Modern do
   # `tasks/*` - fall through to -32601, which `Protocol.Modern.http_status/1`
   # maps to HTTP 404. The modern HTTP transport defines no client-to-server
   # notifications, so a notification is dropped.
+  #
+  # A `tools/call` whose `_meta` carries a `progressToken` or a `logLevel` is
+  # the one request whose response may be preceded by notifications, so it
+  # is returned as `{:stream, %ConduitMcp.StreamSpec{}}` - the work deferred
+  # into `run`, for the transport to execute while it relays them. The
+  # version check runs first, so an unsupported version is still a plain
+  # `{:reply, _}` error.
 
   require Logger
 
@@ -25,6 +32,7 @@ defmodule ConduitMcp.Handler.Modern do
   alias ConduitMcp.Handler.Resources
   alias ConduitMcp.Handler.Tools
   alias ConduitMcp.Protocol
+  alias ConduitMcp.StreamSpec
 
   # The one modern routing table; `ConduitMcp.Handler.methods/1` publishes it.
   @request_methods %{
@@ -48,10 +56,18 @@ defmodule ConduitMcp.Handler.Modern do
   @doc """
   Handles a modern-era message; see `ConduitMcp.Handler.dispatch/3`.
   """
-  @spec dispatch(map(), module(), Ctx.t()) :: {:reply, map()} | :noreply
+  @spec dispatch(map(), module(), Ctx.t()) ::
+          {:reply, map()} | {:stream, StreamSpec.t()} | :noreply
   def dispatch(request, server_module, %Ctx{era: :modern} = ctx) do
     conn = Ctx.put(ctx.conn, ctx)
 
+    case stream_spec(request, server_module, ctx, conn) do
+      %StreamSpec{} = spec -> {:stream, spec}
+      nil -> reply(request, server_module, ctx, conn)
+    end
+  end
+
+  defp reply(request, server_module, ctx, conn) do
     reply =
       Pipeline.instrument(request, server_module, ctx, fn ->
         cond do
@@ -79,6 +95,46 @@ defmodule ConduitMcp.Handler.Modern do
       response -> {:reply, response}
     end
   end
+
+  # `params` is a map once `Protocol.valid_request?/1` holds.
+  defp stream_spec(%{"method" => "tools/call"} = request, server_module, ctx, conn) do
+    with true <- Protocol.valid_request?(request),
+         :ok <- Era.check_version(ctx),
+         params = Map.get(request, "params", %{}),
+         token = progress_token(params),
+         true <- not is_nil(token) or not is_nil(ctx.log_level) do
+      id = Map.get(request, "id")
+
+      %StreamSpec{
+        request_id: id,
+        method: "tools/call",
+        progress_token: token,
+        conn: conn,
+        run: fn conn ->
+          Pipeline.instrument(request, server_module, ctx, fn ->
+            result =
+              Pipeline.guard("tools/call", id, fn ->
+                route(:call_tool, params, server_module, conn)
+              end)
+
+            Protocol.Modern.to_response(id, "tools/call", result, server_info: ctx.server_info)
+          end)
+        end
+      }
+    else
+      _ -> nil
+    end
+  end
+
+  defp stream_spec(_request, _server_module, _ctx, _conn), do: nil
+
+  # A progress token is a string or an integer (`ProgressToken`); anything
+  # else cannot be echoed back and asks for nothing.
+  defp progress_token(%{"_meta" => %{"progressToken" => token}})
+       when is_binary(token) or is_integer(token),
+       do: token
+
+  defp progress_token(_params), do: nil
 
   defp handle_method(request, server_module, ctx, conn) do
     method = Map.get(request, "method")

@@ -142,13 +142,13 @@ defmodule ConduitMcp.Handler do
     * `{:reply, response}` — send the JSON-RPC `response` map. For a modern
       request the HTTP status is
       `ConduitMcp.Protocol.Modern.http_status/1` of it.
-    * `{:stream, spec}` — answer with a long-lived stream described by
-      `spec`. No routed method returns it yet; it is reserved for
-      `subscriptions/listen` and streamed modern responses, whose spec type
-      is defined with them.
+    * `{:stream, spec}` — a `ConduitMcp.StreamSpec`: a response the
+      transport may send as a Server-Sent Events stream, relaying the
+      notifications the work emits ahead of it. Returned for a modern
+      `tools/call` whose `_meta` carries a `progressToken` or a `logLevel`.
     * `:noreply` — a notification: nothing to send.
   """
-  @type reply :: {:reply, map()} | {:stream, term()} | :noreply
+  @type reply :: {:reply, map()} | {:stream, ConduitMcp.StreamSpec.t()} | :noreply
 
   @doc """
   Classifies and handles a decoded JSON-RPC message.
@@ -212,9 +212,9 @@ defmodule ConduitMcp.Handler do
   handled or ignored, or for a JSON-RPC response: the server sends no
   requests of its own, so a response answers nothing and is dropped.
   `ConduitMcp.Transport.Shared.dispatch_post/2` answers `:ok` with
-  `202 Accepted` and no body. A `{:stream, _}` dispatch — a method whose
-  response is a long-lived stream — cannot be returned as a map and is
-  answered with `-32601`.
+  `202 Accepted` and no body. A `{:stream, spec}` dispatch is run to
+  completion in the calling process (`ConduitMcp.StreamSpec.run/1`): its
+  notifications are dropped and its final response is returned.
 
   A notification has no id to correlate, so JSON-RPC says a failed one is
   dropped. Legacy `notifications/cancelled` is the exception: in these cases
@@ -250,20 +250,10 @@ defmodule ConduitMcp.Handler do
   end
 
   @doc false
-  # Public so the `{:stream, _}` clause is part of the contract rather than a
-  # clause the type checker can prove unreachable today.
   @spec to_map(reply(), map()) :: map() | :ok
   def to_map({:reply, response}, _request), do: response
   def to_map(:noreply, _request), do: :ok
-
-  def to_map({:stream, _spec}, request) do
-    Protocol.error_response(
-      Map.get(request, "id"),
-      Protocol.method_not_found(),
-      "Method not found: #{ConduitMcp.Reflect.text(Map.get(request, "method"))} " <>
-        "needs a streaming transport"
-    )
-  end
+  def to_map({:stream, spec}, _request), do: ConduitMcp.StreamSpec.run(spec)
 
   @doc """
   Every method this handler routes, in either era, mapped to its internal

@@ -113,6 +113,7 @@ defmodule ConduitMcp.EtsOwnerTest do
         {ConduitMcp.Cancellation.InFlightOwner, :conduit_mcp_in_flight},
         {ConduitMcp.Session.EtsStore.Owner, :conduit_mcp_sessions},
         {ConduitMcp.Transport.SSE.Owner, :conduit_mcp_sse_connections},
+        {ConduitMcp.Transport.SSEStream.Owner, :conduit_mcp_sse_streams},
         {ConduitMcp.Tasks.EtsStore.Owner, :conduit_mcp_tasks},
         {ConduitMcp.OAuth.KeyProvider.JWKS.Owner, :conduit_mcp_jwks_cache}
       ]

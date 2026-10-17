@@ -652,6 +652,14 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
         conn(:post, "/", JSON.encode!(body))
         |> put_req_header("content-type", "application/json")
         |> put_req_header("authorization", "Bearer " <> token)
+        # Required on every modern HTTP request (Plugs.HeaderValidation);
+        # ignored by the legacy initialize.
+        |> put_req_header("mcp-method", body["method"])
+        |> then(fn conn ->
+          if body["method"] == "initialize",
+            do: conn,
+            else: put_req_header(conn, "mcp-protocol-version", "2026-07-28")
+        end)
         |> then(&if(session_id, do: put_req_header(&1, "mcp-session-id", session_id), else: &1))
         |> StreamableHTTP.call(opts)
       end
@@ -975,13 +983,51 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
       assert get_resp_header(conn, "mcp-protocol-version") == ["2025-06-18"]
     end
 
-    test "an unsupported request header is never echoed" do
+    # 2025-11-25 transports: an invalid or unsupported MCP-Protocol-Version
+    # MUST be answered 400 Bad Request. It used to be served (and merely not
+    # echoed).
+    test "an unsupported request header is a 400, and is never echoed" do
       conn =
         post_json(%{"jsonrpc" => "2.0", "id" => 1, "method" => "ping"}, @opts, [
           {"mcp-protocol-version", "1999-01-01"}
         ])
 
-      assert get_resp_header(conn, "mcp-protocol-version") == ["2025-11-25"]
+      assert conn.status == 400
+      assert conn.halted
+      refute conn.resp_body =~ "1999-01-01"
+
+      assert %{"id" => 1, "error" => %{"code" => -32600, "data" => %{"supported" => supported}}} =
+               JSON.decode!(conn.resp_body)
+
+      assert supported == ConduitMcp.Protocol.supported_versions()
+    end
+
+    test "a request without the header is served (the spec's 2025-03-26 default)" do
+      conn = post_json(%{"jsonrpc" => "2.0", "id" => 1, "method" => "ping"}, @opts)
+
+      assert conn.status == 200
+      assert JSON.decode!(conn.resp_body)["result"] == %{}
+    end
+
+    test "initialize is exempt: it negotiates the version in its body" do
+      conn =
+        post_json(JSON.decode!(initialize_request_body()), @opts, [
+          {"mcp-protocol-version", "2099-01-01"}
+        ])
+
+      assert conn.status == 200
+      assert JSON.decode!(conn.resp_body)["result"]["protocolVersion"] == "2025-06-18"
+    end
+
+    test "a DELETE with an unsupported header is a 400 too" do
+      opts = StreamableHTTP.init(server_module: TestServer, session: [])
+
+      conn =
+        conn(:delete, "/")
+        |> put_req_header("mcp-protocol-version", "1999-01-01")
+        |> StreamableHTTP.call(opts)
+
+      assert conn.status == 400
     end
   end
 

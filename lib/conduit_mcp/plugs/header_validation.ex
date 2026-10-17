@@ -10,10 +10,11 @@ defmodule ConduitMcp.Plugs.HeaderValidation do
 
   Runs after `Plug.Parsers`. It uses the request's `ConduitMcp.Ctx` from
   `conn.private[:mcp_ctx]` when one is stored, and otherwise classifies the
-  body with `ConduitMcp.Era.classify/2` itself (storing the result) — a
+  body with `ConduitMcp.Era.classify/2` itself, storing a modern result — a
   classification failure is answered here with 400 too. Legacy requests, and
   an era-exempt `server/discover` sent without `_meta`, pass through
-  untouched.
+  untouched. A legacy context is not stored: it depends on the session a
+  later transport plug resolves.
 
   ## Checks, in order
 
@@ -44,8 +45,13 @@ defmodule ConduitMcp.Plugs.HeaderValidation do
   (`handle_list_tools`, following `nextCursor`), computed on the first
   `tools/call` and cached per server module in `:persistent_term`. Tools
   whose annotations are invalid (see
-  `ConduitMcp.Headers.validate_x_mcp_header/1`) are ignored: conforming
-  clients drop them from their tool lists.
+  `ConduitMcp.Headers.validate_x_mcp_header/1`) are excluded from
+  `Mcp-Param-*` validation, and each is logged at `:error` level when the
+  cache is built, naming the tool and the offending annotations. The
+  specification tells clients to drop such a tool from their tool lists, so
+  a conforming client never calls it; raising instead would fail whichever
+  unrelated `tools/call` happened to build the cache. DSL and Component
+  servers never reach this: their annotations are checked at compile time.
 
   The tool list is read from the server module in
   `conn.private[:server_module]` (set by both transports). DSL and Endpoint
@@ -59,6 +65,8 @@ defmodule ConduitMcp.Plugs.HeaderValidation do
   """
 
   @behaviour Plug
+
+  require Logger
 
   alias ConduitMcp.Ctx
   alias ConduitMcp.Era
@@ -88,8 +96,11 @@ defmodule ConduitMcp.Plugs.HeaderValidation do
           {:error, code, message, data} -> reject(conn, request, {code, message, data})
         end
 
-      {:ok, ctx} ->
+      {:ok, %Ctx{era: :modern} = ctx} ->
         Ctx.put(ctx.conn, ctx)
+
+      {:ok, %Ctx{era: :legacy}} ->
+        conn
 
       {:error, code, message, data} ->
         reject(conn, request, {code, message, data})
@@ -283,7 +294,16 @@ defmodule ConduitMcp.Plugs.HeaderValidation do
           params -> Map.put(acc, name, params)
         end
 
-      {:error, _reasons} ->
+      {:error, reasons} ->
+        # Tool and annotation names with JSON Pointers only:
+        # `Headers.validate_x_mcp_header/1` never puts argument values in its
+        # errors.
+        Logger.error(
+          "ConduitMcp.Plugs.HeaderValidation: tool #{inspect(name)} has invalid " <>
+            "x-mcp-header annotations and is excluded from Mcp-Param-* validation " <>
+            "(conforming clients drop it): " <> Enum.join(reasons, "; ")
+        )
+
         acc
     end
   end

@@ -19,6 +19,9 @@ defmodule ConduitMcp.Application do
     * `ConduitMcp.Session.EtsStore.Owner` — always started.
     * `ConduitMcp.Transport.SSE.Owner` — always started; owns the slot table
       (one row per live stream) behind `Transport.SSE`'s `:max_connections`.
+    * `ConduitMcp.Transport.SSEStream.Owner` — always started; owns the slot
+      table (one row per open stream) behind the HTTP transports'
+      `:max_streams` cap on streamed POST responses.
     * `ConduitMcp.Session.Janitor` — always started against
       `ConduitMcp.Session.EtsStore`, under the name
       `ConduitMcp.Session.Janitor.Default` so it cannot collide with a janitor
@@ -82,7 +85,8 @@ defmodule ConduitMcp.Application do
       Cancellation.Owner,
       Cancellation.InFlightOwner,
       Session.EtsStore.Owner,
-      ConduitMcp.Transport.SSE.Owner
+      ConduitMcp.Transport.SSE.Owner,
+      ConduitMcp.Transport.SSEStream.Owner
     ]
   end
 

@@ -33,6 +33,16 @@ defmodule ConduitMcp.Cancellation do
   cancellation at all — the client's notification will arrive after the
   response has already been sent.
 
+  ## Modern streams: disconnect is cancellation
+
+  The modern (`2026-07-28`) HTTP transport has no client-to-server
+  notifications; a client cancels by closing the stream. When a streamed
+  `tools/call` response (`ConduitMcp.StreamSpec`) fails to write because
+  the client is gone, the transport records the cancellation here, under
+  the request's own scope, so `cancelled?/1` turns `true` for the running
+  tool. A tool that has not returned within the transport's
+  `:stream_cancel_timeout` is killed.
+
   ## Scoping
 
   JSON-RPC ids are **client-chosen** and conventionally small integers, so

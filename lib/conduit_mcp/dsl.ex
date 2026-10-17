@@ -415,6 +415,21 @@ defmodule ConduitMcp.DSL do
   - `:enum` - List of allowed values
   - `:default` - Default value if not provided
 
+  ## Header Option (`2026-07-28`)
+
+  - `:header` - Mirrors the argument into an `Mcp-Param-{Name}` HTTP request
+    header: `param :region, :string, "Region", header: "Region"` publishes
+    `"x-mcp-header": "Region"` on the property. Modern clients then send the
+    argument as `Mcp-Param-Region`, so intermediaries can route on it, and
+    `ConduitMcp.Plugs.HeaderValidation` rejects a request whose header
+    disagrees with the body. The build fails (`CompileError`) unless the
+    annotation is valid: the param must be a `:string`, `:integer` or
+    `:boolean` reachable through object properties only (never inside array
+    `items`), and the name must be an RFC 9110 token unique
+    case-insensitively within the tool. Not a validation rule: the argument
+    is validated as usual. A browser client also needs the header name in
+    the transport's `:cors_headers`.
+
   ## Enhanced Validation Options (NimbleOptions)
 
   - `:min` - Minimum value for numbers (inclusive)
@@ -508,6 +523,7 @@ defmodule ConduitMcp.DSL do
 
   defmacro param(name, type, description, opts) when is_list(opts) do
     assert_no_block!(:param, name, description, opts, __CALLER__)
+    {description, opts} = split_blockless_opts(description, opts)
 
     quote do
       param_def = %{
@@ -606,6 +622,13 @@ defmodule ConduitMcp.DSL do
   defp split_description_opts([{key, _} | _] = opts) when is_atom(key), do: {nil, opts}
   defp split_description_opts(description), do: {description, []}
 
+  # The blockless form has the same trap: `param :region, :string, header:
+  # "Region"` puts the keywords in the description position and leaves `opts`
+  # empty, so the option was ignored and the keyword list became the
+  # `"description"`.
+  defp split_blockless_opts(description, []), do: split_description_opts(description)
+  defp split_blockless_opts(description, opts), do: {description, opts}
+
   # The clauses that route a trailing `[do: ...]` to the block form depend on
   # argument positions that only the default-injecting header produces. Change a
   # default and they quietly stop matching, and a block silently falls through to
@@ -655,6 +678,7 @@ defmodule ConduitMcp.DSL do
 
   defmacro field(name, type, description, opts) when is_list(opts) do
     assert_no_block!(:field, name, description, opts, __CALLER__)
+    {description, opts} = split_blockless_opts(description, opts)
 
     quote do
       field_def = %{
@@ -1282,6 +1306,9 @@ defmodule ConduitMcp.DSL do
 
     tool_schemas = Enum.map(reversed_tools, &ConduitMcp.DSL.SchemaBuilder.build_tool_schema/1)
 
+    Enum.each(tool_schemas, &__validate_x_mcp_headers__!(env.module, &1))
+    Enum.each(reversed_prompts, &__reject_headers__!(env.module, "prompt", &1.name, &1.args))
+
     prompt_schemas =
       Enum.map(reversed_prompts, &ConduitMcp.DSL.SchemaBuilder.build_prompt_schema/1)
 
@@ -1451,6 +1478,41 @@ defmodule ConduitMcp.DSL do
         scope -> {name, __validate_scope__!(scope, name)}
       end
     end)
+  end
+
+  @doc false
+  # The 2026-07-28 spec tells clients to drop a tool whose `x-mcp-header`
+  # annotations are invalid, so a bad `header:` would make the tool vanish
+  # from every conforming client without a word. The schema is final here,
+  # so the build refuses it instead. Shared with `ConduitMcp.Component`.
+  def __validate_x_mcp_headers__!(module, %{"name" => name, "inputSchema" => schema}) do
+    case ConduitMcp.Headers.validate_x_mcp_header(schema) do
+      :ok ->
+        :ok
+
+      {:error, errors} ->
+        raise CompileError,
+          description:
+            "#{inspect(module)}: tool #{inspect(name)} has an invalid `header:` " <>
+              "(x-mcp-header) annotation:\n  * " <> Enum.join(errors, "\n  * ")
+    end
+  end
+
+  @doc false
+  # `header:` mirrors a *tool* argument into an `Mcp-Param-*` header. A prompt
+  # argument has no such header, and `ConduitMcp.Validation.SchemaConverter`
+  # drops the option, so accepting it here would silently do nothing.
+  def __reject_headers__!(module, kind, name, params) do
+    case Enum.find(params || [], &Keyword.has_key?(&1.opts || [], :header)) do
+      nil ->
+        :ok
+
+      param ->
+        raise CompileError,
+          description:
+            "#{inspect(module)}: #{kind} #{inspect(to_string(name))} argument " <>
+              "#{inspect(param.name)}: the header: option is only valid on tool parameters"
+    end
   end
 
   @doc false
