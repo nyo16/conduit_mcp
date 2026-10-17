@@ -253,10 +253,11 @@ hub restarts.
 
 ## Supervision and restarts
 
-The hub is a `:rest_for_one` supervisor of a `Task.Supervisor` (for adapter
-calls and listing fetches), a `DynamicSupervisor` holding the server clients,
-and a manager process. Starting never blocks: servers start after
-`start_link/1` returns, and each connects in the background.
+The hub is a `:rest_for_one` supervisor of an OAuth token store, a
+`Task.Supervisor` (for adapter calls and listing fetches), a
+`DynamicSupervisor` holding the server clients, and a manager process.
+Starting never blocks: servers start after `start_link/1` returns, and each
+connects in the background.
 
 Server clients are `restart: :temporary`. When one exits (a bug, or its own
 supervisor giving up after repeated connection crashes), the manager starts
@@ -265,6 +266,23 @@ doubling to at most 5 minutes. One crash-looping server never exhausts a
 supervisor's restart intensity or takes the others down. Within a running
 client, ordinary connection failures are handled by its own reconnect loop
 (see [client.md](client.md)).
+
+## OAuth servers
+
+The hub starts one in-memory `ConduitMcp.Client.OAuth.TokenStore.ETS` and
+gives it to every server whose `auth: {:oauth, opts}` or
+`auth: {:client_credentials, opts}` names no `:store`. A server's own
+`:store` is kept. Tokens stay keyed by `{principal, issuer, resource}`, so a
+server never receives another server's token, but:
+
+- servers behind the same authorization server share one dynamic client
+  registration instead of registering once each;
+- a server client the manager restarts, or one you remove and add again,
+  finds its tokens and needs no new authorization.
+
+The store lives as long as the hub. For tokens that survive a hub restart,
+give each server a persistent store; see
+[client_oauth.md](client_oauth.md#token-stores).
 
 ## Per-user hubs
 

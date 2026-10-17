@@ -4,9 +4,11 @@ defmodule ConduitMcp.Client.OAuth.TokenStore.ETS do
   lost when the store stops.
 
   When a client's OAuth options name no `:store`, the client's supervisor
-  starts one of these for that client. To share one store between clients
-  (several servers behind the same authorization server, one user), start
-  it yourself and name it in each client:
+  starts one of these for that client; a `ConduitMcp.Client.Hub` starts one
+  for all its servers instead (`ConduitMcp.Client.Hub.Config.token_store/1`).
+  To share one store between standalone clients (several servers behind
+  the same authorization server, one user), start it yourself and name it
+  in each client:
 
       children = [
         {ConduitMcp.Client.OAuth.TokenStore.ETS, name: :mcp_tokens},

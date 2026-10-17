@@ -60,7 +60,8 @@ defmodule ConduitMcp.Client.Hub do
 
   ## Supervision
 
-  The hub is a `:rest_for_one` supervisor of a `Task.Supervisor` (for
+  The hub is a `:rest_for_one` supervisor of the OAuth token store (see
+  "OAuth"), a `Task.Supervisor` (for
   `ConduitMcp.Client.Adapters.execute_tool_calls/4` and listing fetches), a
   `DynamicSupervisor` holding the server clients, and a manager process.
   Server clients are `restart: :temporary`: when one exits (a bug, or its
@@ -76,6 +77,25 @@ defmodule ConduitMcp.Client.Hub do
   the manager but not of the hub (re-add them from your own store;
   `add_server/3` is idempotent). A server removed at runtime stays removed
   until the hub restarts.
+
+  ## OAuth (X-18)
+
+  The hub starts one in-memory `ConduitMcp.Client.OAuth.TokenStore.ETS`
+  and gives it to every server whose `auth: {:oauth, opts}` or
+  `auth: {:client_credentials, opts}` names no `:store` (a server's own
+  `:store` is kept). Tokens stay keyed by `{principal, issuer, resource}`,
+  so each server still gets only its own (OA-5), but:
+
+    * a client registered dynamically with an authorization server is
+      reused by every server behind that issuer (one registration, not one
+      per server);
+    * a server client that is restarted (by the manager after a crash, or
+      removed and added again) finds its tokens and needs no new
+      authorization.
+
+  The store lives as long as the hub: it is in memory, and a hub restart
+  loses it. For tokens that survive restarts, name a persistent store
+  (`ConduitMcp.Client.OAuth.TokenStore`) in each server's OAuth options.
 
   ## Tool listing (X-12, HB-1, HB-2, HB-4)
 
@@ -169,6 +189,7 @@ defmodule ConduitMcp.Client.Hub do
             | :discovering
             | :initializing
             | :ready
+            | :authorizing
             | :reconnecting
             | :closed,
           era: :modern | :legacy | nil,
@@ -215,7 +236,12 @@ defmodule ConduitMcp.Client.Hub do
     table = Table.new()
     :ok = Registry.put_value({:hub, config.name}, %{table: table, config: config})
 
+    # The OAuth token store comes first: server clients come and go
+    # (restarts, `remove_server/2`) without taking their tokens with them.
+    {store, store_opts} = Config.token_store(config.name)
+
     children = [
+      {store, store_opts},
       {Task.Supervisor, name: task_sup(config.name)},
       {DynamicSupervisor,
        name: Registry.via({:hub_servers, config.name}), strategy: :one_for_one},

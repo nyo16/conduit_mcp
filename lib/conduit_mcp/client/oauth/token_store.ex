@@ -5,8 +5,9 @@ defmodule ConduitMcp.Client.OAuth.TokenStore do
   Configure one as `store: {module, opts}` in the client's OAuth options;
   `opts` is passed as the last argument of every callback. The default is
   `ConduitMcp.Client.OAuth.TokenStore.ETS`: in memory, lost when the client
-  stops. Implement this behaviour to persist tokens (a database, the OS
-  keychain, an encrypted file).
+  (or, for a `ConduitMcp.Client.Hub` server, the hub) stops. Implement this
+  behaviour to persist tokens (a database, the OS keychain, an encrypted
+  file).
 
   ## Keys
 
