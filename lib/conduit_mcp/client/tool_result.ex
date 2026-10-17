@@ -9,23 +9,29 @@ defmodule ConduitMcp.Client.ToolResult do
 
     * `content` - the `content` blocks, string-keyed, as sent.
     * `structured` - `structuredContent`, or `nil`.
-    * `is_error` - `true` only when the server sent `isError: true`.
+    * `is_error` - `true` when the server sent `isError: true` (or, for a
+      synthetic result, when a post-call hook failed and the result was
+      withheld; see `ConduitMcp.Client.Hooks`).
     * `meta` - the result's `_meta`, or `%{}`.
     * `extra` - every other wire key (minus `resultType`), never atomized.
+    * `provenance` - `nil`, or, for a result shaped for a model
+      (`ConduitMcp.Client.Pipeline`, `shape: :llm`), `%{server_id: id,
+      truncated: boolean, flags: [atom]}`.
   """
 
   alias ConduitMcp.Client.Wire
 
   @known_keys ["content", "structuredContent", "isError", "_meta", "resultType"]
 
-  defstruct content: [], structured: nil, is_error: false, meta: %{}, extra: %{}
+  defstruct content: [], structured: nil, is_error: false, meta: %{}, extra: %{}, provenance: nil
 
   @type t :: %__MODULE__{
           content: [map()],
           structured: term(),
           is_error: boolean(),
           meta: map(),
-          extra: map()
+          extra: map(),
+          provenance: %{server_id: String.t(), truncated: boolean(), flags: [atom()]} | nil
         }
 
   @doc """

@@ -203,6 +203,17 @@ if Code.ensure_loaded?(PromEx) do
       - Tags: `reason`
     - `{prefix}_client_tool_definition_changed_total` - Counter of known
       tools whose definition changed
+    - `{prefix}_client_policy_decision_total` - Counter of policy
+      decisions on governed calls, reads and gets
+      - Tags: `target`, `decision`, `source`, `reason`, `approval`
+    - `{prefix}_client_hook_total` - Counter of hook runs that returned
+      within their contract
+      - Tags: `kind`, `status`
+    - `{prefix}_client_hook_duration_milliseconds` - Distribution of hook
+      durations
+      - Tags: `kind`
+    - `{prefix}_client_hook_exception_total` - Counter of failed hook runs
+      - Tags: `kind`, `reason`
 
     ### Subscription Metrics
 
@@ -788,6 +799,40 @@ if Code.ensure_loaded?(PromEx) do
             event_name: [:conduit_mcp, :client, :tool, :definition_changed],
             description: "Known tools whose definition changed on refresh",
             measurement: fn _measurements -> 1 end
+          ),
+          counter(
+            metric_prefix ++ [:client, :policy, :decision, :total],
+            event_name: [:conduit_mcp, :client, :policy, :decision],
+            description: "MCP client policy decisions",
+            measurement: fn _measurements -> 1 end,
+            tags: [:target, :decision, :source, :reason, :approval],
+            tag_values: &extract_client_tags/1
+          ),
+          counter(
+            metric_prefix ++ [:client, :hook, :total],
+            event_name: [:conduit_mcp, :client, :hook, :stop],
+            description: "MCP client hook runs",
+            measurement: fn _measurements -> 1 end,
+            tags: [:kind, :status],
+            tag_values: &extract_client_tags/1
+          ),
+          distribution(
+            metric_prefix ++ [:client, :hook, :duration, duration_unit],
+            event_name: [:conduit_mcp, :client, :hook, :stop],
+            description: "MCP client hook duration distribution",
+            measurement: :duration,
+            unit: {:native, duration_unit},
+            tags: [:kind],
+            tag_values: &extract_client_tags/1,
+            reporter_options: [buckets: [1, 5, 10, 50, 100, 500, 1_000, 5_000, 60_000]]
+          ),
+          counter(
+            metric_prefix ++ [:client, :hook, :exception, :total],
+            event_name: [:conduit_mcp, :client, :hook, :exception],
+            description: "MCP client hook failures",
+            measurement: fn _measurements -> 1 end,
+            tags: [:kind, :reason],
+            tag_values: &extract_client_tags/1
           )
         ]
       )
@@ -833,7 +878,19 @@ if Code.ensure_loaded?(PromEx) do
 
     # Tag extraction functions
 
-    @client_tags [:method, :status, :error_kind, :is_error, :to, :reason, :kind]
+    @client_tags [
+      :method,
+      :status,
+      :error_kind,
+      :is_error,
+      :to,
+      :reason,
+      :kind,
+      :target,
+      :decision,
+      :source,
+      :approval
+    ]
 
     defp extract_client_tags(metadata) do
       for key <- @client_tags, Map.has_key?(metadata, key), into: %{} do

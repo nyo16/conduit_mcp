@@ -260,6 +260,126 @@ defmodule ConduitMcp.Client.Config do
               The longest a cached list (`ConduitMcp.Client.Cache`) is served
               without asking the server again, whatever its `ttlMs` hint says.
               """
+            ],
+            policy: [
+              type: {:custom, __MODULE__, :validate_policy, []},
+              default: nil,
+              doc: """
+              Authorizes tool calls (`ConduitMcp.Client.Policy`): the
+              `ConduitMcp.Client.Policy.compile/1` options, a compiled
+              policy, or `{:named, name}` to read the policy stored with
+              `ConduitMcp.Client.Policy.update/2` at each call (a missing
+              one denies). `nil` (the default) means no authorization: the
+              client sends what it is asked to (R6). Setting it routes
+              `call_tool/4` through `ConduitMcp.Client.Pipeline`.
+              """
+            ],
+            on_ask: [
+              type: {:or, [{:fun, 2}, {:tuple, [:atom, :atom]}, nil]},
+              default: nil,
+              doc: """
+              The approver for calls the policy decides `:ask`:
+              `fun.(%ConduitMcp.Client.ToolCall{}, ctx)` or `{Module,
+              :function}`, returning `{:allow, :once | :always}`,
+              `{:deny, reason}` or `{:deny, reason, :halt}` (see
+              `ConduitMcp.Client.Pipeline`). Without one, `:ask` denies.
+              """
+            ],
+            ask_timeout: [
+              type: :pos_integer,
+              default: 60_000,
+              doc: "Milliseconds `:on_ask` may take; after that the call is denied."
+            ],
+            grant_ttl: [
+              type: :pos_integer,
+              default: 86_400_000,
+              doc: """
+              How long an `{:allow, :always}` answer is remembered, in
+              milliseconds (`ConduitMcp.Client.Grants`).
+              """
+            ],
+            approved_fingerprints: [
+              type: {:custom, __MODULE__, :validate_approved_fingerprints, []},
+              default: :first_listing,
+              doc: """
+              The tool definitions the policy's `pin_tools` and
+              `allow_new_tools` treat as approved: `:first_listing` records
+              the fingerprints of the first full tool list the client reads;
+              a map of tool name to `ConduitMcp.Client.Fingerprint` pins
+              exactly those.
+              """
+            ],
+            hooks: [
+              type: {:custom, __MODULE__, :validate_hooks, []},
+              default: [],
+              doc: """
+              Pre-call, post-call, failure, listing, resource and prompt
+              hooks; see `ConduitMcp.Client.Hooks`.
+              """
+            ],
+            hook_timeout: [
+              type: :pos_integer,
+              default: 5_000,
+              doc: "Default milliseconds a hook may run before it fails (closed)."
+            ],
+            tools: [
+              type: {:custom, __MODULE__, :validate_tool_filter, []},
+              default: nil,
+              doc: """
+              Which tools are visible at all: `[include: [...], exclude:
+              [...]]` (`ConduitMcp.Client.ToolFilter`). Hidden tools are left
+              out of every tool list and calling one fails with
+              `kind: :not_found`.
+              """
+            ],
+            validate: [
+              type: :keyword_list,
+              default: [],
+              keys: [
+                arguments: [type: :boolean, default: false],
+                structured_content: [type: :boolean, default: false],
+                validator: [type: :atom, default: ConduitMcp.Client.SchemaValidator.JSV]
+              ],
+              doc: """
+              JSON Schema validation of call arguments (`inputSchema`) and
+              of `structuredContent` (`outputSchema`); see
+              `ConduitMcp.Client.SchemaValidator`. The default validator
+              needs the optional `:jsv` dependency: asking for validation
+              without it raises `ConduitMcp.OptionalDependencyError` here.
+              """
+            ],
+            trusted: [
+              type: :boolean,
+              default: false,
+              doc: """
+              Trust this server's tool annotations in policy annotation
+              rules (PO-8) and its `instructions` in
+              `ConduitMcp.Client.instructions_for_llm/1`.
+              """
+            ],
+            max_result_bytes_for_llm: [
+              type: :pos_integer,
+              default: 102_400,
+              doc: """
+              The cap on a tool result shaped for a model (`shape: :llm`,
+              see `ConduitMcp.Client.Pipeline`).
+              """
+            ],
+            include_instructions: [
+              type: :boolean,
+              default: false,
+              doc: """
+              Whether `ConduitMcp.Client.instructions_for_llm/1` returns the
+              server's `instructions` (PI-1). Off by default.
+              """
+            ],
+            clock: [
+              type: {:or, [{:fun, 0}, nil]},
+              default: nil,
+              doc: """
+              `fn -> unix_milliseconds end` used for grant expiry (default
+              the system clock); for tests.
+              """
             ]
           )
 
@@ -274,6 +394,22 @@ defmodule ConduitMcp.Client.Config do
 
   #{NimbleOptions.docs(@schema)}
   """
+
+  @governance_keys [
+    :policy,
+    :on_ask,
+    :ask_timeout,
+    :grant_ttl,
+    :approved_fingerprints,
+    :hooks,
+    :hook_timeout,
+    :tools,
+    :validate,
+    :trusted,
+    :max_result_bytes_for_llm,
+    :include_instructions,
+    :clock
+  ]
 
   @enforce_keys [:name, :server_id, :transport, :protocol, :probe_timeout, :client_info]
   defstruct [
@@ -301,7 +437,8 @@ defmodule ConduitMcp.Client.Config do
     :sampling,
     :elicitation,
     :roots,
-    :max_cache_ttl
+    :max_cache_ttl,
+    :governance
   ]
 
   @type protocol :: :auto | :modern | :legacy | String.t()
@@ -331,12 +468,16 @@ defmodule ConduitMcp.Client.Config do
           sampling: keyword(),
           elicitation: keyword(),
           roots: keyword(),
-          max_cache_ttl: pos_integer()
+          max_cache_ttl: pos_integer(),
+          governance: struct()
         }
 
   @doc """
   Validates `opts` and returns the config; raises `ArgumentError` naming the
   offending key. A `%Config{}` is returned unchanged.
+
+  The governance options (`:policy` through `:clock` above) are compiled
+  into the `governance` field.
 
   ## Example
 
@@ -355,13 +496,23 @@ defmodule ConduitMcp.Client.Config do
     case NimbleOptions.validate(opts, @schema) do
       {:ok, valid} ->
         {transport, _transport_opts} = valid[:transport]
+        {governance, valid} = Keyword.split(valid, @governance_keys)
+        server_id = valid[:server_id] || default_server_id(valid[:name])
 
         struct!(
           __MODULE__,
           valid
-          |> Keyword.put(:server_id, valid[:server_id] || default_server_id(valid[:name]))
+          |> Keyword.put(:server_id, server_id)
           |> Keyword.put_new_lazy(:probe_timeout, fn -> default_probe_timeout(transport) end)
           |> Keyword.put_new_lazy(:client_info, &default_client_info/0)
+          |> Keyword.put(
+            :governance,
+            ConduitMcp.Client.Governance.new(
+              valid[:name],
+              server_id,
+              Keyword.update!(governance, :validate, &validator!/1)
+            )
+          )
         )
 
       {:error, %NimbleOptions.ValidationError{} = error} ->
@@ -383,6 +534,33 @@ defmodule ConduitMcp.Client.Config do
 
   defp default_client_info do
     %{"name" => "conduit_mcp", "version" => to_string(Application.spec(:conduit_mcp, :vsn))}
+  end
+
+  @jsv_validator ConduitMcp.Client.SchemaValidator.JSV
+
+  # Validation needs its validator at start, never per request: the default
+  # one only exists when the optional `:jsv` dependency was compiled in.
+  defp validator!(opts) do
+    validate = Map.new(opts)
+
+    cond do
+      not (validate.arguments or validate.structured_content) ->
+        validate
+
+      validate.validator == @jsv_validator ->
+        ConduitMcp.OptionalDeps.jsv!()
+        validate
+
+      Code.ensure_loaded?(validate.validator) and
+        function_exported?(validate.validator, :build, 2) and
+          function_exported?(validate.validator, :validate, 2) ->
+        validate
+
+      true ->
+        raise ArgumentError,
+              "invalid ConduitMcp.Client option: :validate :validator " <>
+                "#{inspect(validate.validator)} does not implement ConduitMcp.Client.SchemaValidator"
+    end
   end
 
   @doc false
@@ -457,4 +635,58 @@ defmodule ConduitMcp.Client.Config do
 
   def validate_client_info(other),
     do: {:error, ~s(expected a map with string "name" and "version" keys, got: #{inspect(other)})}
+
+  @doc false
+  @spec validate_policy(term()) :: {:ok, term()} | {:error, String.t()}
+  def validate_policy(nil), do: {:ok, nil}
+  def validate_policy({:named, _name} = named), do: {:ok, named}
+  def validate_policy(%ConduitMcp.Client.Policy{} = policy), do: {:ok, policy}
+
+  def validate_policy(opts) when is_list(opts) do
+    {:ok, ConduitMcp.Client.Policy.compile(opts)}
+  rescue
+    error in ArgumentError -> {:error, Exception.message(error)}
+  end
+
+  def validate_policy(other),
+    do:
+      {:error,
+       "expected policy options, a compiled policy or {:named, name}, got: #{inspect(other)}"}
+
+  @doc false
+  @spec validate_tool_filter(term()) :: {:ok, term()} | {:error, String.t()}
+  def validate_tool_filter(nil), do: {:ok, nil}
+  def validate_tool_filter(%ConduitMcp.Client.ToolFilter{} = filter), do: {:ok, filter}
+
+  def validate_tool_filter(opts) when is_list(opts) do
+    {:ok, ConduitMcp.Client.ToolFilter.compile(opts)}
+  rescue
+    error in ArgumentError -> {:error, Exception.message(error)}
+  end
+
+  def validate_tool_filter(other),
+    do: {:error, "expected [include: [...], exclude: [...]], got: #{inspect(other)}"}
+
+  @doc false
+  @spec validate_hooks(term()) :: {:ok, term()} | {:error, String.t()}
+  def validate_hooks(hooks) do
+    {:ok, ConduitMcp.Client.Hooks.compile(hooks)}
+  rescue
+    error in ArgumentError -> {:error, Exception.message(error)}
+  end
+
+  @doc false
+  @spec validate_approved_fingerprints(term()) :: {:ok, term()} | {:error, String.t()}
+  def validate_approved_fingerprints(:first_listing), do: {:ok, :first_listing}
+
+  def validate_approved_fingerprints(map) when is_map(map) and not is_struct(map) do
+    if Enum.all?(map, fn {tool, fingerprint} -> is_binary(tool) and is_binary(fingerprint) end),
+      do: {:ok, map},
+      else: {:error, "expected a map of tool name to fingerprint (strings), got: #{inspect(map)}"}
+  end
+
+  def validate_approved_fingerprints(other),
+    do:
+      {:error,
+       "expected :first_listing or a map of tool name to fingerprint, got: #{inspect(other)}"}
 end

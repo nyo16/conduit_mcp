@@ -101,6 +101,49 @@ defmodule ConduitMcp.Client.Telemetry do
     end
   end
 
+  @doc """
+  A policy decision for one call, read or get. `decision` is a
+  `ConduitMcp.Client.Policy.Decision` (or a map with its keys); `approval`
+  says how an `:ask` was settled (`nil` otherwise). `extra` carries the
+  allowlisted target keys (`:target`, and `:tool_name` for a tool) and
+  `:principal` when the host supplied one.
+  """
+  @spec policy_decision(base(), map(), atom() | nil, map()) :: :ok
+  def policy_decision(base, decision, approval, extra) do
+    :telemetry.execute(
+      [:conduit_mcp, :client, :policy, :decision],
+      %{count: 1},
+      base
+      |> Map.merge(extra)
+      |> Map.merge(Map.take(decision, [:decision, :source, :rule_id, :reason]))
+      |> Map.put(:approval, approval)
+    )
+  end
+
+  @doc "A hook returned within its contract. `start` is native monotonic time."
+  @spec hook_stop(map(), term(), atom(), integer(), atom()) :: :ok
+  def hook_stop(base, hook_id, kind, start, status) do
+    :telemetry.execute(
+      [:conduit_mcp, :client, :hook, :stop],
+      stop_measurements(start, %{}),
+      Map.merge(base, %{hook_id: hook_id, kind: kind, status: status})
+    )
+  end
+
+  @doc "A hook failed (raise, exit, timeout or a bad return)."
+  @spec hook_exception(map(), term(), atom(), integer(), atom()) :: :ok
+  def hook_exception(base, hook_id, kind, start, reason) do
+    :telemetry.execute(
+      [:conduit_mcp, :client, :hook, :exception],
+      stop_measurements(start, %{}),
+      Map.merge(base, %{hook_id: hook_id, kind: kind, reason: reason})
+    )
+  end
+
+  @doc "A tool name as it may appear in metadata (sanitized, capped)."
+  @spec tool_name(String.t()) :: String.t()
+  def tool_name(name), do: Reflect.text(name, 128)
+
   @doc "A connection state change."
   @spec transition(base(), atom() | nil, atom(), term(), non_neg_integer()) :: :ok
   def transition(base, from, to, reason, attempt) do

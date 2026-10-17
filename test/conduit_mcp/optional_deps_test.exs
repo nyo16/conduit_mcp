@@ -84,5 +84,23 @@ defmodule ConduitMcp.OptionalDepsTest do
       assert OptionalDeps.oauth_available?()
       assert OptionalDeps.oauth_plug!() == ConduitMcp.Plugs.OAuth
     end
+
+    test "the JSV schema validator is compiled in" do
+      assert OptionalDeps.jsv_available?()
+      assert OptionalDeps.jsv!() == ConduitMcp.Client.SchemaValidator.JSV
+    end
+
+    test "the error a missing :jsv raises names the dependency and the option" do
+      message =
+        OptionalDependencyError.exception(
+          feature: "Client JSON Schema validation (the :validate option)",
+          module: ConduitMcp.Client.SchemaValidator.JSV,
+          deps: [{:jsv, "~> 0.26"}]
+        )
+        |> Exception.message()
+
+      assert message =~ ":validate option"
+      assert message =~ ~s({:jsv, "~> 0.26"})
+    end
   end
 end

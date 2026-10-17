@@ -87,6 +87,7 @@ defmodule BareCheck do
     absent!(ConduitMcp.Plugs.OAuth)
     absent!(ConduitMcp.OAuth.KeyProvider.JWKS)
     absent!(ConduitMcp.PromEx)
+    absent!(ConduitMcp.Client.SchemaValidator.JSV)
 
     present!(ConduitMcp.Plugs.Auth)
     present!(ConduitMcp.Transport.StreamableHTTP)
@@ -102,6 +103,7 @@ defmodule BareCheck do
     oauth_init_raises!(ConduitMcp.Transport.SSE)
 
     key_provider_raises!()
+    client_validation_raises!()
     serves_without_optional_deps!()
 
     IO.puts("\nbare-consumer check: OK")
@@ -177,6 +179,39 @@ ConduitMcp.OptionalDependencyError:\n#{Exception.message(e)}")
 
         IO.puts("  ok  absent JWKS key provider rejected at init/1")
     end
+  end
+
+  # A client asking for JSON Schema validation must fail when its options are
+  # validated, naming :jsv, never on the first call.
+  defp client_validation_raises!() do
+    refute!(
+      ConduitMcp.OptionalDeps.jsv_available?(),
+      "OptionalDeps.jsv_available?/0 must be false without :jsv"
+    )
+
+    try do
+      ConduitMcp.Client.Config.new!(
+        name: :bare,
+        transport: {ConduitMcp.Client.Transport.InProcess, server: BareConsumer.Server},
+        validate: [arguments: true]
+      )
+
+      die("ConduitMcp.Client accepted validate: without :jsv")
+    rescue
+      e in ConduitMcp.OptionalDependencyError ->
+        assert!(Exception.message(e) =~ ":jsv", "validation error must name :jsv")
+        IO.puts("  ok  client validate: rejected at init without :jsv")
+    end
+
+    # Everything else about governance needs no optional dep.
+    ConduitMcp.Client.Config.new!(
+      name: :bare,
+      transport: {ConduitMcp.Client.Transport.InProcess, server: BareConsumer.Server},
+      policy: [allow: ["*"]],
+      hooks: [pre_tool_call: [{:all, fn _call, _ctx -> :cont end}]]
+    )
+
+    IO.puts("  ok  client policy and hooks need no optional deps")
   end
 
   # The library must still work for everything that needs no optional dep.
