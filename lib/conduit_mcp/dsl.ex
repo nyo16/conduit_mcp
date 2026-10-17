@@ -836,6 +836,28 @@ defmodule ConduitMcp.DSL do
 
       # Function capture
       handle &MyModule.my_function/2
+
+  ## Asking the client for input (MRTR)
+
+  On a modern-era (`2026-07-28`) request the handler may return
+  `{:input_required, input_requests, state}`; the retry finds the restored
+  state and the client's answers in `conn.assigns[:mcp_input]`. See
+  "Multi round-trip requests (MRTR)" in `ConduitMcp.Server`.
+
+      handle fn conn, params ->
+        case conn.assigns[:mcp_input] do
+          nil ->
+            {:input_required,
+             %{"approval" => ConduitMcp.MRTR.elicit("Approve deploy?", schema)},
+             %{step: :awaiting_approval, target: params["target"]}}
+
+          %{state: %{"target" => target}, responses: %{"approval" => %{"action" => "accept"}}} ->
+            text("Deployed \#{target}")
+
+          _declined ->
+            text("Cancelled")
+        end
+      end
   """
   defmacro handle({:fn, _, _} = fun) do
     # Capture the AST of the anonymous function
@@ -934,7 +956,10 @@ defmodule ConduitMcp.DSL do
   @doc """
   Defines the get handler for a prompt.
 
-  The handler should return a list of message objects.
+  The handler should return a list of message objects. On a modern-era
+  request it may instead return `{:input_required, input_requests, state}`,
+  which is passed through unwrapped; see "Multi round-trip requests (MRTR)"
+  in `ConduitMcp.Server`.
 
   ## Examples
 
@@ -1073,7 +1098,9 @@ defmodule ConduitMcp.DSL do
   @doc """
   Defines the read handler for a resource.
 
-  Handler signature: `(conn, uri_params, opts) -> result`
+  Handler signature: `(conn, uri_params, opts) -> result`. On a modern-era
+  request `result` may be `{:input_required, input_requests, state}`; see
+  "Multi round-trip requests (MRTR)" in `ConduitMcp.Server`.
 
   ## Examples
 
@@ -1630,16 +1657,14 @@ defmodule ConduitMcp.DSL do
       {:fn_ast, handler_ast} ->
         quote do
           def handle_get_prompt(conn, unquote(prompt_name), args) do
-            messages = unquote(handler_ast).(conn, args)
-            {:ok, %{"messages" => messages}}
+            ConduitMcp.DSL.__prompt_result__(unquote(handler_ast).(conn, args))
           end
         end
 
       {:mfa, {mod, fun}} ->
         quote do
           def handle_get_prompt(conn, unquote(prompt_name), args) do
-            messages = apply(unquote(mod), unquote(fun), [conn, args])
-            {:ok, %{"messages" => messages}}
+            ConduitMcp.DSL.__prompt_result__(apply(unquote(mod), unquote(fun), [conn, args]))
           end
         end
 
@@ -1649,6 +1674,16 @@ defmodule ConduitMcp.DSL do
             "Prompt '#{prompt_name}' has no get handler defined. Use 'get fn ... end' or 'get Module, :function'"
     end
   end
+
+  # A DSL `get` handler returns the message list, which is wrapped into the
+  # `prompts/get` result - except an MRTR `{:input_required, ...}`, which
+  # `ConduitMcp.Handler` must see untouched.
+  @doc false
+  @spec __prompt_result__(term()) :: {:ok, map()} | ConduitMcp.Server.input_required()
+  def __prompt_result__({:input_required, _input_requests, _state} = input_required),
+    do: input_required
+
+  def __prompt_result__(messages), do: {:ok, %{"messages" => messages}}
 
   # `readable_resources` is already in dispatch order.
   # Static URIs are tried before any template, then templates in order.

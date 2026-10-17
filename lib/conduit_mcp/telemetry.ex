@@ -70,7 +70,8 @@ defmodule ConduitMcp.Telemetry do
     * `:tool_name` (String.t | nil) - Name of the tool that was executed;
       `nil` when the client's `"name"` is missing or not a string
     * `:server_module` (module) - The MCP server module
-    * `:status` (:ok | :error) - Whether the tool executed successfully
+    * `:status` (:ok | :error) - Whether the tool executed successfully (an
+      MRTR `input_required` round counts as `:ok`)
 
   **Example:**
 
@@ -102,7 +103,8 @@ defmodule ConduitMcp.Telemetry do
     * `:uri` (String.t | nil) - URI of the resource that was read; `nil` when
       the client's `"uri"` is missing or not a string
     * `:server_module` (module) - The MCP server module
-    * `:status` (:ok | :error) - Whether the read succeeded or failed
+    * `:status` (:ok | :error) - Whether the read succeeded or failed (an
+      MRTR `input_required` round counts as `:ok`)
 
   **Example:**
 
@@ -131,7 +133,8 @@ defmodule ConduitMcp.Telemetry do
     * `:prompt_name` (String.t | nil) - Name of the prompt that was retrieved;
       `nil` when the client's `"name"` is missing or not a string
     * `:server_module` (module) - The MCP server module
-    * `:status` (:ok | :error) - Whether the prompt retrieval succeeded
+    * `:status` (:ok | :error) - Whether the prompt retrieval succeeded (an
+      MRTR `input_required` round counts as `:ok`)
 
   **Example:**
 
@@ -143,6 +146,32 @@ defmodule ConduitMcp.Telemetry do
         end,
         nil
       )
+
+  ### MRTR Events
+
+  #### `[:conduit_mcp, :mrtr, :input_required]`
+
+  Emitted when a modern-era `tools/call`, `resources/read` or `prompts/get`
+  answers with an `InputRequiredResult` (see "Multi round-trip requests
+  (MRTR)" in `ConduitMcp.Server`) — after the input requests passed the
+  client-capability check and the state was sealed. Not emitted for a
+  rejected round (`-32021`, `-32603`).
+
+  **Measurements:**
+
+    * `:count` (integer) - Number of input requests in the result
+
+  **Metadata:**
+
+    * `:method` (String.t) - `"tools/call"`, `"resources/read"` or
+      `"prompts/get"`
+    * `:server_module` (module) - The MCP server module
+    * `:round` (pos_integer) - Which `input_required` round of the exchange
+      this is: `1` for a first request, `n + 1` for a retry whose verified
+      `requestState` came from round `n`
+
+  Neither the input requests, the state nor the `requestState` token is
+  included.
 
   ### Rate Limiting Events
 
@@ -547,7 +576,8 @@ defmodule ConduitMcp.Telemetry do
         [:conduit_mcp, :cancellation, :cleanup],
         [:conduit_mcp, :cancellation, :janitor],
         [:conduit_mcp, :session, :cleanup],
-        [:conduit_mcp, :tasks, :cleanup]
+        [:conduit_mcp, :tasks, :cleanup],
+        [:conduit_mcp, :mrtr, :input_required]
       ]
   """
   @spec events() :: [[:conduit_mcp, ...]]
@@ -564,7 +594,8 @@ defmodule ConduitMcp.Telemetry do
       [:conduit_mcp, :cancellation, :cleanup],
       [:conduit_mcp, :cancellation, :janitor],
       [:conduit_mcp, :session, :cleanup],
-      [:conduit_mcp, :tasks, :cleanup]
+      [:conduit_mcp, :tasks, :cleanup],
+      [:conduit_mcp, :mrtr, :input_required]
     ]
   end
 
@@ -727,6 +758,14 @@ defmodule ConduitMcp.Telemetry do
 
     Logger.debug(
       "Janitor run: #{scope}.#{event} removed=#{measurements.removed} store=#{inspect(metadata[:store])}"
+    )
+  end
+
+  defp handle_event([:conduit_mcp, :mrtr, :input_required], measurements, metadata, _config) do
+    require Logger
+
+    Logger.debug(
+      "MRTR input required: method=#{metadata.method} round=#{metadata.round} count=#{measurements.count}"
     )
   end
 end

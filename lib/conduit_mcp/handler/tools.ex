@@ -7,6 +7,7 @@ defmodule ConduitMcp.Handler.Tools do
   alias ConduitMcp.Errors
   alias ConduitMcp.Handler
   alias ConduitMcp.Handler.Common
+  alias ConduitMcp.Handler.MRTR
   alias ConduitMcp.Handler.Pipeline
 
   @doc """
@@ -17,7 +18,8 @@ defmodule ConduitMcp.Handler.Tools do
     do: Common.dispatch_list(params, server_module, conn, :handle_list_tools)
 
   @doc """
-  `tools/call`: scope check, parameter validation, dispatch, then the
+  `tools/call`: scope check, parameter validation, dispatch (through
+  `ConduitMcp.Handler.MRTR.dispatch/6`), then the
   `[:conduit_mcp, :tool, :execute]` event.
   """
   @spec call(map(), module(), Plug.Conn.t()) :: Handler.result()
@@ -34,8 +36,12 @@ defmodule ConduitMcp.Handler.Tools do
              ),
            {:ok, validated_params} <-
              ConduitMcp.Validation.validate_tool_params(server_module, tool_name, tool_params) do
-        Common.dispatch_callback(
-          fn -> server_module.handle_call_tool(conn, tool_name, validated_params) end,
+        MRTR.dispatch(
+          conn,
+          "tools/call",
+          params,
+          server_module,
+          &server_module.handle_call_tool(&1, tool_name, validated_params),
           "handle_call_tool"
         )
         |> maybe_add_meta(params)
@@ -79,6 +85,9 @@ defmodule ConduitMcp.Handler.Tools do
       _ -> {:ok, result}
     end
   end
+
+  defp maybe_add_meta({:input_required, _input_requests, _request_state} = result, _params),
+    do: result
 
   defp maybe_add_meta({:error, _code, _message, _data} = error, _params), do: error
 end

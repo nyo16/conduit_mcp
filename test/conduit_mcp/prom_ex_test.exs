@@ -10,7 +10,7 @@ if Code.ensure_loaded?(PromEx) do
         metrics = PromEx.event_metrics(opts)
 
         assert is_list(metrics)
-        assert length(metrics) == 9
+        assert length(metrics) == 10
       end
 
       # The plugin used to skip rate limiting, cancellation and the janitors,
@@ -34,6 +34,18 @@ if Code.ensure_loaded?(PromEx) do
           # request ids, scopes and client-supplied reasons are unbounded
           assert metric.tags -- [:store] == [], inspect(metric.name)
         end
+      end
+
+      test "MRTR metrics are tagged by method only" do
+        [group] =
+          for group <- PromEx.event_metrics(otp_app: :test_app),
+              group.group_name == :conduit_mcp_mrtr_metrics,
+              do: group
+
+        assert Enum.map(group.metrics, & &1.tags) == [[:method], [:method]]
+
+        assert Enum.map(group.metrics, & &1.tag_values.(%{method: "tools/call", round: 3})) ==
+                 [%{method: "tools/call"}, %{method: "tools/call"}]
       end
 
       test "requires otp_app option" do

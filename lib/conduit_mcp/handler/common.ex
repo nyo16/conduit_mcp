@@ -14,12 +14,25 @@ defmodule ConduitMcp.Handler.Common do
 
   @doc """
   Runs a server callback and normalizes its return into a neutral result.
+
+  Only the three MRTR callbacks may return `{:input_required, ...}`, and
+  `ConduitMcp.Handler.MRTR.dispatch/6` matches it before delegating here;
+  from any other callback it is logged and becomes `-32603`, like every
+  other unexpected shape.
   """
   @spec dispatch_callback((-> term()), String.t()) :: Handler.result()
   def dispatch_callback(callback_fn, callback_name) do
     case callback_fn.() do
       {:ok, result} when is_map(result) ->
         {:ok, result}
+
+      {:input_required, _input_requests, _state} ->
+        Logger.error(
+          "#{callback_name} returned {:input_required, ...}; only handle_call_tool/3, " <>
+            "handle_read_resource/2 and handle_get_prompt/3 may"
+        )
+
+        {:error, Errors.internal_error(), "Internal server error", nil}
 
       {:error, error} ->
         {:error, error["code"] || Errors.server_error(),
@@ -179,8 +192,12 @@ defmodule ConduitMcp.Handler.Common do
 
   @doc """
   The per-method telemetry `status` of a neutral result.
+
+  An `input_required` round is `:ok`: the callback did not fail, it asked
+  for input (counted by `[:conduit_mcp, :mrtr, :input_required]`).
   """
   @spec status(Handler.result()) :: :ok | :error
   def status({:ok, _result}), do: :ok
+  def status({:input_required, _input_requests, _request_state}), do: :ok
   def status({:error, _code, _message, _data}), do: :error
 end
