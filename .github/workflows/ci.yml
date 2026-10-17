@@ -185,6 +185,11 @@ jobs:
       - name: Check for unused dependencies
         run: mix deps.unlock --check-unused
 
+      # Hex rejects some metadata (a description over 300 characters) only
+      # at publish time; building the package here fails the PR instead.
+      - name: Check the Hex package builds
+        run: mix hex.build
+
   dialyzer:
     name: Dialyzer
     runs-on: ubuntu-latest

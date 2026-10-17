@@ -130,12 +130,10 @@ defmodule ConduitMcp.MixProject do
 
   defp description do
     """
-    Elixir implementation of the Model Context Protocol (MCP). Build dual-era MCP
-    servers that serve the modern 2026-07-28 protocol and the legacy 2025-11-25 /
-    2025-06-18 protocols side by side, exposing tools, resources, and prompts over
-    Streamable HTTP and SSE with authentication, rate limiting, and CORS. Includes a
-    governed MCP client (stdio and Streamable HTTP, multi-server hub, LLM adapters,
-    OAuth 2.1).
+    Elixir Model Context Protocol (MCP) library. Dual-era servers speak MCP
+    2026-07-28 and 2025-11-25/2025-06-18 on one endpoint, with auth and rate
+    limiting. Includes a governed MCP client: stdio and Streamable HTTP, a
+    multi-server hub, LLM adapters and OAuth 2.1.
     """
   end
 
