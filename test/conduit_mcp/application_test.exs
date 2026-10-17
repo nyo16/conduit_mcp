@@ -129,6 +129,23 @@ defmodule ConduitMcp.ApplicationTest do
       assert removed >= 1
       assert Session.EtsStore.get(id) == {:error, :not_found}
     end
+
+    test "the client registry is running, unique, and holds no client of its own" do
+      registry = ConduitMcp.Client.Registry
+      assert is_pid(Process.whereis(registry))
+
+      # A key of any term: client names never become atoms.
+      key = {:application_test, make_ref()}
+      assert {:ok, _owner} = Registry.register(registry, key, :value)
+
+      task = Task.async(fn -> Registry.register(registry, key, :other) end)
+      assert {:error, {:already_registered, owner}} = Task.await(task)
+      assert owner == self()
+
+      # The application itself starts no client (this module is async: false,
+      # so no async test's supervised client is alive now).
+      assert Registry.select(registry, [{{{:client, :_}, :_, :_}, [], [true]}]) == []
+    end
   end
 
   defp attach_forwarder(events) do

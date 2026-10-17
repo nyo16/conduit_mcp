@@ -146,6 +146,38 @@ if Code.ensure_loaded?(PromEx) do
       - Tags: `store`
     - `{prefix}_tasks_cleanup_removed_total` - Sum of terminal tasks evicted
 
+    ### Client Metrics
+
+    From `ConduitMcp.Client`. Tool names and notification methods come from
+    the server, and client names may be per-tenant, so none of them is a tag.
+
+    - `{prefix}_client_request_start_total`,
+      `{prefix}_client_request_exception_total` - Counters of requests sent
+      and of requests whose caller raised
+      - Tags: `method`
+    - `{prefix}_client_request_total` - Counter of finished requests
+      - Tags: `method`, `status`, `error_kind`
+    - `{prefix}_client_request_duration_milliseconds` - Distribution of
+      request durations
+      - Tags: `method`, `status`
+    - `{prefix}_client_tool_call_start_total`,
+      `{prefix}_client_tool_call_exception_total` - Counters of tool calls
+    - `{prefix}_client_tool_call_total` - Counter of finished tool calls
+      - Tags: `status`, `error_kind`, `is_error`
+    - `{prefix}_client_tool_call_duration_milliseconds` - Distribution of tool
+      call durations
+      - Tags: `status`
+    - `{prefix}_client_connection_transition_total` - Counter of connection
+      state changes
+      - Tags: `to`, `reason`
+    - `{prefix}_client_request_cancel_total` - Counter of requests the client
+      cancelled
+      - Tags: `reason`
+    - `{prefix}_client_response_dropped_total` - Counter of late responses
+      dropped
+    - `{prefix}_client_notification_total` - Counter of server notifications
+      received
+
     ## PromQL Examples
 
     ### Request Rate by Method
@@ -249,7 +281,8 @@ if Code.ensure_loaded?(PromEx) do
         message_rate_limit_metrics(metric_prefix, duration_unit),
         auth_metrics(metric_prefix, duration_unit),
         cancellation_metrics(metric_prefix),
-        cleanup_metrics(metric_prefix)
+        cleanup_metrics(metric_prefix),
+        client_metrics(metric_prefix, duration_unit)
       ]
     end
 
@@ -537,7 +570,121 @@ if Code.ensure_loaded?(PromEx) do
       )
     end
 
+    # Client metrics from the [:conduit_mcp, :client, ...] events. Only
+    # closed-set atoms and the client's own method names become tags.
+    defp client_metrics(metric_prefix, duration_unit) do
+      Event.build(
+        :conduit_mcp_client_metrics,
+        [
+          counter(
+            metric_prefix ++ [:client, :request, :start, :total],
+            event_name: [:conduit_mcp, :client, :request, :start],
+            description: "Total number of MCP client requests sent",
+            measurement: fn _measurements -> 1 end,
+            tags: [:method],
+            tag_values: &extract_client_tags/1
+          ),
+          counter(
+            metric_prefix ++ [:client, :request, :total],
+            event_name: [:conduit_mcp, :client, :request, :stop],
+            description: "Total number of finished MCP client requests",
+            measurement: fn _measurements -> 1 end,
+            tags: [:method, :status, :error_kind],
+            tag_values: &extract_client_tags/1
+          ),
+          distribution(
+            metric_prefix ++ [:client, :request, :duration, duration_unit],
+            event_name: [:conduit_mcp, :client, :request, :stop],
+            description: "MCP client request duration distribution",
+            measurement: :duration,
+            unit: {:native, duration_unit},
+            tags: [:method, :status],
+            tag_values: &extract_client_tags/1,
+            reporter_options: [
+              buckets: [10, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 60_000]
+            ]
+          ),
+          counter(
+            metric_prefix ++ [:client, :request, :exception, :total],
+            event_name: [:conduit_mcp, :client, :request, :exception],
+            description: "MCP client requests whose caller raised",
+            measurement: fn _measurements -> 1 end,
+            tags: [:method],
+            tag_values: &extract_client_tags/1
+          ),
+          counter(
+            metric_prefix ++ [:client, :tool_call, :start, :total],
+            event_name: [:conduit_mcp, :client, :tool_call, :start],
+            description: "Total number of MCP client tool calls started",
+            measurement: fn _measurements -> 1 end
+          ),
+          counter(
+            metric_prefix ++ [:client, :tool_call, :total],
+            event_name: [:conduit_mcp, :client, :tool_call, :stop],
+            description: "Total number of finished MCP client tool calls",
+            measurement: fn _measurements -> 1 end,
+            tags: [:status, :error_kind, :is_error],
+            tag_values: &extract_client_tags/1
+          ),
+          distribution(
+            metric_prefix ++ [:client, :tool_call, :duration, duration_unit],
+            event_name: [:conduit_mcp, :client, :tool_call, :stop],
+            description: "MCP client tool call duration distribution",
+            measurement: :duration,
+            unit: {:native, duration_unit},
+            tags: [:status],
+            tag_values: &extract_client_tags/1,
+            reporter_options: [
+              buckets: [10, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 60_000]
+            ]
+          ),
+          counter(
+            metric_prefix ++ [:client, :tool_call, :exception, :total],
+            event_name: [:conduit_mcp, :client, :tool_call, :exception],
+            description: "MCP client tool calls whose caller raised",
+            measurement: fn _measurements -> 1 end
+          ),
+          counter(
+            metric_prefix ++ [:client, :connection, :transition, :total],
+            event_name: [:conduit_mcp, :client, :connection, :transition],
+            description: "MCP client connection state changes",
+            measurement: fn _measurements -> 1 end,
+            tags: [:to, :reason],
+            tag_values: &extract_client_tags/1
+          ),
+          counter(
+            metric_prefix ++ [:client, :request, :cancel, :total],
+            event_name: [:conduit_mcp, :client, :request, :cancel],
+            description: "MCP client requests cancelled by the client",
+            measurement: fn _measurements -> 1 end,
+            tags: [:reason],
+            tag_values: &extract_client_tags/1
+          ),
+          counter(
+            metric_prefix ++ [:client, :response, :dropped, :total],
+            event_name: [:conduit_mcp, :client, :response, :dropped],
+            description: "Late MCP responses dropped by the client",
+            measurement: fn _measurements -> 1 end
+          ),
+          counter(
+            metric_prefix ++ [:client, :notification, :total],
+            event_name: [:conduit_mcp, :client, :notification],
+            description: "MCP server notifications received by the client",
+            measurement: fn _measurements -> 1 end
+          )
+        ]
+      )
+    end
+
     # Tag extraction functions
+
+    @client_tags [:method, :status, :error_kind, :is_error, :to, :reason]
+
+    defp extract_client_tags(metadata) do
+      for key <- @client_tags, Map.has_key?(metadata, key), into: %{} do
+        {key, normalize_string(Map.fetch!(metadata, key))}
+      end
+    end
 
     defp extract_status_tag(%{status: status}), do: %{status: status}
 

@@ -332,6 +332,64 @@ defmodule ConduitMcp.TelemetryTest do
         })
 
         :telemetry.execute([:conduit_mcp, :tasks, :cleanup], %{removed: 0}, %{})
+
+        client = %{client: {:client, make_ref()}, server_id: "s", transport: :stdio, era: nil}
+        span = %{duration: 1, monotonic_time: 2}
+
+        for span_name <- [:request, :tool_call] do
+          :telemetry.execute(
+            [:conduit_mcp, :client, span_name, :start],
+            %{monotonic_time: 1, system_time: 1},
+            Map.merge(client, %{method: "tools/call", tool_name: "echo"})
+          )
+
+          :telemetry.execute(
+            [:conduit_mcp, :client, span_name, :exception],
+            span,
+            Map.merge(client, %{method: "tools/call", tool_name: "echo", kind: :error})
+          )
+        end
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :request, :stop],
+          span,
+          Map.merge(client, %{method: "x\nforged", status: :ok, error_kind: nil, request_id: 1})
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :tool_call, :stop],
+          Map.put(span, :rounds, 1),
+          Map.merge(client, %{
+            tool_name: "echo",
+            status: :error,
+            error_kind: :timeout,
+            is_error: nil
+          })
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :connection, :transition],
+          %{system_time: 1},
+          Map.merge(client, %{from: nil, to: :closed, reason: :gave_up, attempt: 3})
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :request, :cancel],
+          %{count: 1},
+          Map.merge(client, %{method: "tools/call", request_id: 4, reason: :timeout})
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :response, :dropped],
+          %{count: 1},
+          Map.put(client, :request_id, nil)
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :notification],
+          %{count: 1},
+          Map.put(client, :method, "notifications/message")
+        )
       end)
 
       for event <- ConduitMcp.Telemetry.events() do

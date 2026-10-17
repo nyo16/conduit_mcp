@@ -1,0 +1,166 @@
+defmodule ConduitMcp.Client.Telemetry do
+  @moduledoc false
+
+  # Every `[:conduit_mcp, :client, ...]` event, emitted with literal event
+  # names (documented in `ConduitMcp.Telemetry`). Metadata is built here from
+  # an allowlist only (TL-1): client name, server id, method, sanitized tool
+  # name, era, transport kind, closed-set atoms and request ids. Never
+  # arguments, results, `_meta`, tokens or raw error data.
+  #
+  # Spans (`request`, `tool_call`) run in the caller; the rest run inside the
+  # connection process.
+
+  alias ConduitMcp.Client.Error
+  alias ConduitMcp.Reflect
+
+  @type base :: %{
+          client: term(),
+          server_id: String.t(),
+          transport: atom(),
+          era: :modern | :legacy | nil
+        }
+
+  @doc "The allowlisted base metadata."
+  @spec base(term(), String.t(), atom(), :modern | :legacy | nil) :: base()
+  def base(client, server_id, transport, era),
+    do: %{client: client, server_id: server_id, transport: transport, era: era}
+
+  @doc """
+  Runs `fun` inside a `[:conduit_mcp, :client, :request, ...]` span. `fun`
+  returns `{result, extra_stop_metadata}`.
+  """
+  @spec request_span(base(), String.t(), (-> {result, map()})) :: result when result: term()
+  def request_span(base, method, fun) do
+    meta = Map.put(base, :method, method)
+    start = System.monotonic_time()
+
+    :telemetry.execute(
+      [:conduit_mcp, :client, :request, :start],
+      %{monotonic_time: start, system_time: System.system_time()},
+      meta
+    )
+
+    try do
+      {result, extra} = fun.()
+
+      :telemetry.execute(
+        [:conduit_mcp, :client, :request, :stop],
+        stop_measurements(start, %{}),
+        meta |> Map.merge(status(result)) |> Map.merge(extra)
+      )
+
+      result
+    catch
+      kind, reason ->
+        :telemetry.execute(
+          [:conduit_mcp, :client, :request, :exception],
+          stop_measurements(start, %{}),
+          Map.put(meta, :kind, kind)
+        )
+
+        :erlang.raise(kind, reason, __STACKTRACE__)
+    end
+  end
+
+  @doc """
+  Runs `fun` inside a `[:conduit_mcp, :client, :tool_call, ...]` span. `fun`
+  returns `{result, rounds}`.
+  """
+  @spec tool_call_span(base(), String.t(), (-> {result, non_neg_integer()})) :: result
+        when result: term()
+  def tool_call_span(base, tool_name, fun) do
+    meta = Map.put(base, :tool_name, Reflect.text(tool_name, 128))
+    start = System.monotonic_time()
+
+    :telemetry.execute(
+      [:conduit_mcp, :client, :tool_call, :start],
+      %{monotonic_time: start, system_time: System.system_time()},
+      meta
+    )
+
+    try do
+      {result, rounds} = fun.()
+
+      :telemetry.execute(
+        [:conduit_mcp, :client, :tool_call, :stop],
+        stop_measurements(start, %{rounds: rounds}),
+        meta |> Map.merge(status(result)) |> Map.put(:is_error, error_flag(result))
+      )
+
+      result
+    catch
+      kind, reason ->
+        :telemetry.execute(
+          [:conduit_mcp, :client, :tool_call, :exception],
+          stop_measurements(start, %{}),
+          Map.put(meta, :kind, kind)
+        )
+
+        :erlang.raise(kind, reason, __STACKTRACE__)
+    end
+  end
+
+  @doc "A connection state change."
+  @spec transition(base(), atom() | nil, atom(), term(), non_neg_integer()) :: :ok
+  def transition(base, from, to, reason, attempt) do
+    :telemetry.execute(
+      [:conduit_mcp, :client, :connection, :transition],
+      %{system_time: System.system_time()},
+      Map.merge(base, %{from: from, to: to, reason: reason_tag(reason), attempt: attempt})
+    )
+  end
+
+  @doc "The connection cancelled an in-flight request."
+  @spec cancel(base(), String.t(), term(), atom()) :: :ok
+  def cancel(base, method, request_id, reason) do
+    :telemetry.execute(
+      [:conduit_mcp, :client, :request, :cancel],
+      %{count: 1},
+      Map.merge(base, %{method: method, request_id: request_id, reason: reason})
+    )
+  end
+
+  @doc "A response for an unknown or no longer pending id was dropped."
+  @spec dropped(base(), term()) :: :ok
+  def dropped(base, request_id) do
+    :telemetry.execute(
+      [:conduit_mcp, :client, :response, :dropped],
+      %{count: 1},
+      Map.put(base, :request_id, if(is_integer(request_id), do: request_id))
+    )
+  end
+
+  @doc "A server notification reached the connection."
+  @spec notification(base(), term()) :: :ok
+  def notification(base, method) do
+    :telemetry.execute(
+      [:conduit_mcp, :client, :notification],
+      %{count: 1},
+      Map.put(base, :method, Reflect.text(method, 64))
+    )
+  end
+
+  @doc """
+  A closed-set atom for a state-change reason: atoms pass through, a tagged
+  tuple gives its tag, an `Error` its reason atom (else its kind).
+  """
+  @spec reason_tag(term()) :: atom()
+  def reason_tag(reason) when is_atom(reason), do: reason
+  def reason_tag(%Error{reason: reason}) when is_atom(reason) and reason != nil, do: reason
+  def reason_tag(%Error{kind: kind}), do: kind
+  def reason_tag(reason) when is_tuple(reason) and is_atom(elem(reason, 0)), do: elem(reason, 0)
+  def reason_tag(_reason), do: :other
+
+  defp stop_measurements(start, extra) do
+    now = System.monotonic_time()
+    Map.merge(%{duration: now - start, monotonic_time: now}, extra)
+  end
+
+  defp status({:error, %Error{kind: kind}}), do: %{status: :error, error_kind: kind}
+  defp status(:ok), do: %{status: :ok, error_kind: nil}
+  defp status({:ok, _}), do: %{status: :ok, error_kind: nil}
+  defp status(_other), do: %{status: :error, error_kind: nil}
+
+  defp error_flag({:ok, %{is_error: is_error}}), do: is_error
+  defp error_flag(_result), do: nil
+end
