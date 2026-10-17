@@ -190,7 +190,9 @@ defmodule ConduitMcp.MixProject do
         ],
         "Protocol & Handler": [
           ConduitMcp.Protocol,
+          ConduitMcp.Protocol.Legacy,
           ConduitMcp.Handler,
+          ConduitMcp.Capabilities,
           ConduitMcp.Errors,
           ConduitMcp.Cancellation
         ],
