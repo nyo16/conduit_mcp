@@ -50,6 +50,11 @@ defmodule ConduitMcp.Client do
     * `:assigns` - a map given to `ConduitMcp.Client.Handler` callbacks as
       `ctx.assigns` for input requests made on behalf of this call (default
       the client's `:assigns`).
+    * `:traceparent` - the W3C trace context to send in a modern request's
+      `_meta` (default: the caller's `Logger.metadata()[:traceparent]`, as
+      OpenTelemetry-style integrations set it). Dropped unless well formed;
+      a `traceparent` in `:meta` wins. Only `traceparent` is propagated,
+      never `tracestate` or `baggage`.
 
   ## Eras
 
@@ -186,7 +191,8 @@ defmodule ConduitMcp.Client do
     :on_progress,
     :reset_timeout_on_progress,
     :max_total_timeout,
-    :assigns
+    :assigns,
+    :traceparent
   ]
   @control_timeout 5_000
   @header_mismatch ConduitMcp.Errors.header_mismatch()

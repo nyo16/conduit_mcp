@@ -819,6 +819,12 @@ if Code.ensure_loaded?(PromEx) do
             measurement: fn _measurements -> 1 end
           ),
           counter(
+            metric_prefix ++ [:client, :log, :dropped, :total],
+            event_name: [:conduit_mcp, :client, :log, :dropped],
+            description: "MCP server log entries dropped over the client's log rate limit",
+            measurement: fn _measurements -> 1 end
+          ),
+          counter(
             metric_prefix ++ [:client, :cache, :refresh, :start, :total],
             event_name: [:conduit_mcp, :client, :cache, :refresh, :start],
             description: "MCP client cache refreshes started",

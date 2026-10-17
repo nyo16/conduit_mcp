@@ -118,10 +118,10 @@ defmodule ConduitMcp.Client.Connection.Requests do
   defp op_action(:ping, _params, data), do: {:send, "ping", %{}, data}
 
   defp op_action({:set_log_level, level}, _params, %{era: :modern} = data),
-    do: {:local, %{}, %{data | log_level: level}}
+    do: {:local, %{}, put_log_level(data, level)}
 
   defp op_action({:set_log_level, level}, _params, data),
-    do: {:send, "logging/setLevel", %{"level" => level}, %{data | log_level: level}}
+    do: {:send, "logging/setLevel", %{"level" => level}, put_log_level(data, level)}
 
   defp op_action(:roots_list_changed, _params, %{era: :modern} = data),
     do: {:error, Error.new(:protocol, {:unsupported_in_era, :modern}), data}
@@ -132,6 +132,8 @@ defmodule ConduitMcp.Client.Connection.Requests do
       else: {:error, Error.new(:protocol, :roots_not_declared), data}
   end
 
+  defp put_log_level(data, level), do: %{data | log: %{data.log | level: level}}
+
   defp send_new(method, params, mref, caller, opts, data) do
     if map_size(data.pending) >= data.config.max_in_flight do
       reply(mref, {:error, Error.new(:overloaded, :max_in_flight)})
@@ -140,6 +142,7 @@ defmodule ConduitMcp.Client.Connection.Requests do
       {id, data} = Data.take_id(data)
       info = if Keyword.get(opts, :progress, false), do: %{progress_token: id}, else: %{}
       info = Map.put(info, :extensions, Keyword.get(opts, :extensions, %{}))
+      info = Map.put(info, :traceparent, Keyword.get(opts, :traceparent))
 
       wire_opts = Keyword.take(opts, [:headers, :max_deadline])
 

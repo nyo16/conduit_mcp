@@ -131,7 +131,7 @@ resource limits, or MuonTrap for kill-on-parent-exit.
 | `max_message_bytes: 8 MiB` | Per JSON body, per event-stream event, and per event-stream line; over it the request fails with `kind: :message_too_large` |
 | No decompression | Requests send `accept-encoding: identity`; a response with a `content-encoding` fails |
 | `redirect: false` | Every redirect fails. `:same_origin` follows only 307/308 to the same scheme, host and port, at most 5 |
-| TLS verified | Peer verification against the system CA store. `verify: :verify_none` in `:transport_opts` is refused |
+| TLS verified | Peer verification against the system CA store. Any `verify:` other than `:verify_peer` (duplicates included) and any `verify_fun:` in `:transport_opts` are refused, for the transport and for OAuth requests |
 | `insecure_skip_tls_verify: false` | Local development only; a warning is logged every time the transport starts |
 | No bearer over plain HTTP | `:auth` with an `http` URL to a non-loopback host raises at start |
 | Deadlines | A total deadline per request (bytes arriving slowly never extend it); long-lived streams get `listen_idle_timeout` (120 s) |
@@ -195,6 +195,16 @@ Elsewhere:
 - Client telemetry metadata comes from a fixed allowlist: no arguments,
   results, `_meta`, tokens or raw error data. Tool names and methods are
   sanitized, and are server-supplied, so never use them as metric tags.
+- Server log entries (`notifications/message`) are rate limited per
+  connection (`:log_rate_limit`, 50/s with bursts of 100; drops emit
+  `[:conduit_mcp, :client, :log, :dropped]`) and reach subscribers and
+  `handle_log/3` with every string passed through
+  `ConduitMcp.Reflect.text/2` and the level clamped to the RFC 5424 set,
+  so a server cannot forge your log lines.
+- Trace context: only a well-formed W3C `traceparent` (from the
+  `:traceparent` request option or `Logger.metadata()[:traceparent]`) is
+  propagated in a modern request's `_meta`; `tracestate` and `baggage`
+  never are.
 - Hooks: what a failing hook raised is never logged or emitted.
 - Task ids are bound to the credential that created them and may act as
   bearer tokens: never log them.

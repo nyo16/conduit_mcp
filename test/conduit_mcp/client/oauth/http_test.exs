@@ -6,6 +6,7 @@ defmodule ConduitMcp.Client.OAuth.HTTPTest do
 
   @moduletag :integration
 
+  alias ConduitMcp.Client.OAuth
   alias ConduitMcp.Client.OAuth.HTTP
 
   defmodule Echo do
@@ -134,6 +135,40 @@ defmodule ConduitMcp.Client.OAuth.HTTPTest do
 
       assert {:error, {:invalid_url, :insecure_url}} =
                HTTP.get("http://auth.test:#{ctx.port}/meta", %{allow_insecure: true})
+    end
+
+    # HT-8 on the OAuth path: `insecure_skip_tls_verify` does not exist
+    # here, so nothing may turn verification off.
+    test "a certificate from a CA outside the trust store fails", ctx do
+      http = %{resolver: ctx.resolver, allow_private: ["127.0.0.0/8"]}
+
+      assert {:error, {:transport_error, _}} =
+               HTTP.get("https://auth.test:#{ctx.port}/meta", http)
+
+      refute_received {:hit, _}
+    end
+
+    test "TLS options that turn verification off are refused, and never reach the socket",
+         ctx do
+      accept_all = {fn _cert, _event, state -> {:valid, state} end, nil}
+
+      for tls <- [
+            [verify: :verify_none],
+            [verify: :verify_peer, verify: :verify_none],
+            [verify_fun: accept_all]
+          ] do
+        assert {:error, message} =
+                 OAuth.Config.new(server_url: "https://mcp.example.com", transport_opts: tls)
+
+        assert message =~ "transport_opts"
+
+        http = %{resolver: ctx.resolver, allow_private: ["127.0.0.0/8"], transport_opts: tls}
+
+        assert {:error, {:transport_error, _}} =
+                 HTTP.get("https://auth.test:#{ctx.port}/meta", http)
+      end
+
+      refute_received {:hit, _}
     end
   end
 

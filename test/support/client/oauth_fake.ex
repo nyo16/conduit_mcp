@@ -309,7 +309,7 @@ defmodule ConduitMcp.Test.Client.OAuthFake do
       if keep_refresh? do
         {nil, state}
       else
-        refresh = "rt-#{n}"
+        refresh = "rt-#{n}-" <> random()
         record = %{resource: resource, scopes: scopes, client_id: client_id}
         {refresh, %{state | refresh: Map.put(state.refresh, refresh, record)}}
       end
@@ -347,7 +347,11 @@ defmodule ConduitMcp.Test.Client.OAuthFake do
     token
   end
 
-  defp access_token(_state, n, _resource, _scopes), do: "at-#{n}"
+  defp access_token(_state, n, _resource, _scopes), do: "at-#{n}-" <> random()
+
+  # Codes and tokens are unique strings, so the secret scan can search for
+  # them without matching anything else.
+  defp random, do: Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
 
   defp register(req, fake) do
     body = req.json || %{}

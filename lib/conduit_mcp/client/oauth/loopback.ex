@@ -57,6 +57,9 @@ if Code.ensure_loaded?(Finch) do
       @impl true
       def init(opts), do: opts
 
+      # sobelow_skip ["XSS.SendResp"]
+      # `page/1` returns one of two literal pages; nothing from the request
+      # (the query only decides which) is ever written into the body.
       @impl true
       def call(%{method: "GET", request_path: path} = conn, %{path: path} = opts) do
         if :atomics.compare_exchange(opts.once, 1, 0, 1) == :ok do

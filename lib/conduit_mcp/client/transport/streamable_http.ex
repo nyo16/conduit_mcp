@@ -98,8 +98,9 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
               default: [],
               doc: """
               TLS options for the library-started pool (Mint
-              `:transport_opts`, for example `cacertfile:`).
-              `verify: :verify_none` is refused; see
+              `:transport_opts`, for example `cacertfile:`). Anything that
+              turns certificate verification off (`verify:` other than
+              `:verify_peer`, or a `verify_fun:`) is refused; see
               `:insecure_skip_tls_verify`.
               """
             ],
@@ -303,11 +304,22 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
       else: :ok
   end
 
+  # HT-8: verification is turned off by `:insecure_skip_tls_verify` only.
+  # Every `:verify` entry is checked, not just the first: `:ssl` honours a
+  # later duplicate. A `:verify_fun` replaces the certificate checks
+  # altogether, so it is refused too.
   defp check_tls(opts) do
+    tls = opts[:transport_opts]
+
     cond do
-      opts[:transport_opts][:verify] == :verify_none ->
+      Enum.any?(Keyword.get_values(tls, :verify), &(&1 != :verify_peer)) ->
         {:error,
-         "invalid value for :transport_opts option: verify: :verify_none is refused; " <>
+         "invalid value for :transport_opts option: only verify: :verify_peer is accepted; " <>
+           "set insecure_skip_tls_verify: true to disable certificate checks"}
+
+      Keyword.has_key?(tls, :verify_fun) ->
+        {:error,
+         "invalid value for :transport_opts option: verify_fun is refused; " <>
            "set insecure_skip_tls_verify: true to disable certificate checks"}
 
       opts[:insecure_skip_tls_verify] and opts[:finch] != nil ->

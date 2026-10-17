@@ -182,6 +182,7 @@ Every request function accepts these options:
 | `:max_total_timeout` | The ceiling for the above. It also caps a deadline paused while the handler answers a legacy server request tied to the call. Default: the client's `:max_total_timeout` (300 000) |
 | `:meta` | A map merged into the request's `_meta`. Reserved keys (`progressToken`, `io.modelcontextprotocol/*`) are dropped |
 | `:assigns` | A map given to the `ConduitMcp.Client.Handler` callbacks as `ctx.assigns` for input requests made for this call. Default: the client's `:assigns` |
+| `:traceparent` | The W3C trace context sent in a modern request's `_meta`. Default: the caller's `Logger.metadata()[:traceparent]`. Dropped unless well formed; a `traceparent` in `:meta` wins. `tracestate` and `baggage` are never propagated |
 
 ```elixir
 ConduitMcp.Client.call_tool(:docs, "index_repo", %{"repo" => "a/b"},
@@ -409,6 +410,14 @@ delivered at once, and any more within the next 250 ms arrive as one trailing
 notification. Each delivered `list_changed` marks the matching cached list
 stale and, if it was ever fetched, refreshes it.
 
+Server log entries (`notifications/message`) are limited per connection to
+`log_rate_limit: [per_second: 50, burst: 100]`; the rest are dropped, each
+emitting `[:conduit_mcp, :client, :log, :dropped]`. Delivered entries carry
+only `level`, `logger` and `data`, with every string passed through
+`ConduitMcp.Reflect.text/2` (no control, bidi or line-separator characters;
+`data` strings clamped to 4 096 characters, nesting cut below 16 levels),
+and a `level` outside the RFC 5424 set becomes `"info"`.
+
 Subscribe to one resource's updates, in either era:
 
 ```elixir
@@ -556,7 +565,7 @@ it starts.
 | `:headers` | `[]` | Extra `{name, value}` headers; a value may be a `Secret`. Headers the transport owns (`accept`, `authorization`, `content-type`, `mcp-*`, `last-event-id`, hop-by-hop) are refused |
 | `:finch` | `nil` | The name of a `Finch` pool you started |
 | `:pool_size` | 100 | Connections in the library-started pool. Each open event stream holds one |
-| `:transport_opts` | `[]` | TLS options for the library-started pool (Mint `:transport_opts`, for example `cacertfile:`). `verify: :verify_none` is refused |
+| `:transport_opts` | `[]` | TLS options for the library-started pool (Mint `:transport_opts`, for example `cacertfile:`). Any `verify:` other than `:verify_peer`, and `verify_fun:`, are refused |
 | `:insecure_skip_tls_verify` | `false` | Skip certificate verification. **Local development only**: a warning is logged whenever the transport starts |
 | `:redirect` | `false` | `false` refuses every redirect. `:same_origin` follows 307/308 to the same scheme, host and port (at most 5) |
 | `:max_message_bytes` | 8 MiB | The largest JSON body or event-stream event. More fails with `kind: :message_too_large` |
@@ -726,6 +735,7 @@ data.
 | `[:conduit_mcp, :client, :request, :cancel]` | connection | `:method`, `:request_id`, `:reason` (`:timeout`, `:caller_down`, `:caller_timeout`) |
 | `[:conduit_mcp, :client, :response, :dropped]` | connection | `:request_id` |
 | `[:conduit_mcp, :client, :notification]` | connection | `:method` |
+| `[:conduit_mcp, :client, :log, :dropped]` | connection | nothing (a `notifications/message` over `:log_rate_limit`) |
 | `[:conduit_mcp, :client, :cache, :refresh, :start \| :stop]` | connection | `:kind`, `:trigger` (`:demand`, `:list_changed`); `:stop` adds `:status`, `:error_kind` and measurements `:count`, `:pages`, `:rejected` |
 | `[:conduit_mcp, :client, :tool, :rejected]` | the process that fetched | `:tool_name`, `:reason` |
 | `[:conduit_mcp, :client, :tool, :definition_changed]` | connection | `:tool_name` |

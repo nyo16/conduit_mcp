@@ -66,7 +66,8 @@ defmodule ConduitMcp.Client.Request do
     :max_total_timeout,
     :assigns,
     :extensions,
-    :headers
+    :headers,
+    :traceparent
   ]
 
   @typedoc """
@@ -91,7 +92,8 @@ defmodule ConduitMcp.Client.Request do
           required(:client_capabilities) => map(),
           required(:client_info) => map(),
           optional(:log_level) => String.t() | nil,
-          optional(:progress_token) => term()
+          optional(:progress_token) => term(),
+          optional(:traceparent) => String.t() | nil
         }
 
   @doc """
@@ -127,6 +129,11 @@ defmodule ConduitMcp.Client.Request do
       transport, as lowercase `{name, value}` string pairs (the
       `Mcp-Param-*` headers of `ConduitMcp.Headers.param_headers/2`);
       ignored by other transports.
+    * `:traceparent` - the W3C trace context to propagate (default: the
+      caller's `Logger.metadata()[:traceparent]`). Sent in a modern
+      request's `_meta` when it is well formed (`ConduitMcp.Era.traceparent/1`),
+      unless the caller's `"_meta"` already has one; `tracestate` and
+      `baggage` are never added.
 
   ## Example
 
@@ -209,7 +216,8 @@ defmodule ConduitMcp.Client.Request do
   keys merged over the caller's `"_meta"`.
 
     * Modern: `io.modelcontextprotocol/protocolVersion`, `clientCapabilities`,
-      `clientInfo`, and `logLevel` when one is set.
+      `clientInfo`, `logLevel` when one is set, and `traceparent` (unless the
+      caller's `_meta` has one) when `info.traceparent` is set.
     * Both eras: `progressToken` when `info.progress_token` is set.
 
   Reserved keys always win: any caller key named `progressToken`, or whose
@@ -235,9 +243,16 @@ defmodule ConduitMcp.Client.Request do
       user_meta
       |> Map.reject(fn {key, _value} -> reserved_key?(key) end)
       |> Map.merge(reserved_meta(info))
+      |> put_traceparent(info)
 
     if meta == %{}, do: Map.delete(params, "_meta"), else: Map.put(params, "_meta", meta)
   end
+
+  defp put_traceparent(meta, %{era: :modern, traceparent: traceparent})
+       when is_binary(traceparent),
+       do: Map.put_new(meta, "traceparent", traceparent)
+
+  defp put_traceparent(meta, _info), do: meta
 
   defp reserved_meta(%{era: :modern} = info) do
     %{
@@ -288,6 +303,7 @@ defmodule ConduitMcp.Client.Request do
     assigns = Keyword.get(opts, :assigns)
     extensions = Keyword.get(opts, :extensions, %{})
     headers = Keyword.get(opts, :headers, [])
+    traceparent = Keyword.get_lazy(opts, :traceparent, fn -> Logger.metadata()[:traceparent] end)
 
     for {key, value} <- [timeout: timeout, max_total_timeout: max_total],
         not (is_integer(value) and value > 0) do
@@ -323,7 +339,8 @@ defmodule ConduitMcp.Client.Request do
       on_progress: on_progress,
       assigns: assigns,
       extensions: extensions,
-      headers: headers
+      headers: headers,
+      traceparent: ConduitMcp.Era.traceparent(traceparent)
     }
   end
 
@@ -336,7 +353,8 @@ defmodule ConduitMcp.Client.Request do
       progress: settings.on_progress != nil or settings.reset?,
       assigns: settings.assigns,
       extensions: settings.extensions,
-      headers: settings.headers
+      headers: settings.headers,
+      traceparent: settings.traceparent
     ]
   end
 

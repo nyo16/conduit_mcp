@@ -2,6 +2,7 @@ defmodule ConduitMcp.Client.IntakeTest do
   # Tool intake (PO-4, HT-12): a bad tool is dropped from the listing, never
   # the whole listing, with telemetry and a sanitized warning.
   use ExUnit.Case, async: true
+  use ExUnitProperties
 
   import ConduitMcp.Test.Client.Harness
   import ExUnit.CaptureLog
@@ -111,6 +112,74 @@ defmodule ConduitMcp.Client.IntakeTest do
 
       assert_receive {@rejected, ^ref, _, %{reason: :invalid_x_mcp_header, tool_name: "crlf"}}
       assert_no_leaks(name, conn)
+    end
+
+    # HT-12: a header name is only ever an HTTP token. Anything that could
+    # end the header line, truncate it, or not be a field name keeps the
+    # tool out, so its arguments are never mirrored into a header.
+    @bad_header_names [
+      {"lone CR", "Region\rX-Evil"},
+      {"lone LF", "Region\nX-Evil: 1"},
+      {"NUL", "Region\0"},
+      {"space", "Region Name"},
+      {"colon", "Region:"},
+      {"tab", "Region\t"},
+      {"DEL", "Region\x7F"},
+      {"non-ASCII", "Régión"},
+      {"line separator", "Region\u2028X"},
+      {"empty", ""}
+    ]
+
+    for {label, bad} <- @bad_header_names do
+      test "an x-mcp-header name with #{label} excludes the tool", %{name: name} do
+        conn = start_client(name, transport: FakeHTTPTransport)
+        ready_modern(name, conn)
+        ref = attach(name, [@rejected])
+
+        log =
+          capture_log(fn ->
+            assert {:ok, %{tools: [%Tool{name: "good"}]}} =
+                     list(name, conn, [
+                       tool("bad", header_schema(unquote(bad))),
+                       tool("good", header_schema("Region"))
+                     ])
+          end)
+
+        assert_receive {@rejected, ^ref, %{count: 1},
+                        %{reason: :invalid_x_mcp_header, tool_name: "bad"}}
+
+        refute log =~ "\r"
+        refute log =~ "\0"
+        assert_no_leaks(name, conn)
+      end
+    end
+
+    property "a header name outside the token charset is always excluded" do
+      tchars = Enum.concat([?a..?z, ?A..?Z, ?0..?9, ~c"!#$%&'*+-.^_`|~"])
+
+      non_tchar =
+        StreamData.one_of([StreamData.integer(0..0x7F), StreamData.codepoint(:utf8)])
+        |> StreamData.filter(&(&1 not in tchars))
+
+      check all(
+              prefix <- StreamData.string(tchars, max_length: 8),
+              bad <- non_tchar,
+              suffix <- StreamData.string(:utf8, max_length: 8),
+              max_runs: 50
+            ) do
+        # A fresh client per run: a second listing could be served from cache.
+        name = {__MODULE__, make_ref()}
+        conn = start_client(name, transport: FakeHTTPTransport)
+        ready_modern(name, conn)
+        ref = attach(name, [@rejected])
+        header = prefix <> <<bad::utf8>> <> suffix
+
+        capture_log(fn ->
+          assert {:ok, %{tools: []}} = list(name, conn, [tool("bad", header_schema(header))])
+        end)
+
+        assert_receive {@rejected, ^ref, _, %{reason: :invalid_x_mcp_header, tool_name: "bad"}}
+      end
     end
 
     test "stdio ignores x-mcp-header", %{name: name} do

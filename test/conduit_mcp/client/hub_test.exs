@@ -5,7 +5,7 @@ defmodule ConduitMcp.Client.HubTest do
   use ExUnit.Case, async: true
   use ExUnitProperties
 
-  import ConduitMcp.Test.Client.Harness, only: [eventually: 1]
+  import ConduitMcp.Test.Client.Harness, only: [await_hub_ready: 2, eventually: 1]
   import ExUnit.CaptureLog
 
   alias ConduitMcp.Client
@@ -71,11 +71,7 @@ defmodule ConduitMcp.Client.HubTest do
     await_servers(hub, Enum.map(servers, &elem(&1, 0)))
   end
 
-  defp await_servers(hub, ids) do
-    eventually(fn ->
-      Enum.all?(ids, &(Client.await_ready(Hub.client(hub, &1), 1_000) == :ok))
-    end)
-  end
+  defp await_servers(hub, ids), do: await_hub_ready(hub, ids)
 
   defp names(hub, opts \\ []) do
     {:ok, toolset} = Hub.list_tools(hub, opts)

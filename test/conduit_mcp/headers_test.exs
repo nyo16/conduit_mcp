@@ -61,6 +61,32 @@ defmodule ConduitMcp.HeadersTest do
         refute Headers.value_matches?(encoded, i + 1)
       end
     end
+
+    # HT-12: whatever a tool argument holds, its header value cannot split
+    # or truncate the header block.
+    property "no string, integer or boolean encodes to a value with CR, LF or NUL" do
+      hostile =
+        StreamData.one_of([
+          StreamData.member_of(["\r", "\n", "\0", "\r\n", "\u2028", "é", "世", "\u{1F600}"]),
+          StreamData.string(:utf8, max_length: 4),
+          StreamData.string(Enum.to_list(0..0x7F), max_length: 4)
+        ])
+
+      generator =
+        StreamData.one_of([
+          hostile |> StreamData.list_of() |> StreamData.map(&Enum.join/1),
+          StreamData.string(:utf8),
+          StreamData.integer(),
+          StreamData.map(StreamData.integer(), &(&1 * 1_000_000_000_000_000_000_000)),
+          StreamData.boolean()
+        ])
+
+      check all(value <- generator) do
+        encoded = Headers.encode_value(value)
+        refute String.contains?(encoded, ["\r", "\n", "\0"])
+        assert header_safe?(encoded)
+      end
+    end
   end
 
   describe "encode_value/1" do
