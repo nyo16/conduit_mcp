@@ -271,7 +271,9 @@ defmodule ConduitMcp.Client.Config do
   end
 
   @doc false
-  # NimbleOptions `{:custom, ...}` validator for `:transport`.
+  # NimbleOptions `{:custom, ...}` validator for `:transport`. A transport
+  # implementing the optional `validate_options/1` checks its own options
+  # here, so they fail at `child_spec/1` naming the key.
   @spec validate_transport(term()) :: {:ok, {module(), keyword()}} | {:error, String.t()}
   def validate_transport({module, opts} = transport) when is_atom(module) and is_list(opts) do
     cond do
@@ -283,6 +285,12 @@ defmodule ConduitMcp.Client.Config do
 
       not (function_exported?(module, :init, 2) and function_exported?(module, :kind, 0)) ->
         {:error, "#{inspect(module)} does not implement ConduitMcp.Client.Transport"}
+
+      function_exported?(module, :validate_options, 1) ->
+        case module.validate_options(opts) do
+          {:ok, opts} -> {:ok, {module, opts}}
+          {:error, message} -> {:error, "invalid #{inspect(module)} options: " <> message}
+        end
 
       true ->
         {:ok, transport}
