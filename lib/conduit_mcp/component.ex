@@ -125,7 +125,10 @@ defmodule ConduitMcp.Component do
       end
   """
   @callback execute(params :: map(), conn :: Plug.Conn.t()) ::
-              {:ok, map()} | {:error, map()} | ConduitMcp.Server.input_required()
+              {:ok, map()}
+              | {:error, map()}
+              | ConduitMcp.Server.input_required()
+              | ConduitMcp.Server.task()
 
   @doc false
   @callback __component_type__() :: :tool | :resource | :prompt

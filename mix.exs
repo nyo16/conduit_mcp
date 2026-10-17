@@ -166,7 +166,11 @@ defmodule ConduitMcp.MixProject do
         "guides/rate_limiting.md",
         "guides/multi_node_sessions.md",
         "guides/oban_tasks.md",
-        "guides/mcp_apps.md"
+        "guides/mcp_apps.md",
+        "guides/protocol_eras.md",
+        "guides/mrtr.md",
+        "guides/subscriptions.md",
+        "guides/tasks_extension.md"
       ],
       groups_for_extras: [
         Changelog: ["CHANGELOG.md"],
@@ -182,6 +186,12 @@ defmodule ConduitMcp.MixProject do
           "guides/multi_node_sessions.md",
           "guides/oban_tasks.md",
           "guides/mcp_apps.md"
+        ],
+        "Modern Protocol (2026-07-28)": [
+          "guides/protocol_eras.md",
+          "guides/mrtr.md",
+          "guides/subscriptions.md",
+          "guides/tasks_extension.md"
         ]
       ],
       groups_for_modules: [

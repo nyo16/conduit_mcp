@@ -14,8 +14,9 @@ defmodule ConduitMcp.Discover do
     * `"supportedVersions"` — `ConduitMcp.Protocol.supported_versions/0`,
       modern and legacy versions newest first;
     * `"capabilities"` — `ConduitMcp.Capabilities.build/2` with `era:
-      :modern`, the same set the legacy `initialize` result advertises
-      (minus `resources.subscribe`);
+      :modern` (list-changed notifications and `resources.subscribe` are
+      advertised because `subscriptions/listen` delivers them; the tasks
+      extension when it is enabled);
     * `"instructions"` — see `instructions/2`; omitted when there are none.
 
   `ConduitMcp.Protocol.Modern` adds `resultType`, the cache hints and the

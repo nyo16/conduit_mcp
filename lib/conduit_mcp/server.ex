@@ -27,6 +27,10 @@ defmodule ConduitMcp.Server do
     stream)
   - `ConduitMcp.Transport.SSEStream.Owner` — the slot table of streamed POST
     responses (one row per open stream)
+  - `ConduitMcp.Client.Registry` — a passive `Registry` client processes
+    register in (it starts no client)
+  - `ConduitMcp.Subscriptions` — the `Registry` of `subscriptions/listen`
+    streams by topic
   - `ConduitMcp.Session.Janitor` (as `ConduitMcp.Session.Janitor.Default`) —
     sweeps expired sessions; disable with
     `config :conduit_mcp, :session_janitor, false`
@@ -35,6 +39,9 @@ defmodule ConduitMcp.Server do
     `config :conduit_mcp, :cancellation_janitor, false`
   - `ConduitMcp.Tasks.EtsStore.Owner` — tasks, only with the default tasks
     store
+  - `ConduitMcp.Ext.Tasks.EtsStore.Owner` and the `ConduitMcp.Ext.Tasks.Janitor`
+    — only when the experimental tasks extension is enabled
+    (`config :conduit_mcp, :ext_tasks`)
   - `ConduitMcp.OAuth.KeyProvider.JWKS.Owner` — the JWKS cache, only when
     `Req` is compiled in
 
