@@ -111,6 +111,19 @@ defmodule ConduitMcp.Client do
   `subscribe_notifications/2` sends server notifications to a process as
   `{:mcp_notification, name, method, params}`; see
   `ConduitMcp.Client.Connection` for coalescing of `list_changed`.
+  `subscribe/2` asks for updates of one resource in either era (legacy
+  `resources/subscribe`, modern `subscriptions/listen`); a `list_changed`
+  invalidates and refreshes the cached list it names.
+
+  ## Transports
+
+  `ConduitMcp.Client.Transport.Stdio` runs a local server process;
+  `ConduitMcp.Client.Transport.StreamableHTTP` (needs `:finch`) talks to a
+  remote one; `ConduitMcp.Client.Transport.InProcess` serves a server module
+  in this VM for tests. Over HTTP, a modern `call_tool/4` sends the tool's
+  `Mcp-Param-*` headers computed from the cached tool definition (see
+  `list_all_tools/2`); a server rejecting them (`-32020`) makes the client
+  refresh the tools and send the call once more.
   """
 
   use Supervisor
@@ -169,6 +182,7 @@ defmodule ConduitMcp.Client do
     :assigns
   ]
   @control_timeout 5_000
+  @header_mismatch ConduitMcp.Errors.header_mismatch()
   @grace_ms 100
 
   # --- supervision -------------------------------------------------------------
@@ -215,13 +229,21 @@ defmodule ConduitMcp.Client do
 
   @impl Supervisor
   def init(%Config{} = config) do
-    children = [
-      {Task.Supervisor, name: Registry.via({:task_sup, config.name})},
-      {Governance.Owner, config},
-      {Connection, config}
-    ]
+    children =
+      [{Task.Supervisor, name: Registry.via({:task_sup, config.name})}] ++
+        transport_children(config) ++
+        [{Governance.Owner, config}, {Connection, config}]
 
     Supervisor.init(children, strategy: :one_for_all, max_restarts: 3, max_seconds: 5)
+  end
+
+  # A transport may need processes of its own that outlive one connection
+  # attempt (the Streamable HTTP transport's Finch pool): they start before
+  # the connection and stop with the client.
+  defp transport_children(%Config{transport: {transport, opts}, name: name}) do
+    if function_exported?(transport, :child_specs, 2),
+      do: transport.child_specs(opts, name),
+      else: []
   end
 
   # --- lifecycle -----------------------------------------------------------------
@@ -574,12 +596,30 @@ defmodule ConduitMcp.Client do
   end
 
   defp modern_call(client, view, params, mode, opts) do
+    case modern_send(client, view, params, mode, opts) do
+      # `-32020`: the `Mcp-Param-*` headers came from a stale (or missing)
+      # tool definition; refresh the tools and send once more (CS §6.3).
+      {:error, %Error{reason: {:jsonrpc, @header_mismatch}}} when view.transport == :http ->
+        _ = list_all_tools(client, refresh: true)
+        modern_send(client, view, params, mode, opts) |> modern_result(client, view, mode, opts)
+
+      outcome ->
+        modern_result(outcome, client, view, mode, opts)
+    end
+  end
+
+  defp modern_send(client, view, params, mode, opts) do
     result_types = if mode == nil, do: [], else: ["task"]
 
-    case mrtr(client, "tools/call", params, view, opts,
-           extensions: TaskRequestor.extensions(mode),
-           result_types: result_types
-         ) do
+    mrtr(client, "tools/call", params, view, opts,
+      extensions: TaskRequestor.extensions(mode),
+      result_types: result_types,
+      headers: param_headers(view, params)
+    )
+  end
+
+  defp modern_result(outcome, client, view, mode, opts) do
+    case outcome do
       {:ok, %{"resultType" => "task"} = result, %{rounds: rounds}} ->
         {TaskRequestor.created(client, view, :modern, result, mode, opts), rounds}
 
@@ -589,6 +629,27 @@ defmodule ConduitMcp.Client do
       {:error, _} = error ->
         {error, 0}
     end
+  end
+
+  # The `Mcp-Param-*` headers of a modern HTTP call, from the cached tool
+  # definition and the final arguments (sent as given, so atom keys are
+  # normalised the way the JSON body will carry them).
+  defp param_headers(%{transport: :http, cache: cache}, %{"name" => name, "arguments" => args}) do
+    with {:ok, tool} <- Cache.lookup(cache, :tools, name),
+         [_ | _] <- ConduitMcp.Headers.header_params(tool.input_schema),
+         {:ok, args} <- normalise(args) do
+      ConduitMcp.Headers.param_headers(tool.input_schema, args)
+    else
+      _ -> []
+    end
+  end
+
+  defp param_headers(_view, _params), do: []
+
+  defp normalise(args) do
+    JSON.decode(JSON.encode!(args))
+  rescue
+    _error in [Protocol.UndefinedError, ArgumentError] -> :error
   end
 
   defp legacy_call(client, view, params, {mode, ttl}, opts) do
@@ -728,6 +789,50 @@ defmodule ConduitMcp.Client do
          :ok <- Pipeline.authorize_resource(client, view, uri, governance),
          {:ok, result, _rounds} <- mrtr(client, "resources/read", %{"uri" => uri}, view, opts),
          do: {:ok, result}
+  end
+
+  @doc """
+  Subscribes to updates of the resource at `uri`, whichever era the server
+  speaks. Updates arrive as `{:mcp_notification, name,
+  "notifications/resources/updated", %{"uri" => uri}}` to the processes
+  subscribed with `subscribe_notifications/2`.
+
+    * Legacy: sends `resources/subscribe` (the server must declare
+      `resources.subscribe`, else `kind: :protocol`, reason
+      `:subscriptions_not_supported`) and answers with the server's answer.
+    * Modern: adds `uri` to the `subscriptions/listen` filter (a new listen
+      replaces the old one once the server acknowledges it) and answers
+      `:ok` when the acknowledgment honours `uri`, else `kind: :protocol`,
+      reason `:subscription_not_acknowledged`.
+
+  The subscription is kept across reconnects and session renewals (sent
+  again each time the connection becomes ready). A call made before the
+  connection is ready waits for it, up to `:timeout` (default the client's
+  `:request_timeout`).
+
+      :ok = ConduitMcp.Client.subscribe(:docs, "file:///notes.md")
+  """
+  @spec subscribe(client(), String.t(), keyword()) :: :ok | {:error, Error.t()}
+  def subscribe(client, uri, opts \\ []) when is_binary(uri),
+    do: resource_subscription(client, :subscribe, uri, opts)
+
+  @doc """
+  Ends a `subscribe/2` subscription to `uri` (legacy
+  `resources/unsubscribe`; modern: a listen without `uri`).
+
+      :ok = ConduitMcp.Client.unsubscribe(:docs, "file:///notes.md")
+  """
+  @spec unsubscribe(client(), String.t(), keyword()) :: :ok | {:error, Error.t()}
+  def unsubscribe(client, uri, opts \\ []) when is_binary(uri),
+    do: resource_subscription(client, :unsubscribe, uri, opts)
+
+  defp resource_subscription(client, op, uri, opts) do
+    opts = Keyword.validate!(opts, [:timeout])
+
+    with {:ok, _pid, view} <- Request.lookup(client) do
+      timeout = Keyword.get(opts, :timeout, view.request_timeout)
+      Request.call(client, {:resource_subscription, op, uri}, timeout)
+    end
   end
 
   @doc """
@@ -931,6 +1036,13 @@ defmodule ConduitMcp.Client do
     opts = request_opts(opts)
     extensions = Keyword.get(extra, :extensions, %{})
     run_opts = if extensions == %{}, do: opts, else: Keyword.put(opts, :extensions, extensions)
+
+    run_opts =
+      case Keyword.get(extra, :headers, []) do
+        [] -> run_opts
+        headers -> Keyword.put(run_opts, :headers, headers)
+      end
+
     env = Input.caller_env(client, view, Keyword.get(opts, :assigns))
 
     MRTR.run(method, put_meta(params, meta),

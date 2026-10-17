@@ -98,12 +98,15 @@ defmodule ConduitMcp.Client.SSE do
 
     * `:max_line_bytes` - positive integer, default 8 MiB.
     * `:max_event_bytes` - positive integer, default 8 MiB.
+    * `:last_event_id` - the last event id to start from (a stream resumed
+      with `Last-Event-ID`), default `nil`.
   """
   @spec new(keyword()) :: t()
   def new(opts \\ []) do
     %__MODULE__{
       max_line_bytes: positive!(opts, :max_line_bytes),
-      max_event_bytes: positive!(opts, :max_event_bytes)
+      max_event_bytes: positive!(opts, :max_event_bytes),
+      last_event_id: Keyword.get(opts, :last_event_id)
     }
   end
 

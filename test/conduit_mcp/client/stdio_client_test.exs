@@ -113,6 +113,53 @@ defmodule ConduitMcp.Client.StdioClientTest do
     assert_no_leaks(name)
   end
 
+  # Modern stdio listen: the listen request never completes, its
+  # notifications are demultiplexed by `subscriptionId`, and a reconnect
+  # (a new server process) re-sends it.
+  test "subscriptions/listen over modern stdio, re-sent after a reconnect" do
+    name =
+      start_ready(StdioFixture.server("normal", server: StdioMrtrServer),
+        protocol: :modern,
+        backoff: fn _attempt -> 0 end
+      )
+
+    :ok = Client.subscribe_notifications(name)
+    first = await_listen(name)
+
+    assert {:ok, %ToolResult{content: [%{"text" => "touched"}]}} = Client.call_tool(name, "touch")
+    assert_receive {:mcp_notification, ^name, "notifications/tools/list_changed", params}, 2_000
+    refute Map.has_key?(params, "_meta")
+
+    :ok = Client.reconnect(name)
+    assert :ok = Client.await_ready(name, @boot)
+    second = await_listen(name)
+    assert second > first
+
+    assert {:ok, %ToolResult{}} = Client.call_tool(name, "touch")
+    assert_receive {:mcp_notification, ^name, "notifications/tools/list_changed", _params}, 2_000
+
+    assert_no_leaks(name)
+  end
+
+  defp await_listen(name, deadline \\ System.monotonic_time(:millisecond) + @boot) do
+    {:ok, conn, _view} = Registry.lookup({:client, name})
+    {_state, data} = :sys.get_state(conn)
+
+    cond do
+      data.listen.active != nil ->
+        data.listen.active
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("the listen was never acknowledged")
+
+      true ->
+        receive do
+        after
+          10 -> await_listen(name, deadline)
+        end
+    end
+  end
+
   test "a server that never answers server/discover is legacy after probe_timeout" do
     name = start_ready(StdioFixture.server("never_answer_discover"), probe_timeout: 200)
     assert {:ok, :legacy} = Client.era(name)

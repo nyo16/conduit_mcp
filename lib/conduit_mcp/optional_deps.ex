@@ -10,6 +10,11 @@ defmodule ConduitMcp.OptionalDeps do
   compile time — rather than degrading into a per-request failure that is
   indistinguishable from a configuration mistake.
 
+  The client's Streamable HTTP transport
+  (`ConduitMcp.Client.Transport.StreamableHTTP`) needs `:finch`; it calls
+  `finch!/0` when its options are validated and when it starts, so a build
+  without Finch fails when the client starts, never on a request.
+
   See `ConduitMcp.OptionalDependencyError` for why adding the dependency to
   `mix.exs` is not sufficient on its own.
   """
@@ -19,10 +24,35 @@ defmodule ConduitMcp.OptionalDeps do
   @oauth_plug ConduitMcp.Plugs.OAuth
   @jwks_provider ConduitMcp.OAuth.KeyProvider.JWKS
   @jsv_validator ConduitMcp.Client.SchemaValidator.JSV
+  @client_http ConduitMcp.Client.HTTP
 
   @joken_deps [{:joken, "~> 2.6"}, {:jose, "~> 1.11"}]
   @req_deps [{:req, "~> 0.6.1 or ~> 0.7"}]
   @jsv_deps [{:jsv, "~> 0.26"}]
+  @finch_deps [{:finch, "~> 0.21"}]
+
+  @doc """
+  Returns the client's internal HTTP module (compiled only with `:finch`),
+  raising `ConduitMcp.OptionalDependencyError` naming `{:finch, "~> 0.21"}`
+  when it was not compiled in.
+  """
+  @spec finch!() :: module()
+  def finch!, do: finch!(@client_http)
+
+  @doc false
+  # The check behind `finch!/0`, taking the module so the absent case is
+  # testable in a build that has Finch.
+  @spec finch!(module()) :: module()
+  def finch!(module) when is_atom(module) do
+    if Code.ensure_loaded?(module) do
+      module
+    else
+      raise OptionalDependencyError,
+        feature: "The Streamable HTTP client transport",
+        module: module,
+        deps: @finch_deps
+    end
+  end
 
   @doc """
   Returns the OAuth plug module, raising `ConduitMcp.OptionalDependencyError`

@@ -76,6 +76,23 @@ defmodule ConduitMcp.OptionalDepsTest do
     end
   end
 
+  describe "finch!/0" do
+    test "returns the client's HTTP module when Finch is compiled in" do
+      assert OptionalDeps.finch!() == ConduitMcp.Client.HTTP
+    end
+
+    test "raises naming :finch and the version floor when the module is absent" do
+      error =
+        assert_raise OptionalDependencyError, fn ->
+          OptionalDeps.finch!(ConduitMcp.Client.NoSuchHTTP)
+        end
+
+      assert error.deps == [{:finch, "~> 0.21"}]
+      assert Exception.message(error) =~ ~s({:finch, "~> 0.21"})
+      assert Exception.message(error) =~ "Streamable HTTP client transport"
+    end
+  end
+
   describe "availability in this build" do
     test "optional deps are present for the library's own suite" do
       # This suite always compiles with every optional dep installed, which is

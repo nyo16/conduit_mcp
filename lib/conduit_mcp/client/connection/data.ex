@@ -6,6 +6,7 @@ defmodule ConduitMcp.Client.Connection.Data do
 
   alias ConduitMcp.Client.Cache
   alias ConduitMcp.Client.Config
+  alias ConduitMcp.Client.Connection.Listen
   alias ConduitMcp.Client.Negotiation
   alias ConduitMcp.Client.RateLimit
   alias ConduitMcp.Client.Registry
@@ -49,8 +50,8 @@ defmodule ConduitMcp.Client.Connection.Data do
     attempt: 0,
     reason: nil,
     log_level: nil,
-    health_id: nil,
-    health_misses: 0,
+    # The health check in flight: `{request id | nil, consecutive misses}`.
+    health: {nil, 0},
     # The client's `ConduitMcp.Client.Cache` table (this process writes it).
     cache: nil,
     # `ConduitMcp.Client.Input.settings()`: what handler code needs, shared
@@ -69,7 +70,14 @@ defmodule ConduitMcp.Client.Connection.Data do
     watches: %{},
     # The process running the handler's notification callbacks, or nil
     # (`ConduitMcp.Client.Connection.Notifier`).
-    notifier: nil
+    notifier: nil,
+    # `ConduitMcp.Client.Connection.Listen`'s state: `subs`, the resource
+    # URIs the client wants updates for (kept across reconnects); modern
+    # `listens`: id => %{filter:, status: :pending | :active, acked:}; the
+    # `active` (acknowledged) one; `waiters`, callers awaiting a
+    # subscription change: [{mref, op, uri}]; the reopen backoff `attempt`;
+    # and `off?`, whether the server refused listen.
+    listen: nil
   ]
 
   @type t :: %__MODULE__{}
@@ -104,6 +112,7 @@ defmodule ConduitMcp.Client.Connection.Data do
       kind: transport.kind(),
       era_hint: if(config.prior == :legacy, do: :legacy),
       cache: Cache.new(),
+      listen: Listen.new(),
       input: %{
         handler: config.handler,
         sampling: config.sampling,

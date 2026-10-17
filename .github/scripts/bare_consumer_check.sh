@@ -88,11 +88,15 @@ defmodule BareCheck do
     absent!(ConduitMcp.OAuth.KeyProvider.JWKS)
     absent!(ConduitMcp.PromEx)
     absent!(ConduitMcp.Client.SchemaValidator.JSV)
+    absent!(ConduitMcp.Client.HTTP)
+    absent!(ConduitMcp.Client.Transport.StreamableHTTP.Exchange)
+    absent!(ConduitMcp.Client.Transport.StreamableHTTP.Listener)
 
     present!(ConduitMcp.Plugs.Auth)
     present!(ConduitMcp.Transport.StreamableHTTP)
     present!(ConduitMcp.Transport.SSE)
     present!(ConduitMcp.OptionalDeps)
+    present!(ConduitMcp.Client.Transport.StreamableHTTP)
 
     refute!(
       ConduitMcp.OptionalDeps.oauth_available?(),
@@ -104,6 +108,7 @@ defmodule BareCheck do
 
     key_provider_raises!()
     client_validation_raises!()
+    http_client_raises!()
     serves_without_optional_deps!()
 
     IO.puts("\nbare-consumer check: OK")
@@ -212,6 +217,31 @@ ConduitMcp.OptionalDependencyError:\n#{Exception.message(e)}")
     )
 
     IO.puts("  ok  client policy and hooks need no optional deps")
+  end
+
+  # The client's HTTP transport needs :finch; without it the client must
+  # refuse to start (child_spec/1 validates the transport options), never
+  # fail per request.
+  defp http_client_raises!() do
+    try do
+      ConduitMcp.Client.child_spec(
+        name: :bare,
+        transport: {ConduitMcp.Client.Transport.StreamableHTTP, url: "https://mcp.example.com/"}
+      )
+
+      die("ConduitMcp.Client accepted the Streamable HTTP transport without :finch")
+    rescue
+      e in ConduitMcp.OptionalDependencyError ->
+        message = Exception.message(e)
+        assert!(message =~ ":finch", "HTTP transport error must name :finch")
+
+        assert!(
+          message =~ "mix deps.compile conduit_mcp --force",
+          "HTTP transport error must name the rebuild command"
+        )
+
+        IO.puts("  ok  Streamable HTTP client transport without :finch rejected at start")
+    end
   end
 
   # The library must still work for everything that needs no optional dep.
