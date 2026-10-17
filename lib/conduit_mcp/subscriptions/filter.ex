@@ -25,26 +25,44 @@ defmodule ConduitMcp.Subscriptions.Filter do
       acknowledgment silently, exactly as if it had not been requested, so
       the acknowledgment reveals nothing beyond what the caller may read.
       Duplicates are collapsed; an empty result omits the field.
+    * `taskIds` — only while `ConduitMcp.Ext.Tasks` is enabled (otherwise an
+      unknown field): a list of at most #{1_000} task ids for
+      `notifications/tasks`. The request must declare the
+      `io.modelcontextprotocol/tasks` extension in its client capabilities
+      (`-32021` with `data.requiredCapabilities` otherwise, as the extension
+      requires). Each id is kept only if the task exists and is owned by the
+      caller (`ConduitMcp.Principal.id/1`, the owner check of `tasks/get`);
+      any other id is dropped silently, so a foreign id and an unknown one
+      look the same. The stream then receives a task's changes only while
+      its principal is the task's owner (SV-1): the topic is keyed by owner.
+      Duplicates are collapsed; an empty result omits the field.
 
   A field of the wrong type, a `notifications` that is not an object, or
-  more than #{1_000} URIs is `-32602`. Unknown fields (a newer revision's, or
-  an extension's this server does not enable) are not honoured and are
-  omitted from the acknowledgment.
+  more than #{1_000} URIs or task ids is `-32602`. Unknown fields (a newer
+  revision's, or an extension's this server does not enable) are not
+  honoured and are omitted from the acknowledgment.
   """
 
   alias ConduitMcp.Capabilities
+  alias ConduitMcp.Ctx
   alias ConduitMcp.Errors
+  alias ConduitMcp.Ext.Tasks
+  alias ConduitMcp.Handler.ExtTasks
   alias ConduitMcp.Handler.Resources
+  alias ConduitMcp.Principal
+  alias ConduitMcp.Subscriptions
 
   @max_resource_subscriptions 1_000
+  @max_task_ids 1_000
 
   # Filter field => how it is honoured. A new filter field (an extension's,
-  # such as `tasks`) is one entry here plus a `honour/5` clause.
+  # such as `taskIds`) is one entry here plus a `honour/5` clause.
   @fields [
     {"toolsListChanged", :tools_list_changed},
     {"promptsListChanged", :prompts_list_changed},
     {"resourcesListChanged", :resources_list_changed},
-    {"resourceSubscriptions", :resource_subscriptions}
+    {"resourceSubscriptions", :resource_subscriptions},
+    {"taskIds", :task_ids}
   ]
 
   @list_changed %{
@@ -73,7 +91,7 @@ defmodule ConduitMcp.Subscriptions.Filter do
   `server_module`, authorizing resource URIs against `conn`.
   """
   @spec parse(map(), module(), Plug.Conn.t() | map()) ::
-          {:ok, t()} | {:error, integer(), String.t(), nil}
+          {:ok, t()} | {:error, integer(), String.t(), map() | nil}
   def parse(%{"notifications" => filter}, server_module, conn) when is_map(filter) do
     capabilities = Capabilities.build(server_module, era: :modern)
 
@@ -94,6 +112,9 @@ defmodule ConduitMcp.Subscriptions.Filter do
 
         {:error, message} ->
           {:halt, {:error, Errors.invalid_params(), message, nil}}
+
+        {:error, _code, _message, _data} = error ->
+          {:halt, error}
       end
     end)
   end
@@ -137,6 +158,36 @@ defmodule ConduitMcp.Subscriptions.Filter do
         |> case do
           [] -> :skip
           allowed -> {:ok, allowed, Enum.map(allowed, &{:resource, &1})}
+        end
+    end
+  end
+
+  defp honour(:task_ids, {:ok, ids}, _capabilities, _server_module, conn) do
+    cond do
+      not Tasks.enabled?() ->
+        :skip
+
+      not is_list(ids) or not Enum.all?(ids, &is_binary/1) ->
+        {:error, "notifications.taskIds must be an array of strings"}
+
+      length(ids) > @max_task_ids ->
+        {:error, "notifications.taskIds names more than #{@max_task_ids} tasks"}
+
+      ids == [] ->
+        :skip
+
+      not ExtTasks.declared?(Ctx.from_conn(conn)) ->
+        ExtTasks.missing_capability()
+
+      true ->
+        owner = Principal.id(conn)
+
+        ids
+        |> Enum.uniq()
+        |> Enum.filter(&match?({:ok, _task}, Tasks.get(&1, owner)))
+        |> case do
+          [] -> :skip
+          owned -> {:ok, owned, Enum.map(owned, &Subscriptions.task_topic(owner, &1))}
         end
     end
   end

@@ -8,6 +8,7 @@ defmodule ConduitMcp.Transport.SubscriptionsListenTest do
   # Running alone keeps all three this module's own.
   use ExUnit.Case, async: false
 
+  alias ConduitMcp.Ext.Tasks
   alias ConduitMcp.Subscriptions
   alias ConduitMcp.Test.McpSchema
   alias ConduitMcp.Transport.SSEStream
@@ -19,12 +20,20 @@ defmodule ConduitMcp.Transport.SubscriptionsListenTest do
     "io.modelcontextprotocol/clientCapabilities" => %{}
   }
   @subscription_id "io.modelcontextprotocol/subscriptionId"
+  @tasks_meta Map.put(@meta, "io.modelcontextprotocol/clientCapabilities", %{
+                "extensions" => %{"io.modelcontextprotocol/tasks" => %{}}
+              })
+  @ext_schema "ext-tasks-2026-07-28"
 
   defmodule ListenServer do
     use ConduitMcp.Server
 
     tool "echo", "Echo" do
       handle(fn _conn, _params -> text("ok") end)
+    end
+
+    tool "slow", "Runs as an Ext.Tasks task" do
+      handle(fn _conn, _params -> {:task, status_message: "Queued"} end)
     end
 
     prompt "greet", "Greet" do
@@ -92,12 +101,12 @@ defmodule ConduitMcp.Transport.SubscriptionsListenTest do
     port
   end
 
-  defp listen_request(id, notifications) do
+  defp listen_request(id, notifications, meta \\ @meta) do
     body = %{
       "jsonrpc" => "2.0",
       "id" => id,
       "method" => "subscriptions/listen",
-      "params" => %{"_meta" => @meta, "notifications" => notifications}
+      "params" => %{"_meta" => meta, "notifications" => notifications}
     }
 
     {JSON.encode!(body),
@@ -122,8 +131,8 @@ defmodule ConduitMcp.Transport.SubscriptionsListenTest do
   end
 
   # Opens a listen stream and reads up to its acknowledgment.
-  defp listen(port, id, notifications, extra_headers \\ []) do
-    socket = send_request(port, listen_request(id, notifications), extra_headers)
+  defp listen(port, id, notifications, extra_headers \\ [], meta \\ @meta) do
+    socket = send_request(port, listen_request(id, notifications, meta), extra_headers)
     {acc, [ack]} = await_events(socket, "", 1)
     {socket, acc, ack}
   end
@@ -249,7 +258,9 @@ defmodule ConduitMcp.Transport.SubscriptionsListenTest do
           "promptsListChanged" => false,
           "resourcesListChanged" => true,
           "resourceSubscriptions" => ["open://1", "vault://secret", "open://1"],
-          "tasks" => %{"unknown" => true}
+          "tasks" => %{"unknown" => true},
+          # Ext.Tasks is off: `taskIds` is an unknown field.
+          "taskIds" => ["some-task"]
         })
 
       assert acc =~ ~r/content-type: text\/event-stream/i
@@ -551,6 +562,128 @@ defmodule ConduitMcp.Transport.SubscriptionsListenTest do
       assert Registry.lookup(Subscriptions, Subscriptions.listener_key("user:killed")) == []
       assert Registry.keys(Subscriptions, pid) == []
     end
+  end
+
+  # --- tasks extension ----------------------------------------------------------
+
+  describe "notifications/tasks (SV-1)" do
+    setup do
+      previous = Application.fetch_env(:conduit_mcp, :ext_tasks)
+      Application.put_env(:conduit_mcp, :ext_tasks, true)
+      start_supervised!(Tasks.EtsStore.Owner)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:conduit_mcp, :ext_tasks, value)
+          :error -> Application.delete_env(:conduit_mcp, :ext_tasks)
+        end
+      end)
+    end
+
+    test "a task's changes reach only the streams of the principal that owns it" do
+      # No keep-alives: any frame on a socket after its acknowledgment is a
+      # notification, so `refute_receive` on the socket is exact. The streams
+      # are killed at the end instead of noticing their closed sockets.
+      port = start_server(auth: function_auth(), keep_alive_interval: 60_000)
+      alice_task = start_task(port, "alice")
+      bob_task = start_task(port, "bob")
+
+      {alice, alice_acc, alice_ack} =
+        listen(port, "a", %{"taskIds" => [alice_task]}, bearer("alice"), @tasks_meta)
+
+      # Bob names Alice's task too: dropped silently, like an unknown id.
+      {bob, bob_acc, bob_ack} =
+        listen(port, "b", %{"taskIds" => [alice_task, bob_task]}, bearer("bob"), @tasks_meta)
+
+      assert alice_ack["params"]["notifications"] == %{"taskIds" => [alice_task]}
+      assert bob_ack["params"]["notifications"] == %{"taskIds" => [bob_task]}
+
+      :ok = Tasks.progress(alice_task, "Halfway")
+
+      # Positive control: the change was published and reached Alice.
+      {_acc, [_ack, notification]} = await_events(alice, alice_acc, 2)
+      {:ok, record} = Tasks.status(alice_task)
+
+      assert notification == %{
+               "jsonrpc" => "2.0",
+               "method" => "notifications/tasks",
+               "params" => Map.put(Tasks.to_wire(record), "_meta", %{@subscription_id => "a"})
+             }
+
+      assert notification["params"]["statusMessage"] == "Halfway"
+      assert :ok = McpSchema.validate(@ext_schema, "TaskStatusNotification", notification)
+
+      refute_receive {:tcp, ^bob, _data}, 100
+
+      # Bob's stream is live: his own task's change reaches him, not Alice.
+      :ok = Tasks.complete(bob_task, %{"content" => []})
+      {_acc, [_ack, bob_notification]} = await_events(bob, bob_acc, 2)
+
+      assert %{
+               "method" => "notifications/tasks",
+               "params" => %{"taskId" => ^bob_task, "status" => "completed", "result" => _}
+             } = bob_notification
+
+      refute_receive {:tcp, ^alice, _data}, 100
+
+      for {owner, task_id} <- [{"alice", alice_task}, {"bob", bob_task}],
+          pid <- Subscriptions.subscribers(Subscriptions.task_topic(owner, task_id)) do
+        Process.exit(pid, :kill)
+      end
+    end
+
+    test "the acknowledgment echoes owned taskIds; an undeclared extension is -32021" do
+      port = start_server()
+      task_id = start_task(port, nil)
+
+      {socket, _acc, ack} =
+        listen(port, 1, %{"taskIds" => [task_id, "unknown", task_id]}, [], @tasks_meta)
+
+      assert ack["params"]["notifications"] == %{"taskIds" => [task_id]}
+      golden!("SubscriptionsAcknowledgedNotification", ack)
+      :gen_tcp.close(socket)
+
+      response = post(port, listen_request(2, %{"taskIds" => [task_id]}))
+
+      assert response.status == 400
+
+      assert %{
+               "id" => 2,
+               "error" => %{
+                 "code" => -32_021,
+                 "data" => %{
+                   "requiredCapabilities" => %{
+                     "extensions" => %{"io.modelcontextprotocol/tasks" => %{}}
+                   }
+                 }
+               }
+             } = JSON.decode!(response.body)
+    end
+  end
+
+  # Calls the `slow` tool as `principal` (`nil`: unauthenticated) and returns
+  # the id of the task it created.
+  defp start_task(port, principal) do
+    body = %{
+      "jsonrpc" => "2.0",
+      "id" => "call",
+      "method" => "tools/call",
+      "params" => %{"name" => "slow", "arguments" => %{}, "_meta" => @tasks_meta}
+    }
+
+    headers = [
+      {"mcp-protocol-version", @version},
+      {"mcp-method", "tools/call"},
+      {"mcp-name", "slow"}
+    ]
+
+    auth = if principal, do: bearer(principal), else: []
+    response = post(port, {JSON.encode!(body), headers}, auth)
+
+    assert %{"result" => %{"resultType" => "task", "taskId" => task_id}} =
+             JSON.decode!(response.body)
+
+    task_id
   end
 
   # --- limits -----------------------------------------------------------------

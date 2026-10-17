@@ -5,6 +5,7 @@ defmodule ConduitMcp.Ext.TasksTest do
 
   alias ConduitMcp.Ext.Tasks
   alias ConduitMcp.Ext.Tasks.EtsStore
+  alias ConduitMcp.Subscriptions
 
   defmodule Notifier do
     @behaviour ConduitMcp.Ext.Tasks.Notifier
@@ -114,16 +115,21 @@ defmodule ConduitMcp.Ext.TasksTest do
       {:ok, untimed_done} = Tasks.create(nil, ttl_ms: nil)
       :ok = Tasks.complete(untimed_done.task_id, %{"content" => []})
 
+      # The four tasks need not share a `created_at`: the clock can tick
+      # between creates. `t0` is the first's, `t1` the last's; the bounds hold
+      # for any gap under a second.
       t0 = short.created_at
+      t1 = untimed_done.created_at
 
       assert EtsStore.cleanup(5_000, t0 + 999) == 0
-      assert EtsStore.cleanup(5_000, t0 + 5_000) == 2
+      # short: ttl 1 000 elapsed; untimed_done: terminal, 5 000 default elapsed.
+      assert EtsStore.cleanup(5_000, t1 + 5_000) == 2
       assert {:error, :not_found} = Tasks.status(short.task_id)
       assert {:error, :not_found} = Tasks.status(untimed_done.task_id)
       assert {:ok, _} = Tasks.status(long.task_id)
       assert {:ok, _} = Tasks.status(untimed.task_id)
 
-      assert EtsStore.cleanup(5_000, t0 + 1_000_000) == 1
+      assert EtsStore.cleanup(5_000, t1 + 1_000_000) == 1
       assert {:ok, _} = Tasks.status(untimed.task_id)
     end
 
@@ -220,6 +226,56 @@ defmodule ConduitMcp.Ext.TasksTest do
         end)
 
       assert log =~ "notifier raised"
+    end
+  end
+
+  # Subscribes this process as a listen stream of `principal` to `task_id`.
+  defp listen_as(principal, task_id) do
+    ref = make_ref()
+    :ok = Subscriptions.subscribe([Subscriptions.task_topic(principal, task_id)], ref)
+    ref
+  end
+
+  describe "ListenNotifier (the default notifier)" do
+    test "publishes notifications/tasks, the full task state, to the owner's streams only" do
+      {:ok, task} = Tasks.create("alice", [])
+      alice = listen_as("alice", task.task_id)
+      bob = listen_as("bob", task.task_id)
+      anonymous = listen_as(nil, task.task_id)
+
+      :ok = Tasks.progress(task.task_id, "Halfway")
+      {:ok, record} = Tasks.status(task.task_id)
+
+      assert_receive {Subscriptions, ^alice, notification}
+
+      assert notification == %{
+               "jsonrpc" => "2.0",
+               "method" => "notifications/tasks",
+               "params" => Tasks.to_wire(record)
+             }
+
+      refute_receive {Subscriptions, ^bob, _}, 50
+      refute_receive {Subscriptions, ^anonymous, _}, 0
+    end
+
+    test "a task owned by nil reaches only unauthenticated streams" do
+      {:ok, task} = Tasks.create(nil, [])
+      anonymous = listen_as(nil, task.task_id)
+      alice = listen_as("alice", task.task_id)
+
+      :ok = Tasks.complete(task.task_id, %{"content" => []})
+
+      assert_receive {Subscriptions, ^anonymous, %{"params" => %{"status" => "completed"}}}
+      refute_receive {Subscriptions, ^alice, _}, 50
+    end
+
+    test "notifier: nil turns notifications off" do
+      Application.put_env(:conduit_mcp, :ext_tasks, notifier: nil)
+      {:ok, task} = Tasks.create(nil, [])
+      ref = listen_as(nil, task.task_id)
+
+      :ok = Tasks.progress(task.task_id, "Halfway")
+      refute_receive {Subscriptions, ^ref, _}, 50
     end
   end
 end

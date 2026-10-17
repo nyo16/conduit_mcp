@@ -103,12 +103,17 @@ defmodule ConduitMcp.Client.ConnectionTest do
 
   # Bounded retry over a synchronous `:sys` read; for facts that depend on a
   # message from a third process (a `:DOWN`, a task's request) reaching the
-  # connection.
-  defp eventually(fun, attempts \\ 500) do
+  # connection. Bounded by time, not attempts: a fixed number of fast `:sys`
+  # round trips can all finish before a loaded scheduler runs that third
+  # process (500 attempts did, about once in 20 full-suite runs).
+  defp eventually(fun, timeout \\ 2_000),
+    do: eventually_until(fun, System.monotonic_time(:millisecond) + timeout)
+
+  defp eventually_until(fun, deadline) do
     cond do
       fun.() -> :ok
-      attempts == 0 -> flunk("condition never held")
-      true -> eventually(fun, attempts - 1)
+      System.monotonic_time(:millisecond) > deadline -> flunk("condition never held")
+      true -> eventually_until(fun, deadline)
     end
   end
 

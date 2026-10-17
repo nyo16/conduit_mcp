@@ -125,18 +125,34 @@ defmodule ConduitMcp.ProtocolTest do
       # The same drift in the other dispatcher: `handle_notification/3` used a
       # hand-written case over string literals, so a table entry with no clause
       # was advertised and then dropped as "Unknown notification".
+      unknown = "pid=#{:erlang.pid_to_list(self())} [warning] Unknown notification"
+
+      # Control: the needle matches what an unknown notification logs here.
+      log =
+        ExUnit.CaptureLog.capture_log([metadata: [:pid]], fn ->
+          ConduitMcp.Handler.handle_request(
+            %{"jsonrpc" => "2.0", "method" => "notifications/not-a-method"},
+            ConduitMcp.TestServer
+          )
+        end)
+
+      assert log =~ unknown
+
       for method <- ["notifications/initialized", "notifications/cancelled"] do
         assert Map.has_key?(Protocol.methods(), method)
 
         # A valid notification carries no id.
         notification = %{"jsonrpc" => "2.0", "method" => method, "params" => %{}}
 
+        # `capture_log/2` captures every process's log; `HandlerTest` (async)
+        # logs "Unknown notification" for its own unknown method. The handler
+        # runs in this process, so look at this process's lines only.
         log =
-          ExUnit.CaptureLog.capture_log(fn ->
+          ExUnit.CaptureLog.capture_log([metadata: [:pid]], fn ->
             ConduitMcp.Handler.handle_request(notification, ConduitMcp.TestServer)
           end)
 
-        refute log =~ "Unknown notification",
+        refute log =~ unknown,
                "#{method} is published by methods/0 but handle_notification/3 drops it"
       end
     end

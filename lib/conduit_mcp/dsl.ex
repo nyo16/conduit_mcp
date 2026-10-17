@@ -58,6 +58,36 @@ defmodule ConduitMcp.DSL do
   - Input validation (JSON Schema)
   - handle_list_* callbacks
   - handle_call_tool/handle_get_prompt/handle_read_resource callbacks
+  - handle_complete, when any block declares `complete/2`
+
+  ## Completions
+
+  `complete/2` inside a `prompt` or `resource` block makes one prompt
+  argument or resource template parameter answer `completion/complete`:
+
+      prompt "code_review", "Code review assistant" do
+        arg :language, :string, "Language"
+        get fn _conn, args -> [user("Review my \#{args["language"]}")] end
+
+        complete :language, fn _conn, prefix ->
+          Enum.filter(~w(elixir erlang python), &String.starts_with?(&1, prefix))
+        end
+      end
+
+      resource "file:///{path}" do
+        read MyFiles, :read
+        complete :path, MyFiles, :complete_path
+      end
+
+  The client's `ref` selects the block (`ref/prompt` by prompt name,
+  `ref/resource` by the URI template exactly as declared) and
+  `argument.name` the completion; the handler gets the conn and
+  `argument.value` and returns a list of strings. The answer carries the
+  first 100 values, `total` and `hasMore`. An argument without a
+  completion answers no values; an unknown prompt or resource is `-32602`.
+  A block's `scope/1` also guards its completions. Declaring any completion
+  generates `handle_complete/3`, which advertises the `completions`
+  capability (`ConduitMcp.Capabilities`).
   """
 
   @doc false
@@ -969,7 +999,7 @@ defmodule ConduitMcp.DSL do
         description: @mcp_current_prompt_description,
         args: Enum.reverse(@mcp_current_prompt_args),
         handler: @mcp_current_prompt_handler,
-        completions: @mcp_current_prompt_completions,
+        completions: Enum.reverse(@mcp_current_prompt_completions),
         scope: @mcp_current_scope,
         cache: @mcp_current_cache
       }
@@ -1044,24 +1074,99 @@ defmodule ConduitMcp.DSL do
   end
 
   @doc """
-  Defines an autocomplete handler for a prompt argument.
+  Declares the autocompletion of one argument of the enclosing prompt, or
+  one parameter of the enclosing resource template, for
+  `completion/complete`.
 
-  ## Example
+  The handler receives the conn and the value typed so far (`""` when the
+  client sent none) and returns a list of strings; the server answers with
+  the first 100, `total` set to the length of the list and `hasMore` set
+  when it was longer. Give it as an anonymous function, a capture, or a
+  module and function name (called as `module.function(conn, value)`).
 
-      complete :language, fn _conn, prefix ->
-        ~w(elixir python javascript rust)
-        |> Enum.filter(&String.starts_with?(&1, prefix))
+  ## Examples
+
+      prompt "code_review", "Code review assistant" do
+        arg :language, :string, "Language"
+        get fn _conn, args -> [user("Review my \#{args["language"]}")] end
+
+        complete :language, fn _conn, prefix ->
+          ~w(elixir python javascript rust)
+          |> Enum.filter(&String.starts_with?(&1, prefix))
+        end
       end
-  """
-  defmacro complete(arg_name, fun) do
-    quote do
-      completion_def = %{
-        arg: unquote(arg_name),
-        handler: unquote(fun)
-      }
 
-      @mcp_current_prompt_completions completion_def
+      resource "file:///{path}" do
+        read MyFiles, :read
+        complete :path, &MyFiles.autocomplete/2
+      end
+
+      resource "user://{id}" do
+        read MyUsers, :read
+        complete :id, MyUsers, :complete_id
+      end
+
+  The name must be one of the prompt's `arg`s or one of the template's
+  `{params}` (a compile error otherwise), at most once per block.
+  """
+  defmacro complete(arg_name, {:fn, _, _} = fun) do
+    quote do
+      ConduitMcp.DSL.__put_completion__(
+        __MODULE__,
+        unquote(arg_name),
+        {:fn_ast, unquote(Macro.escape(fun))}
+      )
     end
+  end
+
+  defmacro complete(arg_name, {:&, _, _} = fun) do
+    quote do
+      ConduitMcp.DSL.__put_completion__(
+        __MODULE__,
+        unquote(arg_name),
+        {:fn_ast, unquote(Macro.escape(fun))}
+      )
+    end
+  end
+
+  defmacro complete(arg_name, module, function) do
+    quote do
+      ConduitMcp.DSL.__put_completion__(
+        __MODULE__,
+        unquote(arg_name),
+        {:mfa, {unquote(module), unquote(function)}}
+      )
+    end
+  end
+
+  # Adds a completion to the enclosing `prompt` or `resource` block - the
+  # block's own attribute, so a resource's completions are not read as a
+  # prompt's.
+  @doc false
+  def __put_completion__(module, arg_name, handler) do
+    attribute =
+      cond do
+        Module.has_attribute?(module, :mcp_current_prompt_name) ->
+          :mcp_current_prompt_completions
+
+        Module.has_attribute?(module, :mcp_current_resource_uri) ->
+          :mcp_current_resource_completions
+
+        true ->
+          raise CompileError,
+            description:
+              "#{inspect(module)}: complete/2 must be called inside a prompt or resource block"
+      end
+
+    arg = to_string(arg_name)
+    completions = Module.get_attribute(module, attribute) || []
+
+    if Enum.any?(completions, &(&1.arg == arg)) do
+      raise CompileError,
+        description: "#{inspect(module)}: complete/2 for #{inspect(arg)} is declared twice"
+    end
+
+    Module.put_attribute(module, attribute, [%{arg: arg, handler: handler} | completions])
   end
 
   # ============ RESOURCES ============
@@ -1104,7 +1209,7 @@ defmodule ConduitMcp.DSL do
         description: @mcp_current_resource_description,
         mime_type: @mcp_current_resource_mime_type,
         handler: @mcp_current_resource_handler,
-        completions: @mcp_current_resource_completions,
+        completions: Enum.reverse(@mcp_current_resource_completions),
         scope: @mcp_current_scope,
         cache: @mcp_current_cache
       }
@@ -1361,6 +1466,7 @@ defmodule ConduitMcp.DSL do
 
     tool_clauses = generate_tool_clauses(reversed_tools)
     prompt_clauses = generate_prompt_clauses(reversed_prompts)
+    completion_clauses = generate_completion_clauses(env.module, reversed_prompts, resources)
 
     # Dispatch and the scope lookup are both built from this one list, so the
     # lookup answers for exactly the resource `handle_read_resource/2` serves.
@@ -1487,7 +1593,147 @@ defmodule ConduitMcp.DSL do
            }}
         end
       end
+
+      # `completion/complete`, only when a block declared a `complete`: its
+      # presence is what advertises the `completions` capability.
+      unquote(completion_clauses)
     end
+  end
+
+  # One `handle_complete/3` clause per `complete` declaration, keyed by the
+  # ref (`ref/prompt` + name, `ref/resource` + URI template) and the argument
+  # name, then a fallback: a known prompt or resource whose argument has no
+  # completion answers empty, an unknown one -32602.
+  defp generate_completion_clauses(module, reversed_prompts, resources) do
+    resources = Enum.reverse(resources)
+
+    entries =
+      for(
+        %{name: name, args: args, completions: completions} <- reversed_prompts,
+        completion <- completions,
+        do:
+          {"ref/prompt", "name", to_string(name), Enum.map(args, &to_string(&1.name)), completion}
+      ) ++
+        for(
+          %{uri: uri, completions: completions} <- resources,
+          completion <- completions,
+          do: {"ref/resource", "uri", uri, template_params(uri), completion}
+        )
+
+    if entries == [] do
+      []
+    else
+      prompt_names = Enum.map(reversed_prompts, &to_string(&1.name))
+      resource_uris = Enum.map(resources, & &1.uri)
+
+      Enum.map(entries, &generate_completion_clause(module, &1)) ++
+        [
+          quote do
+            def handle_complete(_conn, ref, _argument) do
+              ConduitMcp.DSL.__complete_fallback__(
+                ref,
+                unquote(prompt_names),
+                unquote(resource_uris)
+              )
+            end
+          end
+        ]
+    end
+  end
+
+  defp generate_completion_clause(
+         module,
+         {type, key, target, names, %{arg: arg, handler: handler}}
+       ) do
+    unless arg in names do
+      raise CompileError,
+        description:
+          "#{inspect(module)}: complete/2 names #{inspect(arg)}, which is not an argument " <>
+            "of #{type} #{inspect(target)} (#{Enum.map_join(names, ", ", &inspect/1)})"
+    end
+
+    call =
+      case handler do
+        {:fn_ast, handler_ast} ->
+          quote do: unquote(handler_ast).(conn, ConduitMcp.DSL.__completion_value__(argument))
+
+        {:mfa, {mod, fun}} ->
+          quote do
+            apply(unquote(mod), unquote(fun), [
+              conn,
+              ConduitMcp.DSL.__completion_value__(argument)
+            ])
+          end
+      end
+
+    quote do
+      def handle_complete(
+            conn,
+            %{"type" => unquote(type), unquote(key) => unquote(target)},
+            %{"name" => unquote(arg)} = argument
+          ) do
+        ConduitMcp.DSL.__completion_result__(unquote(call))
+      end
+    end
+  end
+
+  defp template_params(uri), do: for([_, name] <- Regex.scan(~r/\{([^}]+)\}/, uri), do: name)
+
+  @max_completion_values 100
+
+  @doc false
+  # The value typed so far: `argument.value`, `""` when absent.
+  @spec __completion_value__(map()) :: String.t()
+  def __completion_value__(%{"value" => value}) when is_binary(value), do: value
+  def __completion_value__(_argument), do: ""
+
+  @doc false
+  # A `complete` handler's list as the `completion/complete` result: at most
+  # 100 values (the specification's cap), the full count
+  # in `total`, `hasMore` when values were cut.
+  @spec __completion_result__(term()) :: {:ok, map()}
+  def __completion_result__(values) when is_list(values) do
+    unless Enum.all?(values, &is_binary/1) do
+      raise ArgumentError,
+            "a complete handler must return a list of strings, got: " <>
+              ConduitMcp.Reflect.text(values, 200)
+    end
+
+    total = length(values)
+
+    {:ok,
+     %{
+       "completion" => %{
+         "values" => Enum.take(values, @max_completion_values),
+         "total" => total,
+         "hasMore" => total > @max_completion_values
+       }
+     }}
+  end
+
+  def __completion_result__(other) do
+    raise ArgumentError,
+          "a complete handler must return a list of strings, got: " <>
+            ConduitMcp.Reflect.text(other, 200)
+  end
+
+  @doc false
+  @spec __complete_fallback__(map(), [String.t()], [String.t()]) :: {:ok, map()} | {:error, map()}
+  def __complete_fallback__(%{"type" => "ref/prompt", "name" => name}, prompts, _resources),
+    do: known_or_unknown(name in prompts, "prompt", name)
+
+  def __complete_fallback__(%{"type" => "ref/resource", "uri" => uri}, _prompts, resources),
+    do: known_or_unknown(uri in resources, "resource", uri)
+
+  defp known_or_unknown(true, _kind, _name),
+    do: {:ok, %{"completion" => %{"values" => [], "total" => 0, "hasMore" => false}}}
+
+  defp known_or_unknown(false, kind, name) do
+    {:error,
+     %{
+       "code" => ConduitMcp.Errors.invalid_params(),
+       "message" => "Unknown #{kind}: #{ConduitMcp.Reflect.text(name)}"
+     }}
   end
 
   defp partition_resources(resources) do
