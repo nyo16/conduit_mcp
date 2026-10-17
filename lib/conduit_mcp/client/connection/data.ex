@@ -6,6 +6,7 @@ defmodule ConduitMcp.Client.Connection.Data do
 
   alias ConduitMcp.Client.Cache
   alias ConduitMcp.Client.Config
+  alias ConduitMcp.Client.Connection.Authorize
   alias ConduitMcp.Client.Connection.Listen
   alias ConduitMcp.Client.Negotiation
   alias ConduitMcp.Client.RateLimit
@@ -15,7 +16,6 @@ defmodule ConduitMcp.Client.Connection.Data do
 
   defstruct [
     :config,
-    :name,
     :transport,
     :tstate,
     :task_sup,
@@ -77,21 +77,25 @@ defmodule ConduitMcp.Client.Connection.Data do
     # `active` (acknowledged) one; `waiters`, callers awaiting a
     # subscription change: [{mref, op, uri}]; the reopen backoff `attempt`;
     # and `off?`, whether the server refused listen.
-    listen: nil
+    listen: nil,
+    # `ConduitMcp.Client.Connection.Authorize` for a transport configured
+    # with `auth: {:oauth, ...}`, else nil.
+    auth: nil
   ]
 
   @type t :: %__MODULE__{}
 
   @doc """
   Which of this process's tasks `ref` belongs to: `{:server_request, id}`,
-  `{:refresh, kind}`, or `:error`. (At most `:max_server_requests` plus one
-  per list kind run at once.)
+  `{:refresh, kind}`, `:auth` (an OAuth task), or `:error`. (At most
+  `:max_server_requests` plus one per list kind run at once.)
   """
-  @spec job(t(), reference()) :: {:server_request, term()} | {:refresh, atom()} | :error
+  @spec job(t(), reference()) :: {:server_request, term()} | {:refresh, atom()} | :auth | :error
   def job(data, ref) do
     cond do
       id = find_ref(data.server_requests, ref) -> {:server_request, id}
       kind = find_ref(data.refreshes, ref) -> {:refresh, kind}
+      Authorize.task?(data, ref) -> :auth
       true -> :error
     end
   end
@@ -105,7 +109,6 @@ defmodule ConduitMcp.Client.Connection.Data do
 
     %__MODULE__{
       config: config,
-      name: config.name,
       transport: transport,
       tstate: tstate,
       task_sup: task_sup,
@@ -119,7 +122,8 @@ defmodule ConduitMcp.Client.Connection.Data do
         elicitation: config.elicitation,
         limiter: RateLimit.new(rate[:per_second], rate[:burst]),
         assigns: config.assigns
-      }
+      },
+      auth: Authorize.new(config)
     }
   end
 
@@ -160,11 +164,11 @@ defmodule ConduitMcp.Client.Connection.Data do
 
   @doc "Publishes the static view (once, from `init`)."
   @spec register(t()) :: :ok
-  def register(data), do: Registry.put_value({:client, data.name}, view(data))
+  def register(data), do: Registry.put_value({:client, data.config.name}, view(data))
 
   @spec telemetry(t()) :: Telemetry.base()
   def telemetry(data),
-    do: Telemetry.base(data.name, data.config.server_id, data.kind, data.era)
+    do: Telemetry.base(data.config.name, data.config.server_id, data.kind, data.era)
 
   @doc "The client capabilities for `era`."
   @spec client_capabilities(t(), :modern | :legacy) :: map()

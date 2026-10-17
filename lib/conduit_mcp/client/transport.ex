@@ -104,8 +104,13 @@ defmodule ConduitMcp.Client.Transport do
       transport emitting this event must implement.
     * `{:unauthorized, id, %{status: 401 | 403, challenges: list}}` - the
       server refused request `id` for want of credentials or scope (HTTP);
-      the connection fails it with `kind: :auth`. `challenges` are
-      `ConduitMcp.Client.OAuth.Challenge` structs.
+      the connection fails it with `kind: :auth`, or, with OAuth
+      configured, runs the authorization path and re-sends it (see
+      `ConduitMcp.Client.OAuth`). `challenges` are
+      `ConduitMcp.Client.OAuth.Challenge` structs; an OAuth transport adds
+      `sent:`, a fingerprint of the bearer the request carried (`nil` for
+      none), never the token itself. A request carrying the `server/discover`
+      probe reports a 401/403 this way too when OAuth is configured.
     * `{:session_expired, id}` - the server no longer knows the legacy
       session request `id` was sent in (HTTP 404). The connection
       initializes a new session without failing anything; the transport
@@ -192,11 +197,24 @@ defmodule ConduitMcp.Client.Transport do
   @callback set_session(state(), session :: %{era: :modern | :legacy, version: String.t()}) ::
               state()
 
+  @doc """
+  Gives the transport the connection's OAuth session (a
+  `ConduitMcp.Client.OAuth.Session`, holding the OAuth options and what
+  discovery found) for a transport configured with `auth: {:oauth, ...}`.
+  Called after every `c:init/2` and whenever the session changes; requests
+  started afterwards read their bearer token through it.
+  """
+  @callback set_auth(state(), session :: term()) :: state()
+
   @doc "Turns a message delivered to the connection into transport events."
   @callback handle_info(message :: term(), state()) :: {:ok, [event()], state()} | :unknown
 
   @doc "Releases everything the transport holds. Bounded by the connection's shutdown."
   @callback close(state(), reason :: term()) :: :ok
 
-  @optional_callbacks respond: 2, set_session: 2, validate_options: 1, child_specs: 2
+  @optional_callbacks respond: 2,
+                      set_session: 2,
+                      set_auth: 2,
+                      validate_options: 1,
+                      child_specs: 2
 end

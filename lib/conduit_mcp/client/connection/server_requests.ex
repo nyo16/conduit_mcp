@@ -67,7 +67,7 @@ defmodule ConduitMcp.Client.Connection.ServerRequests do
 
     env =
       Input.env(data.input, %{
-        client: data.name,
+        client: data.config.name,
         server_id: data.config.server_id,
         era: data.era || :legacy,
         assigns: (related && Requests.assigns(data, related)) || data.input.assigns,

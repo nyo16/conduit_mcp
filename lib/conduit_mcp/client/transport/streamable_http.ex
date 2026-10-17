@@ -1,5 +1,6 @@
 defmodule ConduitMcp.Client.Transport.StreamableHTTP do
   alias ConduitMcp.Client.Error
+  alias ConduitMcp.Client.OAuth
   alias ConduitMcp.Client.Secret
   alias ConduitMcp.Client.URLPolicy
   alias ConduitMcp.Headers
@@ -60,12 +61,16 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
               default: nil,
               doc: """
               Credentials for every request: `{:bearer, token}` (a string or
-              a `ConduitMcp.Client.Secret`), or a one-arity function called
+              a `ConduitMcp.Client.Secret`); a one-arity function called
               in the request's own process before each request with
               `%{url: url, method: method}` and returning `{:ok, token}`,
               `{:ok, nil}` (no credentials) or `{:error, reason}` (the
-              request fails with `kind: :auth`). Never sent over `http` to a
-              host other than loopback: such a configuration raises.
+              request fails with `kind: :auth`); `{:oauth, opts}` for the
+              OAuth 2.1 authorization-code flow, or `{:client_credentials,
+              opts}` for machine-to-machine OAuth (see
+              `ConduitMcp.Client.OAuth` and `ConduitMcp.Client.OAuth.Config`).
+              Never sent over `http` to a host other than loopback: such a
+              configuration raises.
               """
             ],
             finch: [
@@ -246,7 +251,7 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
          :ok <- check_credentials(opts),
          :ok <- check_tls(opts),
          :ok <- check_allow_private(opts) do
-      {:ok, opts}
+      oauth_config(opts)
     end
   end
 
@@ -254,6 +259,34 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
     case NimbleOptions.validate(opts, @schema) do
       {:ok, opts} -> {:ok, opts}
       {:error, error} -> {:error, Exception.message(error)}
+    end
+  end
+
+  # `{:oauth, opts}` / `{:client_credentials, opts}` become `{:oauth,
+  # %ConduitMcp.Client.OAuth.Config{}}` for this server URL. The OAuth
+  # modules need Finch too; asking now fails at boot, never per request.
+  defp oauth_config(opts) do
+    case opts[:auth] do
+      {:oauth, %OAuth.Config{}} ->
+        {:ok, opts}
+
+      {grant, oauth_opts} when grant in [:oauth, :client_credentials] ->
+        _session = OptionalDeps.oauth_client!()
+
+        oauth_opts = Keyword.put(oauth_opts, :server_url, opts[:url])
+
+        oauth_opts =
+          if grant == :client_credentials,
+            do: Keyword.put(oauth_opts, :grant, :client_credentials),
+            else: oauth_opts
+
+        case OAuth.Config.new(oauth_opts) do
+          {:ok, config} -> {:ok, Keyword.put(opts, :auth, {:oauth, config})}
+          {:error, message} -> {:error, "invalid value for :auth option: " <> message}
+        end
+
+      _other ->
+        {:ok, opts}
     end
   end
 
@@ -314,24 +347,35 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
 
   @doc """
   The children the client starts before its connection: the Finch pool,
-  unless `:finch` names one of yours.
+  unless `:finch` names one of yours, and for `auth: {:oauth, ...}` without
+  a `:store` the default in-memory `ConduitMcp.Client.OAuth.TokenStore.ETS`.
   """
   @impl true
   def child_specs(opts, key) do
     http = OptionalDeps.finch!()
 
-    if opts[:finch] do
-      []
-    else
-      [
-        http.child_spec(http.pool_name(key), opts[:url],
-          size: opts[:pool_size],
-          transport_opts: opts[:transport_opts],
-          insecure: opts[:insecure_skip_tls_verify]
-        )
-      ]
-    end
+    pool =
+      if opts[:finch] do
+        []
+      else
+        [
+          http.child_spec(http.pool_name(key), opts[:url],
+            size: opts[:pool_size],
+            transport_opts: opts[:transport_opts],
+            insecure: opts[:insecure_skip_tls_verify]
+          )
+        ]
+      end
+
+    pool ++ token_store(opts[:auth], key)
   end
+
+  defp token_store({:oauth, %OAuth.Config{store: nil}}, key) do
+    {module, store_opts} = OAuth.TokenStore.ETS.default(key)
+    [Supervisor.child_spec({module, store_opts}, id: :oauth_token_store)]
+  end
+
+  defp token_store(_auth, _key), do: []
 
   @impl true
   def init(opts, %{owner: owner, task_sup: task_sup, key: key}) do
@@ -355,6 +399,9 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
            exchange: Module.concat(__MODULE__, Exchange),
            listener_module: Module.concat(__MODULE__, Listener),
            opts: opts,
+           # `{:oauth, %OAuth.Config{}}` until the connection hands over its
+           # `ConduitMcp.Client.OAuth.Session` (`set_auth/2`)
+           auth: opts[:auth],
            url: opts[:url],
            finch: opts[:finch] || http.pool_name(key),
            era: nil,
@@ -455,7 +502,7 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
       relayed?: false,
       probe?: Keyword.get(wire_opts, :probe, false),
       headers: headers(state, method, params, era, session, wire_opts),
-      auth: state.opts[:auth],
+      auth: state.auth,
       redirect: state.opts[:redirect],
       url_policy: state.opts[:server_url_policy],
       allow_private: state.opts[:allow_private],
@@ -610,6 +657,12 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
     end
   end
 
+  @doc false
+  # The connection's OAuth session (`ConduitMcp.Client.OAuth.Session`):
+  # every exchange started from now on reads its bearer through it.
+  @impl true
+  def set_auth(state, session), do: %{state | auth: {:oauth, session}}
+
   defp resubmit_parked(%{parked: parked} = state) do
     Enum.reduce(Enum.reverse(parked), %{state | parked: []}, &resubmit(&2, &1))
   end
@@ -644,7 +697,7 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
       url: state.url,
       headers: [{"accept", "text/event-stream"}] ++ state.opts[:headers],
       session_headers: legacy_headers(state, nil, state.session),
-      auth: state.opts[:auth],
+      auth: state.auth,
       redirect: state.opts[:redirect],
       url_policy: state.opts[:server_url_policy],
       allow_private: state.opts[:allow_private],
@@ -918,8 +971,19 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
 
   def validate_auth(fun) when is_function(fun, 1), do: {:ok, fun}
 
+  # Built into a `ConduitMcp.Client.OAuth.Config` once the URL is known
+  # (`validate_options/1`).
+  def validate_auth({:oauth, %OAuth.Config{}} = auth), do: {:ok, auth}
+
+  def validate_auth({grant, opts} = auth)
+      when grant in [:oauth, :client_credentials] and is_list(opts),
+      do: {:ok, auth}
+
   def validate_auth(_other),
-    do: {:error, "expected nil, {:bearer, token} or a one-arity function"}
+    do:
+      {:error,
+       "expected nil, {:bearer, token}, a one-arity function, {:oauth, opts} " <>
+         "or {:client_credentials, opts}"}
 
   defp token_text(token), do: if(Secret.secret?(token), do: Secret.expose(token), else: token)
 end

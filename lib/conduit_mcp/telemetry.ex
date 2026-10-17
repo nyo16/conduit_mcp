@@ -555,6 +555,53 @@ defmodule ConduitMcp.Telemetry do
   **Metadata:** as for `hook.stop`, with `:reason` (:raise | :exit |
   :timeout | :bad_return) instead of `:status`.
 
+  #### `[:conduit_mcp, :client, :oauth, op, :start | :stop | :exception]`
+
+  The client's OAuth work (`ConduitMcp.Client.OAuth`), one span per
+  operation, `op` one of:
+
+    * `:discovery` - Protected Resource Metadata and authorization-server
+      metadata fetched and validated;
+    * `:registration` - the client identity chosen (pre-registered, CIMD,
+      or a dynamic registration request);
+    * `:token_exchange` - an authorization code redeemed, or a
+      client-credentials token requested;
+    * `:refresh` - a refresh-token grant;
+    * `:step_up` - a 403 `insufficient_scope` handled (emitted in the
+      connection process).
+
+  The other spans run in the process doing the work: an HTTP request
+  process, the connection's authorization task, or the caller of
+  `ConduitMcp.Client.OAuth`.
+
+  **Measurements:** as for `request`.
+
+  **Metadata:** never a token, code, `state`, verifier, secret, URL or
+  issuer:
+
+    * `:client` (term) - the client's `:name`, `nil` for a standalone
+      `ConduitMcp.Client.OAuth.Config`
+    * `:server_id` (String.t | nil) - the client's `:server_id`
+    * `:principal` (term) - the configured `:principal` (host-supplied;
+      `nil` when unused)
+
+  `:token_exchange` adds `:grant` (:authorization_code |
+  :client_credentials). `:stop` adds `:status` (:ok | :error) and `:reason`
+  (a `ConduitMcp.Client.OAuth.Error` reason atom, or `nil`);
+  `:registration`'s `:stop` adds `:method` (:pre_registered | :cimd | :dcr
+  | nil). `:exception` adds `:kind`.
+
+  #### `[:conduit_mcp, :client, :oauth, :authorization_required]`
+
+  The user must authorize: the client is about to call
+  `on_authorization_required` (emitted in the connection process, once per
+  episode, and for each step-up).
+
+  **Measurements:** `:count` (always `1`).
+
+  **Metadata:** `:client`, `:server_id`, `:principal` as above, and
+  `:reason` (:unauthorized | :step_up).
+
   ## Common Use Cases
 
   ### Logging Request Activity
@@ -822,7 +869,23 @@ defmodule ConduitMcp.Telemetry do
         [:conduit_mcp, :client, :tool, :definition_changed],
         [:conduit_mcp, :client, :policy, :decision],
         [:conduit_mcp, :client, :hook, :stop],
-        [:conduit_mcp, :client, :hook, :exception]
+        [:conduit_mcp, :client, :hook, :exception],
+        [:conduit_mcp, :client, :oauth, :discovery, :start],
+        [:conduit_mcp, :client, :oauth, :discovery, :stop],
+        [:conduit_mcp, :client, :oauth, :discovery, :exception],
+        [:conduit_mcp, :client, :oauth, :registration, :start],
+        [:conduit_mcp, :client, :oauth, :registration, :stop],
+        [:conduit_mcp, :client, :oauth, :registration, :exception],
+        [:conduit_mcp, :client, :oauth, :token_exchange, :start],
+        [:conduit_mcp, :client, :oauth, :token_exchange, :stop],
+        [:conduit_mcp, :client, :oauth, :token_exchange, :exception],
+        [:conduit_mcp, :client, :oauth, :refresh, :start],
+        [:conduit_mcp, :client, :oauth, :refresh, :stop],
+        [:conduit_mcp, :client, :oauth, :refresh, :exception],
+        [:conduit_mcp, :client, :oauth, :step_up, :start],
+        [:conduit_mcp, :client, :oauth, :step_up, :stop],
+        [:conduit_mcp, :client, :oauth, :step_up, :exception],
+        [:conduit_mcp, :client, :oauth, :authorization_required]
       ]
   """
   @spec events() :: [[:conduit_mcp, ...]]
@@ -860,7 +923,23 @@ defmodule ConduitMcp.Telemetry do
       [:conduit_mcp, :client, :tool, :definition_changed],
       [:conduit_mcp, :client, :policy, :decision],
       [:conduit_mcp, :client, :hook, :stop],
-      [:conduit_mcp, :client, :hook, :exception]
+      [:conduit_mcp, :client, :hook, :exception],
+      [:conduit_mcp, :client, :oauth, :discovery, :start],
+      [:conduit_mcp, :client, :oauth, :discovery, :stop],
+      [:conduit_mcp, :client, :oauth, :discovery, :exception],
+      [:conduit_mcp, :client, :oauth, :registration, :start],
+      [:conduit_mcp, :client, :oauth, :registration, :stop],
+      [:conduit_mcp, :client, :oauth, :registration, :exception],
+      [:conduit_mcp, :client, :oauth, :token_exchange, :start],
+      [:conduit_mcp, :client, :oauth, :token_exchange, :stop],
+      [:conduit_mcp, :client, :oauth, :token_exchange, :exception],
+      [:conduit_mcp, :client, :oauth, :refresh, :start],
+      [:conduit_mcp, :client, :oauth, :refresh, :stop],
+      [:conduit_mcp, :client, :oauth, :refresh, :exception],
+      [:conduit_mcp, :client, :oauth, :step_up, :start],
+      [:conduit_mcp, :client, :oauth, :step_up, :stop],
+      [:conduit_mcp, :client, :oauth, :step_up, :exception],
+      [:conduit_mcp, :client, :oauth, :authorization_required]
     ]
   end
 
@@ -1193,6 +1272,49 @@ defmodule ConduitMcp.Telemetry do
 
     Logger.warning(
       "MCP client hook failed: client=#{client_text(metadata)} hook=#{ConduitMcp.Reflect.text(metadata.hook_id, 64)} kind=#{metadata.kind} reason=#{metadata.reason} duration=#{duration_ms(measurements)}ms"
+    )
+  end
+
+  # OAuth spans and the authorization-required event: closed atoms only.
+  defp handle_event(
+         [:conduit_mcp, :client, :oauth, _op, :start],
+         _measurements,
+         _metadata,
+         _config
+       ),
+       do: :ok
+
+  defp handle_event([:conduit_mcp, :client, :oauth, op, :stop], measurements, metadata, _config) do
+    require Logger
+
+    Logger.debug(
+      "MCP client OAuth #{op}: client=#{client_text(metadata)} status=#{metadata.status} reason=#{metadata.reason} duration=#{duration_ms(measurements)}ms"
+    )
+  end
+
+  defp handle_event(
+         [:conduit_mcp, :client, :oauth, op, :exception],
+         _measurements,
+         metadata,
+         _config
+       ) do
+    require Logger
+
+    Logger.warning(
+      "MCP client OAuth #{op} raised: client=#{client_text(metadata)} kind=#{metadata.kind}"
+    )
+  end
+
+  defp handle_event(
+         [:conduit_mcp, :client, :oauth, :authorization_required],
+         _measurements,
+         metadata,
+         _config
+       ) do
+    require Logger
+
+    Logger.info(
+      "MCP client needs authorization: client=#{client_text(metadata)} reason=#{metadata.reason}"
     )
   end
 

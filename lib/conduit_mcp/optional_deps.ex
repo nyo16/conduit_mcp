@@ -25,6 +25,8 @@ defmodule ConduitMcp.OptionalDeps do
   @jwks_provider ConduitMcp.OAuth.KeyProvider.JWKS
   @jsv_validator ConduitMcp.Client.SchemaValidator.JSV
   @client_http ConduitMcp.Client.HTTP
+  @oauth_session ConduitMcp.Client.OAuth.Session
+  @client_assertion ConduitMcp.Client.OAuth.ClientAssertion
 
   @joken_deps [{:joken, "~> 2.6"}, {:jose, "~> 1.11"}]
   @req_deps [{:req, "~> 0.6.1 or ~> 0.7"}]
@@ -102,6 +104,43 @@ defmodule ConduitMcp.OptionalDeps do
   """
   @spec jsv_available?() :: boolean()
   def jsv_available?, do: Code.ensure_loaded?(@jsv_validator)
+
+  @doc """
+  Returns the module that runs the client's OAuth flow for a connection
+  (`ConduitMcp.Client.OAuth.Session`, compiled only with `:finch`), raising
+  `ConduitMcp.OptionalDependencyError` naming `{:finch, "~> 0.21"}` when it
+  was not compiled in. Called when a client configured with
+  `auth: {:oauth, ...}` starts.
+  """
+  @spec oauth_client!() :: module()
+  def oauth_client! do
+    if Code.ensure_loaded?(@oauth_session) do
+      @oauth_session
+    else
+      raise OptionalDependencyError,
+        feature: "The MCP client's OAuth support (auth: {:oauth, ...})",
+        module: @oauth_session,
+        deps: @finch_deps
+    end
+  end
+
+  @doc """
+  Returns the `private_key_jwt` client-assertion signer (compiled only with
+  `:jose`), raising `ConduitMcp.OptionalDependencyError` naming
+  `{:jose, "~> 1.11"}` when it was not compiled in. Called when an OAuth
+  configuration with a `:private_key` is validated.
+  """
+  @spec client_assertion!() :: module()
+  def client_assertion! do
+    if Code.ensure_loaded?(@client_assertion) do
+      @client_assertion
+    else
+      raise OptionalDependencyError,
+        feature: "OAuth private_key_jwt client authentication (the :private_key option)",
+        module: @client_assertion,
+        deps: [{:jose, "~> 1.11"}]
+    end
+  end
 
   @doc """
   Validates that a configured `:key_provider` module exists and implements

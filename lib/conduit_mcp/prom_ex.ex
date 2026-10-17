@@ -214,6 +214,14 @@ if Code.ensure_loaded?(PromEx) do
       - Tags: `kind`
     - `{prefix}_client_hook_exception_total` - Counter of failed hook runs
       - Tags: `kind`, `reason`
+    - `{prefix}_client_oauth_{op}_start_total`, `{prefix}_client_oauth_{op}_total`,
+      `{prefix}_client_oauth_{op}_exception_total` - Counters of the
+      client's OAuth operations, `op` one of `discovery`, `registration`,
+      `token_exchange`, `refresh`, `step_up`
+      - Tags (`_total` only): `status`, `reason`
+    - `{prefix}_client_oauth_authorization_required_total` - Counter of
+      times the user had to authorize
+      - Tags: `reason`
 
     ### Subscription Metrics
 
@@ -833,9 +841,37 @@ if Code.ensure_loaded?(PromEx) do
             measurement: fn _measurements -> 1 end,
             tags: [:kind, :reason],
             tag_values: &extract_client_tags/1
+          ),
+          counter(
+            metric_prefix ++ [:client, :oauth, :authorization_required, :total],
+            event_name: [:conduit_mcp, :client, :oauth, :authorization_required],
+            description: "Times an MCP client needed the user to authorize",
+            measurement: fn _measurements -> 1 end,
+            tags: [:reason],
+            tag_values: &extract_client_tags/1
           )
-        ]
+        ] ++ oauth_metrics(metric_prefix)
       )
+    end
+
+    # One start, stop and exception counter per OAuth operation; `status`
+    # and `reason` (an OAuth error reason) are closed sets.
+    defp oauth_metrics(metric_prefix) do
+      for op <- [:discovery, :registration, :token_exchange, :refresh, :step_up],
+          {suffix, event, tags} <- [
+            {[:start, :total], :start, []},
+            {[:total], :stop, [:status, :reason]},
+            {[:exception, :total], :exception, []}
+          ] do
+        counter(
+          metric_prefix ++ [:client, :oauth, op] ++ suffix,
+          event_name: [:conduit_mcp, :client, :oauth, op, event],
+          description: "MCP client OAuth #{op} #{event} events",
+          measurement: fn _measurements -> 1 end,
+          tags: tags,
+          tag_values: &extract_client_tags/1
+        )
+      end
     end
 
     # Subscription metrics from [:conduit_mcp, :subscription, :start] and
