@@ -332,6 +332,12 @@ defmodule ConduitMcp.TelemetryTest do
         })
 
         :telemetry.execute([:conduit_mcp, :tasks, :cleanup], %{removed: 0}, %{})
+
+        :telemetry.execute([:conduit_mcp, :mrtr, :input_required], %{count: 2}, %{
+          method: "tools/call",
+          server_module: __MODULE__,
+          round: 1
+        })
       end)
 
       for event <- ConduitMcp.Telemetry.events() do

@@ -21,9 +21,97 @@ defmodule ConduitMcp.MRTR do
   `list_roots/0` remain available but carry `@deprecated` markers.
   Elicitation is not deprecated.
 
+  ## Returning input requests
+
+  `handle_call_tool/3`, `handle_read_resource/2` and `handle_get_prompt/3`
+  (and the DSL and `ConduitMcp.Component` handlers behind them) return
+  `{:input_required, input_requests, state}` to ask for input. The library
+  checks every request against the client's declared capabilities
+  (`missing_capabilities/2`; a gap is answered with `-32021` and
+  `data.requiredCapabilities`), seals `state` into `requestState` with
+  `ConduitMcp.MRTR.State`, and answers with an `InputRequiredResult`. On
+  the retry the callback finds the restored state and the client's
+  `inputResponses` in `conn.assigns[:mcp_input]`; see `ConduitMcp.Server`.
+
   The state carried between rounds is sealed by `ConduitMcp.MRTR.State`,
-  which requires `config :conduit_mcp, :mrtr_keys`.
+  which requires `config :conduit_mcp, :mrtr_keys`. MRTR exists only in the
+  modern era: a legacy-era request whose callback returns
+  `{:input_required, ...}` gets `-32603`.
   """
+
+  @doc """
+  Returns the client capabilities `input_requests` need that
+  `client_capabilities` does not declare, as a `ClientCapabilities`-shaped
+  map (`%{}` when every request can be sent).
+
+    * `elicitation/create` needs `elicitation.url` for `"mode" => "url"`,
+      otherwise form mode: `elicitation.form`, or an `elicitation` that
+      declares neither mode (the spec's backwards-compatible form-only
+      declaration).
+    * `sampling/createMessage` needs `sampling`; `sampling.tools` when it
+      carries `tools` or `toolChoice`; `sampling.context` when its
+      `includeContext` is anything but `"none"`.
+    * `roots/list` needs `roots`.
+
+  Other methods impose no requirement.
+
+  ## Example
+
+      iex> ConduitMcp.MRTR.missing_capabilities(
+      ...>   %{"approval" => ConduitMcp.MRTR.elicit("Approve?", %{"type" => "object"})},
+      ...>   %{"roots" => %{}}
+      ...> )
+      %{"elicitation" => %{"form" => %{}}}
+  """
+  @spec missing_capabilities(%{optional(String.t()) => map()}, map()) :: map()
+  def missing_capabilities(input_requests, client_capabilities)
+      when is_map(input_requests) and is_map(client_capabilities) do
+    input_requests
+    |> Map.values()
+    |> Enum.flat_map(&requirements/1)
+    |> Enum.reject(&declared?(client_capabilities, &1))
+    |> Enum.reduce(%{}, &put_path/2)
+  end
+
+  defp requirements(%{"method" => "elicitation/create"} = request) do
+    case get_in(request, ["params", "mode"]) do
+      "url" -> [["elicitation", "url"]]
+      _form -> [["elicitation", "form"]]
+    end
+  end
+
+  defp requirements(%{"method" => "sampling/createMessage"} = request) do
+    params = Map.get(request, "params") || %{}
+    tools? = Map.has_key?(params, "tools") or Map.has_key?(params, "toolChoice")
+    context? = Map.get(params, "includeContext") not in [nil, "none"]
+
+    Enum.reject(
+      [["sampling"], tools? && ["sampling", "tools"], context? && ["sampling", "context"]],
+      &(&1 == false)
+    )
+  end
+
+  defp requirements(%{"method" => "roots/list"}), do: [["roots"]]
+  defp requirements(_request), do: []
+
+  # An `elicitation` declaring neither mode supports form only.
+  defp declared?(%{"elicitation" => elicitation}, ["elicitation", "form"])
+       when is_map(elicitation),
+       do: Map.has_key?(elicitation, "form") or not Map.has_key?(elicitation, "url")
+
+  defp declared?(capabilities, path) do
+    Enum.reduce_while(path, capabilities, fn key, level ->
+      case level do
+        %{^key => next} when is_map(next) -> {:cont, next}
+        _ -> {:halt, nil}
+      end
+    end) != nil
+  end
+
+  defp put_path([key], acc), do: Map.put_new(acc, key, %{})
+
+  defp put_path([key | rest], acc),
+    do: Map.put(acc, key, put_path(rest, Map.get(acc, key, %{})))
 
   @doc """
   Builds an `elicitation/create` input request (form mode).

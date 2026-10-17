@@ -7,6 +7,7 @@ defmodule ConduitMcp.Handler.Resources do
 
   alias ConduitMcp.Handler
   alias ConduitMcp.Handler.Common
+  alias ConduitMcp.Handler.MRTR
   alias ConduitMcp.Handler.Pipeline
   alias ConduitMcp.ServerMeta
 
@@ -34,7 +35,8 @@ defmodule ConduitMcp.Handler.Resources do
   end
 
   @doc """
-  `resources/read`: authorization, dispatch, then the
+  `resources/read`: authorization, dispatch (through
+  `ConduitMcp.Handler.MRTR.dispatch/6`), then the
   `[:conduit_mcp, :resource, :read]` event.
   """
   @spec read(map(), module(), Plug.Conn.t()) :: Handler.result()
@@ -45,8 +47,12 @@ defmodule ConduitMcp.Handler.Resources do
     result =
       case authorize(uri, server_module, conn) do
         :ok ->
-          Common.dispatch_callback(
-            fn -> server_module.handle_read_resource(conn, uri) end,
+          MRTR.dispatch(
+            conn,
+            "resources/read",
+            params,
+            server_module,
+            &server_module.handle_read_resource(&1, uri),
             "handle_read_resource"
           )
           |> ensure_resource_uri(uri)

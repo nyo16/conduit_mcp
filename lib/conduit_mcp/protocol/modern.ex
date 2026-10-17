@@ -24,8 +24,16 @@ defmodule ConduitMcp.Protocol.Modern do
 
   (`:private` or `:public`; defaults `60_000` and `:private`). A caller can
   override them per response with the `:cache` option of `to_response/4`.
-  `{:ok, result}` is always a complete result; an interim (`input_required`)
-  result must never carry hints.
+  `{:ok, result}` is always a complete result.
+
+  ## Input required
+
+  `{:input_required, input_requests, request_state}` — produced by the
+  handler once it has gated the input requests and sealed the callback's
+  state into the `request_state` token — becomes an `InputRequiredResult`:
+  `"resultType" => "input_required"`, `"inputRequests"`, `"requestState"`
+  and the `serverInfo` `_meta`, but never `ttlMs`/`cacheScope`, on any
+  method (an interim result must not be cached).
 
   ## Errors
 
@@ -105,6 +113,19 @@ defmodule ConduitMcp.Protocol.Modern do
       result
       |> Map.put("resultType", "complete")
       |> put_cache_hints(method, Keyword.get(opts, :cache))
+      |> put_meta(Keyword.get(opts, :server_info))
+
+    Protocol.success_response(id, result)
+  end
+
+  def to_response(id, _method, {:input_required, input_requests, request_state}, opts)
+      when is_map(input_requests) and is_binary(request_state) do
+    result =
+      %{
+        "resultType" => "input_required",
+        "inputRequests" => input_requests,
+        "requestState" => request_state
+      }
       |> put_meta(Keyword.get(opts, :server_info))
 
     Protocol.success_response(id, result)

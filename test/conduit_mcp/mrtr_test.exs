@@ -4,6 +4,8 @@ defmodule ConduitMcp.MRTRTest do
   alias ConduitMcp.MRTR
   alias ConduitMcp.Test.McpSchema
 
+  doctest ConduitMcp.MRTR, only: [missing_capabilities: 2]
+
   @schema %{
     "type" => "object",
     "properties" => %{"api_key" => %{"type" => "string", "title" => "API Key"}},
@@ -61,5 +63,61 @@ defmodule ConduitMcp.MRTRTest do
     request = deprecated().list_roots()
     assert request == %{"method" => "roots/list"}
     assert_input_request("ListRootsRequest", request)
+  end
+
+  describe "missing_capabilities/2" do
+    @form MRTR.elicit("Approve?", %{"type" => "object"})
+    @url %{
+      "method" => "elicitation/create",
+      "params" => %{
+        "mode" => "url",
+        "message" => "m",
+        "url" => "https://x",
+        "elicitationId" => "e"
+      }
+    }
+
+    test "a bare elicitation declares form mode only" do
+      assert MRTR.missing_capabilities(%{"a" => @form}, %{"elicitation" => %{}}) == %{}
+
+      assert MRTR.missing_capabilities(%{"a" => @url}, %{"elicitation" => %{}}) ==
+               %{"elicitation" => %{"url" => %{}}}
+
+      assert MRTR.missing_capabilities(%{"a" => @form}, %{"elicitation" => %{"url" => %{}}}) ==
+               %{"elicitation" => %{"form" => %{}}}
+    end
+
+    test "sampling needs its tools and context sub-capabilities when used" do
+      sample = fn params ->
+        %{
+          "method" => "sampling/createMessage",
+          "params" => Map.merge(%{"maxTokens" => 1}, params)
+        }
+      end
+
+      requests = %{
+        "plain" => sample.(%{}),
+        "tools" => sample.(%{"tools" => []}),
+        "ctx" => sample.(%{"includeContext" => "thisServer"})
+      }
+
+      assert MRTR.missing_capabilities(requests, %{}) ==
+               %{"sampling" => %{"tools" => %{}, "context" => %{}}}
+
+      assert MRTR.missing_capabilities(requests, %{"sampling" => %{"tools" => %{}}}) ==
+               %{"sampling" => %{"context" => %{}}}
+
+      assert MRTR.missing_capabilities(%{"p" => sample.(%{"includeContext" => "none"})}, %{
+               "sampling" => %{}
+             }) == %{}
+    end
+
+    test "missing requirements merge into one ClientCapabilities map" do
+      requests = %{"a" => @form, "b" => %{"method" => "roots/list"}}
+      missing = MRTR.missing_capabilities(requests, %{"roots" => true})
+
+      assert missing == %{"elicitation" => %{"form" => %{}}, "roots" => %{}}
+      assert :ok == McpSchema.validate("2026-07-28", "ClientCapabilities", missing)
+    end
   end
 end

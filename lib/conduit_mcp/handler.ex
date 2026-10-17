@@ -67,8 +67,19 @@ defmodule ConduitMcp.Handler do
   - `[:conduit_mcp, :tool, :execute]` — per `tools/call`.
   - `[:conduit_mcp, :resource, :read]` — per `resources/read`.
   - `[:conduit_mcp, :prompt, :get]` — per `prompts/get`.
+  - `[:conduit_mcp, :mrtr, :input_required]` — per modern
+    `InputRequiredResult` sent.
   - `[:conduit_mcp, :request, :cancelled]` — when a
     `notifications/cancelled` for a request in flight is recorded.
+
+  ## Multi round-trip requests
+
+  On the modern path `tools/call`, `resources/read` and `prompts/get`
+  callbacks may return `{:input_required, input_requests, state}`; a retry's
+  `requestState` is verified before the callback runs, and the restored state
+  arrives in `conn.assigns[:mcp_input]`. See `ConduitMcp.Server` and
+  `ConduitMcp.MRTR`. On the legacy path that return is answered with
+  `-32603` ("MRTR input requests require protocol 2026-07-28").
 
   ## Cancellation
 
@@ -95,7 +106,10 @@ defmodule ConduitMcp.Handler do
     `-32603`.
   - Method modules (`Handler.Tools`, `.Resources`, `.Prompts`,
     `.Completion`, `.LegacyTasks`, with shared helpers in `.Common`) return
-    an era-neutral `t:result/0` and never build JSON-RPC maps.
+    an era-neutral `t:result/0` and never build JSON-RPC maps. The three
+    MRTR methods run their callback through `Handler.MRTR`, which opens
+    `requestState`, gates and seals `{:input_required, ...}`, and refuses it
+    on the legacy era.
   - `ConduitMcp.Protocol.Legacy` / `ConduitMcp.Protocol.Modern` shape a
     `t:result/0` into the JSON-RPC response of their era.
   """
@@ -107,12 +121,20 @@ defmodule ConduitMcp.Handler do
   alias ConduitMcp.Protocol
 
   @typedoc """
-  The era-neutral outcome of a method: a result map, or an error code,
-  message and optional `data` member. Shaped into a protocol response by the
-  era's response shaper (`ConduitMcp.Protocol.Legacy` or
-  `ConduitMcp.Protocol.Modern`).
+  The era-neutral outcome of a method: a result map, an input-required
+  round, or an error code, message and optional `data` member. Shaped into a
+  protocol response by the era's response shaper
+  (`ConduitMcp.Protocol.Legacy` or `ConduitMcp.Protocol.Modern`).
+
+  `{:input_required, input_requests, state}` is what an MRTR callback
+  returned; by the time it reaches `ConduitMcp.Protocol.Modern` its `state`
+  has been sealed into the `requestState` token. Only the modern era shapes
+  it: the legacy era answers it with `-32603` before shaping.
   """
-  @type result :: {:ok, map()} | {:error, integer(), String.t(), map() | nil}
+  @type result ::
+          {:ok, map()}
+          | {:input_required, %{optional(String.t()) => map()}, term()}
+          | {:error, integer(), String.t(), map() | nil}
 
   @typedoc """
   What a transport does with a message:

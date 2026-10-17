@@ -146,6 +146,15 @@ if Code.ensure_loaded?(PromEx) do
       - Tags: `store`
     - `{prefix}_tasks_cleanup_removed_total` - Sum of terminal tasks evicted
 
+    ### MRTR Metrics
+
+    - `{prefix}_mrtr_input_required_total` - Counter of `InputRequiredResult`s
+      sent
+      - Tags: `method` (`tools/call`, `resources/read`, `prompts/get`)
+    - `{prefix}_mrtr_input_requests_total` - Sum of input requests carried by
+      them
+      - Tags: `method`
+
     ## PromQL Examples
 
     ### Request Rate by Method
@@ -249,7 +258,8 @@ if Code.ensure_loaded?(PromEx) do
         message_rate_limit_metrics(metric_prefix, duration_unit),
         auth_metrics(metric_prefix, duration_unit),
         cancellation_metrics(metric_prefix),
-        cleanup_metrics(metric_prefix)
+        cleanup_metrics(metric_prefix),
+        mrtr_metrics(metric_prefix)
       ]
     end
 
@@ -537,11 +547,39 @@ if Code.ensure_loaded?(PromEx) do
       )
     end
 
+    # MRTR metrics from [:conduit_mcp, :mrtr, :input_required]. `round` is
+    # not a tag: it is unbounded.
+    defp mrtr_metrics(metric_prefix) do
+      Event.build(
+        :conduit_mcp_mrtr_metrics,
+        [
+          counter(
+            metric_prefix ++ [:mrtr, :input_required, :total],
+            event_name: [:conduit_mcp, :mrtr, :input_required],
+            description: "Total number of MCP InputRequiredResults sent",
+            measurement: fn _measurements -> 1 end,
+            tags: [:method],
+            tag_values: &extract_method_tag/1
+          ),
+          sum(
+            metric_prefix ++ [:mrtr, :input_requests, :total],
+            event_name: [:conduit_mcp, :mrtr, :input_required],
+            description: "MCP input requests sent in InputRequiredResults",
+            measurement: :count,
+            tags: [:method],
+            tag_values: &extract_method_tag/1
+          )
+        ]
+      )
+    end
+
     # Tag extraction functions
 
     defp extract_status_tag(%{status: status}), do: %{status: status}
 
     defp extract_store_tag(%{store: store}), do: %{store: normalize_string(store)}
+
+    defp extract_method_tag(%{method: method}), do: %{method: normalize_string(method)}
 
     defp extract_request_tags(%{method: method, status: status}) do
       %{

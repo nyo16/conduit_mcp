@@ -128,6 +128,56 @@ defmodule ConduitMcp.Server do
         value = MyApp.Cache.get(key)
         {:ok, %{"content" => [%{"type" => "text", "text" => value}]}}
       end
+
+  ## Multi round-trip requests (MRTR)
+
+  In MCP `2026-07-28` a server asks the client for input — an elicitation,
+  and the deprecated sampling and roots — by answering `tools/call`,
+  `resources/read` or `prompts/get` with an `InputRequiredResult`; the
+  client retries the same request with the answers. Return
+  `{:input_required, input_requests, state}` from `handle_call_tool/3`,
+  `handle_read_resource/2` or `handle_get_prompt/3` (or a DSL handler or
+  `ConduitMcp.Component.execute/2` behind them):
+
+      def handle_call_tool(conn, "deploy", args) do
+        case conn.assigns[:mcp_input] do
+          nil ->
+            {:input_required,
+             %{"approval" => ConduitMcp.MRTR.elicit("Approve deploy?", schema)},
+             %{step: :awaiting_approval, target: args["target"]}}
+
+          %{state: %{"target" => target}, responses: %{"approval" => approval}} ->
+            case approval do
+              %{"action" => "accept"} -> {:ok, do_deploy(target)}
+              _ -> {:ok, %{"content" => [%{"type" => "text", "text" => "Cancelled"}]}}
+            end
+        end
+      end
+
+  * `input_requests` maps server-chosen keys to input requests built with
+    `ConduitMcp.MRTR.elicit/2` (or the deprecated `sample/2` and
+    `list_roots/0`). Every request is checked against the capabilities the
+    client declared; a missing one is answered with `-32021` and
+    `data.requiredCapabilities` (HTTP 400) instead.
+  * `state` is sealed into the result's `requestState` with
+    `ConduitMcp.MRTR.State` (configure `:mrtr_keys`; without them the
+    request fails with `-32603` and an error log). It must be JSON-encodable
+    and comes back as decoded JSON: atom keys and values become strings.
+
+  On the retry the library opens `requestState` (bound to the protocol
+  version, method, salient params and `ConduitMcp.Principal.id/1`; any
+  failure is a flat `-32602`) **before** the callback runs, and puts
+  `%{state: restored_state, responses: input_responses}` in
+  `conn.assigns[:mcp_input]`, where `input_responses` is the request's
+  `inputResponses` map (`%{}` when absent). `conn.assigns[:mcp_input]` is
+  absent on a first round. `responses` is client input: validate it like
+  any other argument. A callback may return `{:input_required, ...}` again
+  for another round.
+
+  MRTR exists only in the modern era: on a legacy-era request
+  (`2025-11-25`, `2025-06-18`) the same return is logged and answered with
+  `-32603` ("MRTR input requests require protocol 2026-07-28"). Telemetry:
+  `[:conduit_mcp, :mrtr, :input_required]` (see `ConduitMcp.Telemetry`).
   """
 
   @type conn :: Plug.Conn.t()
@@ -136,6 +186,14 @@ defmodule ConduitMcp.Server do
   @type uri :: String.t()
   @type prompt_name :: String.t()
   @type prompt_args :: map()
+
+  @typedoc """
+  An MRTR request for client input: input requests keyed by server-chosen
+  ids (values built with `ConduitMcp.MRTR`), and a JSON-encodable state term
+  handed back in `conn.assigns[:mcp_input]` on the retry.
+  """
+  @type input_required ::
+          {:input_required, input_requests :: %{optional(String.t()) => map()}, state :: term()}
 
   @doc """
   Handle listing available tools.
@@ -150,9 +208,12 @@ defmodule ConduitMcp.Server do
 
   @doc """
   Handle tool execution.
+
+  May return `{:input_required, input_requests, state}` on a modern-era
+  request; see "Multi round-trip requests (MRTR)" in the moduledoc.
   """
   @callback handle_call_tool(conn(), tool_name(), tool_params()) ::
-              {:ok, result :: map()} | {:error, error :: map()}
+              {:ok, result :: map()} | {:error, error :: map()} | input_required()
 
   @doc """
   Handle listing available resources.
@@ -166,9 +227,12 @@ defmodule ConduitMcp.Server do
 
   @doc """
   Handle reading a resource.
+
+  May return `{:input_required, input_requests, state}` on a modern-era
+  request; see "Multi round-trip requests (MRTR)" in the moduledoc.
   """
   @callback handle_read_resource(conn(), uri()) ::
-              {:ok, content :: map()} | {:error, error :: map()}
+              {:ok, content :: map()} | {:error, error :: map()} | input_required()
 
   @doc """
   Handle listing available prompts.
@@ -182,9 +246,12 @@ defmodule ConduitMcp.Server do
 
   @doc """
   Handle getting a prompt.
+
+  May return `{:input_required, input_requests, state}` on a modern-era
+  request; see "Multi round-trip requests (MRTR)" in the moduledoc.
   """
   @callback handle_get_prompt(conn(), prompt_name(), prompt_args()) ::
-              {:ok, messages :: map()} | {:error, error :: map()}
+              {:ok, messages :: map()} | {:error, error :: map()} | input_required()
 
   @doc """
   Handle autocompletion for prompt arguments or resource template parameters.

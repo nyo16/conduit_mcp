@@ -7,6 +7,7 @@ defmodule ConduitMcp.Handler.Prompts do
   alias ConduitMcp.Errors
   alias ConduitMcp.Handler
   alias ConduitMcp.Handler.Common
+  alias ConduitMcp.Handler.MRTR
   alias ConduitMcp.Handler.Pipeline
 
   @doc """
@@ -17,7 +18,8 @@ defmodule ConduitMcp.Handler.Prompts do
     do: Common.dispatch_list(params, server_module, conn, :handle_list_prompts)
 
   @doc """
-  `prompts/get`: scope check, argument validation, dispatch, then the
+  `prompts/get`: scope check, argument validation, dispatch (through
+  `ConduitMcp.Handler.MRTR.dispatch/6`), then the
   `[:conduit_mcp, :prompt, :get]` event.
   """
   @spec get(map(), module(), Plug.Conn.t()) :: Handler.result()
@@ -34,8 +36,12 @@ defmodule ConduitMcp.Handler.Prompts do
              ),
            {:ok, validated_args} <-
              ConduitMcp.Validation.validate_prompt_args(server_module, prompt_name, prompt_args) do
-        Common.dispatch_callback(
-          fn -> server_module.handle_get_prompt(conn, prompt_name, validated_args) end,
+        MRTR.dispatch(
+          conn,
+          "prompts/get",
+          params,
+          server_module,
+          &server_module.handle_get_prompt(&1, prompt_name, validated_args),
           "handle_get_prompt"
         )
       else

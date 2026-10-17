@@ -98,10 +98,31 @@ defmodule ConduitMcp.Component do
   For resources: receives URI params (atom-keyed) extracted from the template and the Plug.Conn.
   For prompts: receives validated args (atom-keyed) and the Plug.Conn.
 
-  Must return `{:ok, map()}` or `{:error, map()}`.
+  Must return `{:ok, map()}` or `{:error, map()}`. On a modern-era
+  (`2026-07-28`) request it may instead return
+  `{:input_required, input_requests, state}` to ask the client for input;
+  `ConduitMcp.Endpoint` passes it through, and the retry finds the restored
+  state and the answers in `conn.assigns[:mcp_input]`. See "Multi round-trip
+  requests (MRTR)" in `ConduitMcp.Server`:
+
+      @impl true
+      def execute(%{target: target}, conn) do
+        case conn.assigns[:mcp_input] do
+          nil ->
+            {:input_required,
+             %{"approval" => ConduitMcp.MRTR.elicit("Approve deploy?", @approval_schema)},
+             %{target: target}}
+
+          %{responses: %{"approval" => %{"action" => "accept"}}} ->
+            text("Deployed \#{target}")
+
+          _declined ->
+            text("Cancelled")
+        end
+      end
   """
   @callback execute(params :: map(), conn :: Plug.Conn.t()) ::
-              {:ok, map()} | {:error, map()}
+              {:ok, map()} | {:error, map()} | ConduitMcp.Server.input_required()
 
   @doc false
   @callback __component_type__() :: :tool | :resource | :prompt
