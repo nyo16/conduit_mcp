@@ -53,6 +53,12 @@ defmodule ConduitMcp.Client.HubWireTest do
       ready_modern(Hub.client(hub, id), conn)
     end
 
+    # Ready as the hub sees it, or a listing right away may leave a server out.
+    eventually(fn ->
+      {:ok, status} = Hub.status(hub)
+      Enum.all?(status, &(&1.state == :ready))
+    end)
+
     conns
   end
 

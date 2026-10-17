@@ -12,6 +12,12 @@ Runnable examples and reference implementations grouped by what they demonstrate
 | [`mcp_apps_demo/`](mcp_apps_demo) | MCP Apps — tools that return a sandboxed HTML resource | [MCP Apps](../guides/mcp_apps.md) |
 | [`phoenix_mcp/`](phoenix_mcp) | Mounting an MCP server inside a Phoenix router with auth | [Choosing a mode](../guides/choosing_a_mode.md) |
 
+## Clients
+
+| Directory | What it shows | Guide |
+|-----------|---------------|-------|
+| [`llm_agent/`](llm_agent) | An agent loop on the Anthropic Messages API over a `ConduitMcp.Client.Hub` with a required policy, an audit pre-hook and a redaction post-hook, one stdio and one Streamable HTTP server, and the Anthropic adapter (`Adapters.tools/3`, `execute_tool_calls/4`). `mix llm_agent.smoke` runs without an API key | [Hub](../guides/client_hub.md), [LLM adapters](../guides/client_llm_adapters.md) |
+
 ## Pluggable backends
 
 These are not standalone servers — they are reference implementations of the
@@ -32,7 +38,8 @@ and adapt.
 | File | What it does |
 |------|--------------|
 | [`simple_tools_server/test_server.sh`](simple_tools_server/test_server.sh) | curl-driven smoke test for the server |
-| [`simple_tools_server/test_client.sh`](simple_tools_server/test_client.sh) | exercises the server through the stdio transport |
+| [`simple_tools_server/test_client.sh`](simple_tools_server/test_client.sh) | curl-driven walk-through over the legacy SSE transport |
+| [`simple_tools_server/client_test.exs`](simple_tools_server/client_test.exs) | the same walk-through with `ConduitMcp.Client` over Streamable HTTP (`mix run examples/simple_tools_server/client_test.exs`; `PROTOCOL=legacy` forces the legacy era) |
 | [`simple_tools_server/telemetry_example.exs`](simple_tools_server/telemetry_example.exs) | attaches handlers to all built-in telemetry events |
 | [`simple_tools_server/claude_desktop_config.json`](simple_tools_server/claude_desktop_config.json) | drop-in Claude Desktop config snippet |
 | [`simple_tools_server/mcp_config.json`](simple_tools_server/mcp_config.json) | generic MCP client config |
@@ -51,6 +58,9 @@ iex -S mix run -e "Examples.AsyncTasks.Application.start(:normal, [])"
 
 # Oban tasks server (durable, SQLite-backed) — has its own mix.exs
 cd examples/oban_tasks_server && mix deps.get && iex -S mix
+
+# LLM agent (client side) — has its own mix.exs
+cd examples/llm_agent && mix deps.get && mix llm_agent.smoke
 
 # Phoenix MCP — see examples/phoenix_mcp/README.md
 ```

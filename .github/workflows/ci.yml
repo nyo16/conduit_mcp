@@ -122,8 +122,12 @@ jobs:
       - run: mix deps.compile
       - run: mix compile
 
+      # `:integration` (real Bandit sockets, Finch) and `:stdio` (spawned
+      # `elixir` servers) tests are part of this job. test_helper.exs excludes
+      # nothing; the explicit includes keep them here if it ever does.
+      # coveralls.json enforces the coverage floor (86 %).
       - name: Run tests with coverage
-        run: mix coveralls
+        run: mix coveralls --include integration --include stdio
         env:
           MIX_ENV: test
 
