@@ -392,9 +392,10 @@ defmodule ConduitMcp.Telemetry do
       the first handshake
 
   The `request` and `tool_call` spans are emitted **in the calling
-  process**, so tracing bridges nest them under the caller's span. The
-  other client events are emitted inside the client's connection process:
-  their handlers must be fast.
+  process**, so tracing bridges nest them under the caller's span, and
+  `tool.rejected` in the process that fetched the tool list (a caller, or
+  a cache refresh task). The other client events are emitted inside the
+  client's connection process: their handlers must be fast.
 
   #### `[:conduit_mcp, :client, :request, :start | :stop | :exception]`
 
@@ -467,6 +468,43 @@ defmodule ConduitMcp.Telemetry do
   **Measurements:** `:removed` (integer) - Tasks evicted.
 
   **Metadata:** `:store` (module) - The `ConduitMcp.Ext.Tasks.Store` swept.
+
+  #### `[:conduit_mcp, :client, :cache, :refresh, :start | :stop]`
+
+  The connection refreshed one cached list (`ConduitMcp.Client.Cache`): on
+  demand, or after a `list_changed` notification. The fetch itself runs in
+  a task; these events bracket it.
+
+  **Measurements:** `:start` has `:monotonic_time` and `:system_time`;
+  `:stop` has `:duration` (native units), `:monotonic_time`, `:count`
+  (items kept), `:pages` and `:rejected` (tools dropped at intake); the
+  counts are 0 when the refresh failed.
+
+  **Metadata:** the common keys, plus `:kind` (:tools | :prompts |
+  :resources | :resource_templates) and `:trigger` (:demand |
+  :list_changed). `:stop` adds `:status` (:ok | :error) and `:error_kind`.
+
+  #### `[:conduit_mcp, :client, :tool, :rejected]`
+
+  A tool a server listed was dropped at intake (see `ConduitMcp.Client`,
+  "Listing and the cache").
+
+  **Measurements:** `:count` (always `1`).
+
+  **Metadata:** the common keys, plus `:tool_name` (String.t | nil - the
+  name with every character outside `[A-Za-z0-9_-]` replaced by `_`;
+  server-supplied, never a metric tag) and `:reason` (:invalid_name |
+  :invalid_definition | :duplicate_name | :invalid_x_mcp_header).
+
+  #### `[:conduit_mcp, :client, :tool, :definition_changed]`
+
+  A refreshed tool list changed the definition (the
+  `ConduitMcp.Client.Fingerprint`) of a tool the client already knew.
+
+  **Measurements:** `:count` (always `1`).
+
+  **Metadata:** the common keys, plus `:tool_name` (String.t, sanitized;
+  server-supplied, never a metric tag).
 
   ## Common Use Cases
 
@@ -728,7 +766,11 @@ defmodule ConduitMcp.Telemetry do
         [:conduit_mcp, :client, :notification],
         [:conduit_mcp, :subscription, :start],
         [:conduit_mcp, :subscription, :stop],
-        [:conduit_mcp, :ext_tasks, :cleanup]
+        [:conduit_mcp, :ext_tasks, :cleanup],
+        [:conduit_mcp, :client, :cache, :refresh, :start],
+        [:conduit_mcp, :client, :cache, :refresh, :stop],
+        [:conduit_mcp, :client, :tool, :rejected],
+        [:conduit_mcp, :client, :tool, :definition_changed]
       ]
   """
   @spec events() :: [[:conduit_mcp, ...]]
@@ -759,7 +801,11 @@ defmodule ConduitMcp.Telemetry do
       [:conduit_mcp, :client, :notification],
       [:conduit_mcp, :subscription, :start],
       [:conduit_mcp, :subscription, :stop],
-      [:conduit_mcp, :ext_tasks, :cleanup]
+      [:conduit_mcp, :ext_tasks, :cleanup],
+      [:conduit_mcp, :client, :cache, :refresh, :start],
+      [:conduit_mcp, :client, :cache, :refresh, :stop],
+      [:conduit_mcp, :client, :tool, :rejected],
+      [:conduit_mcp, :client, :tool, :definition_changed]
     ]
   end
 
@@ -1026,6 +1072,48 @@ defmodule ConduitMcp.Telemetry do
 
     Logger.debug(
       "Subscription stopped: reason=#{metadata.reason} filters=#{inspect(metadata.filters)} duration=#{duration_ms}ms"
+    )
+  end
+
+  defp handle_event(
+         [:conduit_mcp, :client, :cache, :refresh, :start],
+         _measurements,
+         _metadata,
+         _config
+       ),
+       do: :ok
+
+  defp handle_event(
+         [:conduit_mcp, :client, :cache, :refresh, :stop],
+         measurements,
+         metadata,
+         _config
+       ) do
+    require Logger
+
+    Logger.debug(
+      "MCP client cache refresh: client=#{client_text(metadata)} kind=#{metadata.kind} trigger=#{metadata.trigger} status=#{metadata.status} count=#{measurements.count} pages=#{measurements.pages} rejected=#{measurements.rejected} duration=#{duration_ms(measurements)}ms"
+    )
+  end
+
+  defp handle_event([:conduit_mcp, :client, :tool, :rejected], _measurements, metadata, _config) do
+    require Logger
+
+    Logger.debug(
+      "MCP client rejected a tool: client=#{client_text(metadata)} tool=#{ConduitMcp.Reflect.text(metadata.tool_name)} reason=#{metadata.reason}"
+    )
+  end
+
+  defp handle_event(
+         [:conduit_mcp, :client, :tool, :definition_changed],
+         _measurements,
+         metadata,
+         _config
+       ) do
+    require Logger
+
+    Logger.info(
+      "MCP client tool definition changed: client=#{client_text(metadata)} tool=#{ConduitMcp.Reflect.text(metadata.tool_name)}"
     )
   end
 

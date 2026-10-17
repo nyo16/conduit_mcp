@@ -38,6 +38,22 @@ defmodule ConduitMcp.Client.ConfigTest do
       assert %{"name" => "conduit_mcp", "version" => version} = config.client_info
       assert is_binary(version)
       assert config.backoff.(1) in 1..1_000
+
+      assert Map.new(config.sampling) == %{
+               max_tokens: 4_096,
+               context: false,
+               tools: false,
+               allow_idle: false,
+               rejection_code: -1
+             }
+
+      assert Map.new(config.handler_timeout) ==
+               %{sampling: 60_000, elicitation: 300_000, roots: 60_000}
+
+      assert config.max_server_requests == 8
+      assert Map.new(config.input_rate_limit) == %{per_second: 10, burst: 20}
+      assert config.max_cache_ttl == 3_600_000
+      assert config.assigns == %{}
     end
 
     test "probe_timeout follows the transport kind unless set" do
@@ -65,6 +81,9 @@ defmodule ConduitMcp.Client.ConfigTest do
           {[handler: "MyHandler"], ":handler"},
           {[client_info: %{"name" => "x"}], ":client_info"},
           {[backoff: &System.monotonic_time/0], ":backoff"},
+          {[sampling: [max_tokens: 0]], ":max_tokens"},
+          {[handler_timeout: [elicitation: :forever]], ":elicitation"},
+          {[elicitation: [origin: 1]], ":origin"},
           {[surprise: true], ":surprise"}
         ] do
       @opts opts
@@ -93,7 +112,9 @@ defmodule ConduitMcp.Client.ConfigTest do
 
     for key <- ~w(name transport protocol probe_timeout prior handler client_info
                   request_timeout max_total_timeout max_in_flight max_queued backoff
-                  max_reconnects on_give_up stable_after health_check_interval) do
+                  max_reconnects on_give_up stable_after health_check_interval assigns
+                  handler_timeout max_server_requests input_rate_limit sampling
+                  elicitation roots max_cache_ttl) do
       assert doc =~ "`:#{key}`", key
     end
   end

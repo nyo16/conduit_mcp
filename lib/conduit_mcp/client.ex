@@ -42,9 +42,13 @@ defmodule ConduitMcp.Client do
       `{:mcp_progress, name, params}`, for `notifications/progress`.
     * `:reset_timeout_on_progress` - restart `:timeout` on each progress
       notification, capped by `:max_total_timeout`.
-    * `:max_total_timeout` - see above.
+    * `:max_total_timeout` - see above; also caps a deadline paused while
+      the client's handler answers a legacy server request tied to the call.
     * `:meta` - a map merged into the request's `_meta`. Keys the protocol
       reserves (`progressToken`, `io.modelcontextprotocol/*`) are dropped.
+    * `:assigns` - a map given to `ConduitMcp.Client.Handler` callbacks as
+      `ctx.assigns` for input requests made on behalf of this call (default
+      the client's `:assigns`).
 
   ## Eras
 
@@ -57,10 +61,37 @@ defmodule ConduitMcp.Client do
 
   In the modern era `call_tool/4`, `read_resource/3` and `get_prompt/4` may
   get `resultType: "input_required"`; the client runs the
-  multi-round-trip loop (`ConduitMcp.Client.Request.MRTR`) in the caller.
-  This client does not answer input requests yet: one that its handler
-  does not declare fails with `kind: :protocol`, and one it declares fails
-  with `kind: :input_handler`.
+  multi-round-trip loop (`ConduitMcp.Client.Request.MRTR`) in the caller,
+  answering each input request with its `ConduitMcp.Client.Handler` in the
+  calling process. An input request the handler does not declare fails the
+  call with `kind: :protocol` before any callback runs; a callback that
+  fails or refuses fails it with `kind: :input_handler`. Legacy servers ask
+  with JSON-RPC requests instead, which the connection hands to the handler
+  in a supervised task (see `ConduitMcp.Client.Connection`). Both go
+  through the same safety checks (`ConduitMcp.Client.Handler`).
+
+  ## Listing and the cache
+
+  `list_tools/2` and friends fetch one page. `list_all_tools/2` and friends
+  fetch every page (capped: 100 pages, 10 000 items, a repeated or
+  over-1 KiB cursor fails with `kind: :pagination_cycle`) and keep the
+  result in the client's `ConduitMcp.Client.Cache`, which serves it again
+  while the server's `ttlMs` hint says it is fresh. `cached_tools/1` and
+  `tool/2` read the cache without asking the server.
+
+  Every listed tool goes through intake: a tool whose name is outside the
+  spec charset (`[A-Za-z0-9_.-]`, 1-128 characters), whose definition is
+  malformed, whose name repeats, or (over HTTP) whose `x-mcp-header`
+  annotations are invalid is dropped with a warning and
+  `[:conduit_mcp, :client, :tool, :rejected]`; the others carry a
+  `ConduitMcp.Client.Fingerprint`.
+
+  ## Tasks
+
+  `call_tool/4` with `task: :return | :await` lets a long tool call run as a
+  server task (the modern tasks extension, or a legacy task-augmented
+  call); see `ConduitMcp.Client.Task`, `get_task/3`, `await_task/3` and
+  `cancel_task/3`.
 
   ## Notifications
 
@@ -71,14 +102,19 @@ defmodule ConduitMcp.Client do
 
   use Supervisor
 
+  alias ConduitMcp.Client.Cache
+  alias ConduitMcp.Client.Cache.Fetch
   alias ConduitMcp.Client.Config
   alias ConduitMcp.Client.Connection
   alias ConduitMcp.Client.Error
+  alias ConduitMcp.Client.Input
   alias ConduitMcp.Client.Prompt
   alias ConduitMcp.Client.Registry
   alias ConduitMcp.Client.Request
   alias ConduitMcp.Client.Request.MRTR
   alias ConduitMcp.Client.Resource
+  alias ConduitMcp.Client.Task, as: ClientTask
+  alias ConduitMcp.Client.TaskRequestor
   alias ConduitMcp.Client.Telemetry
   alias ConduitMcp.Client.Tool
   alias ConduitMcp.Client.ToolResult
@@ -109,8 +145,15 @@ defmodule ConduitMcp.Client do
           instructions: String.t() | nil
         }
 
-  @request_options [:timeout, :on_progress, :reset_timeout_on_progress, :max_total_timeout]
+  @request_options [
+    :timeout,
+    :on_progress,
+    :reset_timeout_on_progress,
+    :max_total_timeout,
+    :assigns
+  ]
   @control_timeout 5_000
+  @grace_ms 100
 
   # --- supervision -------------------------------------------------------------
 
@@ -261,39 +304,218 @@ defmodule ConduitMcp.Client do
 
   @doc """
   Lists one page of tools. Pass the previous page's `next_cursor` as
-  `:cursor` for the next one.
+  `:cursor` for the next one. Tools that fail intake are left out (see
+  "Listing and the cache" above); the page is never cached.
 
       {:ok, %{tools: [%ConduitMcp.Client.Tool{name: "echo"} | _], next_cursor: nil}} =
         ConduitMcp.Client.list_tools(:docs)
   """
   @spec list_tools(client(), keyword()) :: {:ok, page(:tools, Tool.t())} | {:error, Error.t()}
-  def list_tools(client, opts \\ []),
-    do: list_page(client, "tools/list", "tools", :tools, &Tool.from_wire/2, opts)
+  def list_tools(client, opts \\ []), do: list_page(client, :tools, :tools, opts)
+
+  @doc """
+  Lists every tool, following `nextCursor`, through the client's
+  `ConduitMcp.Client.Cache`: a fresh cached list is returned without asking
+  the server; otherwise the connection refreshes it (one refresh at a time,
+  shared by concurrent callers) and the new list is returned and cached.
+
+  ## Options
+
+    * `:timeout` - per page, and the longest the caller waits (default the
+      client's `:request_timeout`). A refresh the caller stopped waiting for
+      still completes and fills the cache.
+    * `:refresh` - `true` to ignore a fresh cached list (default `false`).
+
+  Pagination is capped (100 pages, 10 000 items, a repeated or over-1 KiB
+  cursor): over a cap the result is `{:error, %Error{kind:
+  :pagination_cycle}}` and nothing is cached.
+
+      {:ok, [%ConduitMcp.Client.Tool{} | _]} = ConduitMcp.Client.list_all_tools(:docs)
+  """
+  @spec list_all_tools(client(), keyword()) :: {:ok, [Tool.t()]} | {:error, Error.t()}
+  def list_all_tools(client, opts \\ []), do: list_all(client, :tools, opts)
+
+  @doc """
+  The tools of the last `list_all_tools/2` (or `list_changed` refresh) as
+  cached, fresh or not, without asking the server.
+  `{:error, %Error{kind: :not_found, reason: :not_cached}}` before the first
+  listing.
+
+      {:ok, tools} = ConduitMcp.Client.cached_tools(:docs)
+  """
+  @spec cached_tools(client()) :: {:ok, [Tool.t()]} | {:error, Error.t()}
+  def cached_tools(client) do
+    with {:ok, _pid, view} <- Request.lookup(client) do
+      case Cache.list(view.cache, :tools) do
+        {:ok, entry} -> {:ok, entry.items}
+        :miss -> {:error, Error.new(:not_found, :not_cached)}
+        {:error, _} = error -> error
+      end
+    end
+  end
+
+  @doc """
+  The cached definition of tool `name` (one cache row; the server is not
+  asked). `{:error, %Error{kind: :not_found}}` when the last listing did not
+  include it, or nothing was listed yet.
+
+      {:ok, %ConduitMcp.Client.Tool{name: "echo"}} = ConduitMcp.Client.tool(:docs, "echo")
+  """
+  @spec tool(client(), String.t()) :: {:ok, Tool.t()} | {:error, Error.t()}
+  def tool(client, name) when is_binary(name) do
+    with {:ok, _pid, view} <- Request.lookup(client) do
+      case Cache.lookup(view.cache, :tools, name) do
+        {:ok, tool} -> {:ok, tool}
+        :miss -> {:error, Error.new(:not_found, :unknown_tool)}
+        {:error, _} = error -> error
+      end
+    end
+  end
 
   @doc """
   Calls tool `name` with `args` (string- or atom-keyed; sent as given).
 
   A tool that ran and failed is `{:ok, %ToolResult{is_error: true}}`.
 
+  ## Tasks
+
+    * `task: :return` - if the server runs the call as a task, return
+      `{:ok, %ConduitMcp.Client.Task{}}` at once (poll it with
+      `get_task/3`, `await_task/3`).
+    * `task: :await` - if the server runs the call as a task, poll it until
+      it finishes and return its `ToolResult`. `:timeout` bounds the whole
+      wait; when it passes the task is cancelled (`tasks/cancel`), as it is
+      if the calling process dies.
+    * `task_ttl: ms` - the legacy `task.ttl` to request.
+
+  Modern servers decide per call whether to create a task; the client
+  declares the tasks extension only when `:task` is given, so without it the
+  server must answer directly. Legacy servers get a task-augmented call only
+  when they declare `tasks.requests.tools.call` and the tool's
+  `execution.taskSupport` allows it: `"required"` always (awaited when no
+  `:task` is given), `"optional"` only with `:task`. With `:task`, a call
+  made before the first handshake waits for it (within `:timeout`), since
+  the era decides how the call becomes a task; without it the call is
+  queued as usual and sent plain.
+
       {:ok, %ConduitMcp.Client.ToolResult{content: [%{"text" => "hi"}]}} =
         ConduitMcp.Client.call_tool(:docs, "echo", %{"message" => "hi"})
   """
   @spec call_tool(client(), String.t(), map(), keyword()) ::
-          {:ok, ToolResult.t()} | {:error, Error.t()}
+          {:ok, ToolResult.t() | ClientTask.t()} | {:error, Error.t()}
   def call_tool(client, name, args \\ %{}, opts \\ []) when is_binary(name) and is_map(args) do
-    with {:ok, _pid, view} <- Request.lookup(client) do
+    {mode, opts} = Keyword.pop(opts, :task)
+    {ttl, opts} = Keyword.pop(opts, :task_ttl)
+
+    unless mode in [nil, :return, :await] do
+      raise ArgumentError, ":task must be :return or :await, got: #{inspect(mode)}"
+    end
+
+    with {:ok, view} <- negotiated_view(client, mode, opts) do
       base = Telemetry.base(client, view.server_id, view.transport, view.era)
 
       Telemetry.tool_call_span(base, name, fn ->
         params = %{"name" => name, "arguments" => args}
 
+        if view.era == :modern,
+          do: modern_call(client, view, params, mode, opts),
+          else: legacy_call(client, view, params, {mode, ttl}, opts)
+      end)
+    end
+  end
+
+  # The era decides how a call becomes a task, so a task call waits for the
+  # first handshake (the era survives reconnects). Other calls are queued by
+  # the connection as usual.
+  defp negotiated_view(client, mode, opts) do
+    with {:ok, _pid, view} <- Request.lookup(client) do
+      if view.era == nil and mode != nil do
+        with :ok <- await_ready(client, Keyword.get(opts, :timeout, view.request_timeout)),
+             {:ok, _pid, view} <- Request.lookup(client),
+             do: {:ok, view}
+      else
+        {:ok, view}
+      end
+    end
+  end
+
+  defp modern_call(client, view, params, mode, opts) do
+    result_types = if mode == nil, do: [], else: ["task"]
+
+    case mrtr(client, "tools/call", params, view, opts,
+           extensions: TaskRequestor.extensions(mode),
+           result_types: result_types
+         ) do
+      {:ok, %{"resultType" => "task"} = result, %{rounds: rounds}} ->
+        {TaskRequestor.created(client, view, :modern, result, mode, opts), rounds}
+
+      {:ok, result, %{rounds: rounds}} ->
+        {ToolResult.from_wire(result), rounds}
+
+      {:error, _} = error ->
+        {error, 0}
+    end
+  end
+
+  defp legacy_call(client, view, params, {mode, ttl}, opts) do
+    case TaskRequestor.legacy_plan(client, view, params["name"], mode, opts) do
+      {:augment, mode} ->
+        task = if is_integer(ttl), do: %{"ttl" => ttl}, else: %{}
+
+        case request(client, "tools/call", Map.put(params, "task", task), opts) do
+          {:ok, %{"task" => %{} = raw}} ->
+            {TaskRequestor.created(client, view, :legacy, raw, mode, opts), 1}
+
+          {:ok, result} ->
+            {ToolResult.from_wire(result), 1}
+
+          {:error, _} = error ->
+            {error, 1}
+        end
+
+      :plain ->
         case mrtr(client, "tools/call", params, view, opts) do
           {:ok, result, %{rounds: rounds}} -> {ToolResult.from_wire(result), rounds}
           {:error, _} = error -> {error, 0}
         end
-      end)
     end
   end
+
+  @doc """
+  Reads the current state of a server task (`tasks/get`).
+
+      {:ok, %ConduitMcp.Client.Task{status: :working}} = ConduitMcp.Client.get_task(:docs, task)
+  """
+  @spec get_task(client(), ClientTask.t() | String.t(), keyword()) ::
+          {:ok, ClientTask.t()} | {:error, Error.t()}
+  def get_task(client, task, opts \\ []), do: TaskRequestor.get(client, task, timeout_opts(opts))
+
+  @doc """
+  Waits for a server task to finish and returns its tool result, polling at
+  the task's `pollIntervalMs` and answering its input requests with the
+  client's handler (modern) or reading `tasks/result` (legacy). `:timeout`
+  bounds the whole wait (default the client's `:request_timeout`); when it
+  passes the task is cancelled and `{:error, %Error{kind: :timeout}}`
+  returned. `:assigns` is passed to the handler.
+
+      {:ok, %ConduitMcp.Client.ToolResult{}} = ConduitMcp.Client.await_task(:docs, task)
+  """
+  @spec await_task(client(), ClientTask.t() | String.t(), keyword()) ::
+          {:ok, ToolResult.t()} | {:error, Error.t()}
+  def await_task(client, task, opts \\ []),
+    do: TaskRequestor.await(client, task, Keyword.validate!(opts, [:timeout, :assigns]))
+
+  @doc """
+  Asks the server to cancel a task (`tasks/cancel`). Cancellation is
+  cooperative: the task may still finish.
+
+      :ok = ConduitMcp.Client.cancel_task(:docs, task)
+  """
+  @spec cancel_task(client(), ClientTask.t() | String.t(), keyword()) :: :ok | {:error, Error.t()}
+  def cancel_task(client, task, opts \\ []),
+    do: TaskRequestor.cancel(client, task, timeout_opts(opts))
+
+  defp timeout_opts(opts), do: Keyword.validate!(opts, [:timeout])
 
   @doc """
   `call_tool/4` in a task under the client's `Task.Supervisor`
@@ -319,8 +541,16 @@ defmodule ConduitMcp.Client do
   """
   @spec list_resources(client(), keyword()) ::
           {:ok, page(:resources, Resource.t())} | {:error, Error.t()}
-  def list_resources(client, opts \\ []),
-    do: list_page(client, "resources/list", "resources", :resources, &Resource.from_wire/2, opts)
+  def list_resources(client, opts \\ []), do: list_page(client, :resources, :resources, opts)
+
+  @doc """
+  Lists every resource through the cache, as `list_all_tools/2` does for
+  tools.
+
+      {:ok, [%ConduitMcp.Client.Resource{} | _]} = ConduitMcp.Client.list_all_resources(:docs)
+  """
+  @spec list_all_resources(client(), keyword()) :: {:ok, [Resource.t()]} | {:error, Error.t()}
+  def list_all_resources(client, opts \\ []), do: list_all(client, :resources, opts)
 
   @doc """
   Lists one page of resource templates, as the server's string-keyed
@@ -331,16 +561,18 @@ defmodule ConduitMcp.Client do
   """
   @spec list_resource_templates(client(), keyword()) ::
           {:ok, page(:resource_templates, map())} | {:error, Error.t()}
-  def list_resource_templates(client, opts \\ []) do
-    list_page(
-      client,
-      "resources/templates/list",
-      "resourceTemplates",
-      :resource_templates,
-      &raw_object/2,
-      opts
-    )
-  end
+  def list_resource_templates(client, opts \\ []),
+    do: list_page(client, :resource_templates, :resource_templates, opts)
+
+  @doc """
+  Lists every resource template through the cache, as `list_all_tools/2`
+  does for tools.
+
+      {:ok, [%{"uriTemplate" => _} | _]} = ConduitMcp.Client.list_all_resource_templates(:docs)
+  """
+  @spec list_all_resource_templates(client(), keyword()) :: {:ok, [map()]} | {:error, Error.t()}
+  def list_all_resource_templates(client, opts \\ []),
+    do: list_all(client, :resource_templates, opts)
 
   @doc """
   Reads the resource at `uri`; returns the server's string-keyed
@@ -364,8 +596,16 @@ defmodule ConduitMcp.Client do
   """
   @spec list_prompts(client(), keyword()) ::
           {:ok, page(:prompts, Prompt.t())} | {:error, Error.t()}
-  def list_prompts(client, opts \\ []),
-    do: list_page(client, "prompts/list", "prompts", :prompts, &Prompt.from_wire/2, opts)
+  def list_prompts(client, opts \\ []), do: list_page(client, :prompts, :prompts, opts)
+
+  @doc """
+  Lists every prompt through the cache, as `list_all_tools/2` does for
+  tools.
+
+      {:ok, [%ConduitMcp.Client.Prompt{} | _]} = ConduitMcp.Client.list_all_prompts(:docs)
+  """
+  @spec list_all_prompts(client(), keyword()) :: {:ok, [Prompt.t()]} | {:error, Error.t()}
+  def list_all_prompts(client, opts \\ []), do: list_all(client, :prompts, opts)
 
   @doc """
   Gets prompt `name` with `args`. Prompt arguments are strings on the wire,
@@ -489,49 +729,64 @@ defmodule ConduitMcp.Client do
   defp put_meta(params, nil), do: params
   defp put_meta(params, meta) when is_map(meta), do: Map.put(params, "_meta", meta)
 
-  defp list_page(client, method, key, page_key, decode, opts) do
+  defp list_page(client, kind, page_key, opts) do
     {cursor, opts} = Keyword.pop(opts, :cursor)
-
-    with {:ok, _pid, view} <- Request.lookup(client),
-         {:ok, result} <- request(client, method, put_present(%{}, "cursor", cursor), opts),
-         {:ok, items} <- decode_items(Map.get(result, key, []), view.server_id, decode) do
-      {:ok, %{page_key => items, :next_cursor => next_cursor(result)}}
-    end
-  end
-
-  defp decode_items(items, server_id, decode) when is_list(items) do
-    Enum.reduce_while(items, {:ok, []}, fn item, {:ok, acc} ->
-      case decode.(server_id, item) do
-        {:ok, decoded} -> {:cont, {:ok, [decoded | acc]}}
-        {:error, _} = error -> {:halt, error}
-      end
-    end)
-    |> case do
-      {:ok, decoded} -> {:ok, Enum.reverse(decoded)}
-      error -> error
-    end
-  end
-
-  defp decode_items(other, _server_id, _decode),
-    do: {:error, Error.new(:protocol, :invalid_list_result, other)}
-
-  defp raw_object(_server_id, %{} = map) when not is_struct(map), do: {:ok, map}
-  defp raw_object(_server_id, other), do: {:error, Error.new(:protocol, :invalid_item, other)}
-
-  defp next_cursor(%{"nextCursor" => cursor}) when is_binary(cursor), do: cursor
-  defp next_cursor(_result), do: nil
-
-  # tools/call, resources/read and prompts/get may answer `input_required`;
-  # each round is its own request (a fresh id from the connection).
-  defp mrtr(client, method, params, view, opts) do
     {meta, opts} = Keyword.pop(opts, :meta)
     opts = request_opts(opts)
+    opts = if meta == nil, do: opts, else: Keyword.put(opts, :meta, meta)
+
+    with {:ok, _pid, view} <- Request.lookup(client),
+         {:ok, page} <- Fetch.page(client, kind, cursor, opts, Fetch.context(client, view)) do
+      {:ok, %{page_key => page.items, :next_cursor => page.next_cursor}}
+    end
+  end
+
+  defp list_all(client, kind, opts) do
+    opts = Keyword.validate!(opts, [:timeout, refresh: false])
+
+    with {:ok, _pid, view} <- Request.lookup(client) do
+      now = System.monotonic_time(:millisecond)
+
+      case Cache.list(view.cache, kind) do
+        {:ok, entry} ->
+          if not opts[:refresh] and Cache.fresh?(entry, now),
+            do: {:ok, entry.items},
+            else: refresh(client, kind, view, opts)
+
+        :miss ->
+          refresh(client, kind, view, opts)
+
+        {:error, _} = error ->
+          error
+      end
+    end
+  end
+
+  # The connection runs the refresh (single flight) and answers when the
+  # list is written.
+  defp refresh(client, kind, view, opts) do
+    timeout = Keyword.get(opts, :timeout, view.request_timeout)
+    Request.call(client, {:refresh, kind, [timeout: timeout]}, timeout + @grace_ms)
+  end
+
+  # tools/call, resources/read and prompts/get may answer `input_required`;
+  # each round is its own request (a fresh id from the connection), and
+  # input requests are answered here, in the caller.
+  defp mrtr(client, method, params, view, opts, extra \\ []) do
+    {meta, opts} = Keyword.pop(opts, :meta)
+    opts = request_opts(opts)
+    extensions = Keyword.get(extra, :extensions, %{})
+    run_opts = if extensions == %{}, do: opts, else: Keyword.put(opts, :extensions, extensions)
+    env = Input.caller_env(client, view, Keyword.get(opts, :assigns))
 
     MRTR.run(method, put_meta(params, meta),
-      send: fn _id, method, params -> Request.run(client, method, params, opts) end,
+      send: fn _id, method, params -> Request.run(client, method, params, run_opts) end,
       next_id: fn -> nil end,
-      handle_input: fn _key, _request -> {:error, :no_input_handler} end,
-      capabilities: view.client_capabilities
+      handle_input: fn _key, request ->
+        Input.answer(request["method"], Map.get(request, "params"), env)
+      end,
+      capabilities: view.client_capabilities,
+      result_types: Keyword.get(extra, :result_types, [])
     )
   end
 

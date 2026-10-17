@@ -9,11 +9,13 @@ defmodule ConduitMcp.Client.Registry do
     * `{:supervisor, name}` - the `ConduitMcp.Client` supervisor.
     * `{:task_sup, name}` - the client's `Task.Supervisor`.
     * `{:client, name}` - the `ConduitMcp.Client.Connection`. Its value is
-      `:starting` until the connection has initialised, then a map the
-      connection rewrites on every state change: the state, the negotiated
-      era and version, the server's reported capabilities, and the defaults
-      callers need. `ConduitMcp.Client.status/1` and the request functions
-      read it without messaging the connection.
+      `:starting` until the connection has initialised, then a map written
+      once: the defaults callers need and the id of the client's
+      `ConduitMcp.Client.Cache` table, where the connection keeps the state
+      that changes (connection state, negotiated era and version, the
+      server's capabilities, cached lists). `ConduitMcp.Client.status/1`
+      and the request functions read both without messaging the
+      connection.
 
   The registry holds no processes of its own. Nothing outside the client
   should write to it.

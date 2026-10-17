@@ -4,8 +4,10 @@ defmodule ConduitMcp.Client.Connection.Data do
   # The connection's state data, the caller view it publishes into the
   # registry, and the wrappers that thread transport state through it.
 
+  alias ConduitMcp.Client.Cache
   alias ConduitMcp.Client.Config
   alias ConduitMcp.Client.Negotiation
+  alias ConduitMcp.Client.RateLimit
   alias ConduitMcp.Client.Registry
   alias ConduitMcp.Client.Request
   alias ConduitMcp.Client.Telemetry
@@ -48,14 +50,50 @@ defmodule ConduitMcp.Client.Connection.Data do
     reason: nil,
     log_level: nil,
     health_id: nil,
-    health_misses: 0
+    health_misses: 0,
+    # The client's `ConduitMcp.Client.Cache` table (this process writes it).
+    cache: nil,
+    # `ConduitMcp.Client.Input.settings()`: what handler code needs, shared
+    # with callers through the registry value.
+    input: nil,
+    # The server's origin when the transport reported one on connect.
+    origin: nil,
+    # Legacy server-to-client requests running in handler tasks:
+    # server request id => %{ref:, pid:, related:}
+    server_requests: %{},
+    # Cache refreshes running in tasks: kind => %{ref:, waiters:, again?:,
+    # trigger:, started:}
+    refreshes: %{},
+    # Callers awaiting a task (`ConduitMcp.Client.await_task/3`): monitor
+    # ref => {pid, task id}; the task is cancelled if the caller dies.
+    watches: %{},
+    # The process running the handler's notification callbacks, or nil
+    # (`ConduitMcp.Client.Connection.Notifier`).
+    notifier: nil
   ]
 
   @type t :: %__MODULE__{}
 
+  @doc """
+  Which of this process's tasks `ref` belongs to: `{:server_request, id}`,
+  `{:refresh, kind}`, or `:error`. (At most `:max_server_requests` plus one
+  per list kind run at once.)
+  """
+  @spec job(t(), reference()) :: {:server_request, term()} | {:refresh, atom()} | :error
+  def job(data, ref) do
+    cond do
+      id = find_ref(data.server_requests, ref) -> {:server_request, id}
+      kind = find_ref(data.refreshes, ref) -> {:refresh, kind}
+      true -> :error
+    end
+  end
+
+  defp find_ref(jobs, ref), do: Enum.find_value(jobs, fn {key, job} -> job.ref == ref && key end)
+
   @spec new(Config.t(), pid(), term()) :: t()
   def new(%Config{} = config, task_sup, tstate) do
     {transport, _opts} = config.transport
+    rate = config.input_rate_limit
 
     %__MODULE__{
       config: config,
@@ -64,34 +102,56 @@ defmodule ConduitMcp.Client.Connection.Data do
       tstate: tstate,
       task_sup: task_sup,
       kind: transport.kind(),
-      era_hint: if(config.prior == :legacy, do: :legacy)
+      era_hint: if(config.prior == :legacy, do: :legacy),
+      cache: Cache.new(),
+      input: %{
+        handler: config.handler,
+        sampling: config.sampling,
+        elicitation: config.elicitation,
+        limiter: RateLimit.new(rate[:per_second], rate[:burst]),
+        assigns: config.assigns
+      }
     }
   end
 
   @doc """
-  The caller view published as the registry value of `{:client, name}`:
+  The caller view published once as the registry value of `{:client, name}`:
   what `ConduitMcp.Client.Request` and the read-only `ConduitMcp.Client`
-  functions need without messaging the connection.
+  functions need without messaging the connection. The state that changes
+  (`publish/2`) lives in the cache table, whose id is here.
   """
-  @spec view(t(), atom()) :: map()
-  def view(%__MODULE__{config: config} = data, state) do
+  @spec view(t()) :: map()
+  def view(%__MODULE__{config: config} = data) do
     %{
       task_sup: data.task_sup,
       server_id: config.server_id,
       transport: data.kind,
       request_timeout: config.request_timeout,
       max_total_timeout: config.max_total_timeout,
-      client_capabilities: Negotiation.client_capabilities(config.handler, era: :modern),
+      client_capabilities: capabilities(config, :modern),
+      cache: data.cache,
+      input: data.input
+    }
+  end
+
+  @doc "Writes the connection's state into the cache's `:status` and `:server` rows."
+  @spec publish(t(), atom()) :: :ok
+  def publish(data, state) do
+    Cache.put_status(data.cache, %{
       state: state,
       reason: if(state == :closed, do: data.reason),
       era: data.era,
       version: data.version,
-      server: if(state == :ready, do: data.server)
-    }
+      origin: data.config.elicitation[:origin] || data.origin
+    })
+
+    Cache.put_server(data.cache, if(state == :ready, do: data.server))
+    :ok
   end
 
-  @spec publish(t(), atom()) :: :ok
-  def publish(data, state), do: Registry.put_value({:client, data.name}, view(data, state))
+  @doc "Publishes the static view (once, from `init`)."
+  @spec register(t()) :: :ok
+  def register(data), do: Registry.put_value({:client, data.name}, view(data))
 
   @spec telemetry(t()) :: Telemetry.base()
   def telemetry(data),
@@ -99,14 +159,19 @@ defmodule ConduitMcp.Client.Connection.Data do
 
   @doc "The client capabilities for `era`."
   @spec client_capabilities(t(), :modern | :legacy) :: map()
-  def client_capabilities(%__MODULE__{config: config}, :legacy) do
-    # `roots.listChanged` is promised whenever roots are: the host announces
-    # changes with `ConduitMcp.Client.notify_roots_changed/1`.
-    Negotiation.client_capabilities(config.handler, era: :legacy, roots_list_changed: true)
-  end
+  def client_capabilities(%__MODULE__{config: config}, era), do: capabilities(config, era)
 
-  def client_capabilities(%__MODULE__{config: config}, :modern),
-    do: Negotiation.client_capabilities(config.handler, era: :modern)
+  # Derived from the handler's callbacks; `roots.listChanged` (legacy only)
+  # is promised when configured: the host announces changes with
+  # `ConduitMcp.Client.notify_roots_changed/1`.
+  defp capabilities(config, era) do
+    Negotiation.client_capabilities(config.handler,
+      era: era,
+      sampling_tools: config.sampling[:tools],
+      sampling_context: config.sampling[:context],
+      roots_list_changed: config.roots[:list_changed]
+    )
+  end
 
   @doc "Takes the next request id."
   @spec take_id(t()) :: {pos_integer(), t()}
@@ -135,17 +200,24 @@ defmodule ConduitMcp.Client.Connection.Data do
   defp envelope_info(data, info) do
     era = Map.get(info, :era, data.era)
 
-    Map.merge(
-      %{
-        era: era,
-        version: data.version,
-        client_capabilities: client_capabilities(data, era),
-        client_info: data.config.client_info,
-        log_level: data.log_level
-      },
-      info
-    )
+    %{
+      era: era,
+      version: data.version,
+      client_capabilities: client_capabilities(data, era),
+      client_info: data.config.client_info,
+      log_level: data.log_level
+    }
+    |> Map.merge(info)
+    |> put_extensions()
   end
+
+  # Per-request extension capabilities (the tasks extension is asked for
+  # only on the requests that use it).
+  defp put_extensions(%{extensions: extensions, client_capabilities: caps} = info)
+       when map_size(extensions) > 0,
+       do: %{info | client_capabilities: Map.put(caps, "extensions", extensions)}
+
+  defp put_extensions(info), do: info
 
   @doc "Sends a notification through the transport."
   @spec notify(t(), String.t(), map()) :: {:ok, t()} | {:error, term(), t()}

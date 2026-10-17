@@ -161,6 +161,105 @@ defmodule ConduitMcp.Client.Config do
               milliseconds (legacy `ping`, modern `server/discover`); two
               unanswered checks in a row restart the transport.
               """
+            ],
+            assigns: [
+              type: :map,
+              default: %{},
+              doc: """
+              Host data passed to `ConduitMcp.Client.Handler` callbacks as
+              `ctx.assigns` when a server request is not tied to a call
+              (a call's own `:assigns` option wins for requests tied to it).
+              """
+            ],
+            handler_timeout: [
+              type: :keyword_list,
+              default: [],
+              keys: [
+                sampling: [type: :pos_integer, default: 60_000],
+                elicitation: [type: :pos_integer, default: 300_000],
+                roots: [type: :pos_integer, default: 60_000]
+              ],
+              doc: """
+              Milliseconds a legacy server-to-client request may run in its
+              handler task before it is killed and answered `-32603`, per
+              method. Modern input requests run in the caller and are bounded
+              by the call.
+              """
+            ],
+            max_server_requests: [
+              type: :pos_integer,
+              default: 8,
+              doc: """
+              Legacy server-to-client requests handled at once; one more is
+              answered `-32000` (busy) without running the handler.
+              """
+            ],
+            input_rate_limit: [
+              type: :keyword_list,
+              default: [],
+              keys: [
+                per_second: [type: :pos_integer, default: 10],
+                burst: [type: :pos_integer, default: 20]
+              ],
+              doc: """
+              The per-server budget of input requests (sampling, elicitation,
+              roots) in both eras. Over it, sampling is refused with the
+              sampling `:rejection_code` and the others with `-32000`.
+              """
+            ],
+            sampling: [
+              type: :keyword_list,
+              default: [],
+              keys: [
+                max_tokens: [type: :pos_integer, default: 4_096],
+                context: [type: :boolean, default: false],
+                tools: [type: :boolean, default: false],
+                allow_idle: [type: :boolean, default: false],
+                rejection_code: [type: :integer, default: -1]
+              ],
+              doc: """
+              Safety settings for `sampling/createMessage` (used only when the
+              handler implements `handle_sampling/2`). `:max_tokens` clamps the
+              server's `maxTokens`. `:context` declares `sampling.context`
+              and lets `includeContext` through; otherwise it is coerced to
+              `"none"`. `:tools` declares `sampling.tools`. `:allow_idle`
+              accepts legacy sampling requests that arrive while no call is in
+              flight (refused by default). Refusals use `:rejection_code`.
+              """
+            ],
+            elicitation: [
+              type: :keyword_list,
+              default: [],
+              keys: [
+                origin: [type: {:or, [:string, nil]}, default: nil]
+              ],
+              doc: """
+              `:origin` - the server's origin (`"https://host[:port]"`) that a
+              URL-mode elicitation URL is compared with, for transports that do
+              not report one. The handler gets `origin_mismatch?: true` for any
+              other origin, and when no origin is known.
+              """
+            ],
+            roots: [
+              type: :keyword_list,
+              default: [],
+              keys: [
+                list_changed: [type: :boolean, default: true]
+              ],
+              doc: """
+              `:list_changed` - declare `roots.listChanged` to legacy servers
+              (the host announces changes with
+              `ConduitMcp.Client.notify_roots_changed/1`). Used only when the
+              handler implements `list_roots/1`.
+              """
+            ],
+            max_cache_ttl: [
+              type: :pos_integer,
+              default: 3_600_000,
+              doc: """
+              The longest a cached list (`ConduitMcp.Client.Cache`) is served
+              without asking the server again, whatever its `ttlMs` hint says.
+              """
             ]
           )
 
@@ -194,7 +293,15 @@ defmodule ConduitMcp.Client.Config do
     :max_reconnects,
     :on_give_up,
     :stable_after,
-    :health_check_interval
+    :health_check_interval,
+    :assigns,
+    :handler_timeout,
+    :max_server_requests,
+    :input_rate_limit,
+    :sampling,
+    :elicitation,
+    :roots,
+    :max_cache_ttl
   ]
 
   @type protocol :: :auto | :modern | :legacy | String.t()
@@ -216,7 +323,15 @@ defmodule ConduitMcp.Client.Config do
           max_reconnects: non_neg_integer() | :infinity,
           on_give_up: :stay | :stop,
           stable_after: pos_integer(),
-          health_check_interval: pos_integer() | nil
+          health_check_interval: pos_integer() | nil,
+          assigns: map(),
+          handler_timeout: keyword(),
+          max_server_requests: pos_integer(),
+          input_rate_limit: keyword(),
+          sampling: keyword(),
+          elicitation: keyword(),
+          roots: keyword(),
+          max_cache_ttl: pos_integer()
         }
 
   @doc """

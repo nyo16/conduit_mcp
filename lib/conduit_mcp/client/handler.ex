@@ -7,19 +7,24 @@ defmodule ConduitMcp.Client.Handler do
 
     * **Legacy** (`2025-11-25`, `2025-06-18`): the server sends JSON-RPC
       requests (`sampling/createMessage`, `elicitation/create`, `roots/list`).
-      Each runs in a supervised task with a timeout (`handler_timeout`:
-      5 minutes for elicitation, 60 seconds otherwise), at most
-      `max_server_requests` (8) at once (over the cap the server gets
+      Each runs in a task under the client's `Task.Supervisor`, never in the
+      connection, killed after `:handler_timeout` (5 minutes for
+      elicitation, 60 seconds otherwise) and answered `-32603`; at most
+      `:max_server_requests` (8) run at once (over the cap the server gets
       `-32000` busy). A server `notifications/cancelled` kills the task, and
-      a crash answers `-32603`. A request tied to an in-flight call (`related`
-      request id) pauses that call's deadline, bounded by its maximum.
+      a crash answers `-32603`. A request tied to an in-flight call (its
+      `related` request id; on stdio, the one call in flight if there is
+      exactly one) pauses that call's deadline, bounded by its
+      `:max_total_timeout`, and gets that call's `:assigns`.
     * **Modern** (`2026-07-28`): there are no server-to-client requests. A
       `tools/call`, `resources/read` or `prompts/get` may return
       `resultType: "input_required"` with `inputRequests`; the client calls
       this module **in the calling process** for every input request, then
       retries the original request with the answers (MRTR). A raise or an
       `{:error, _}` aborts the call with
-      `%ConduitMcp.Client.Error{kind: :input_handler}`.
+      `%ConduitMcp.Client.Error{kind: :input_handler}`. Input requests of a
+      server task (`ConduitMcp.Client.await_task/3`) are answered the same
+      way and sent with `tasks/update`.
 
   ## Capabilities come from the callbacks
 
@@ -45,31 +50,54 @@ defmodule ConduitMcp.Client.Handler do
   declines an elicitation is a result, not an error:
   `{:ok, %{"action" => "decline"}}`.
 
-  ## Safety defaults applied around the callbacks
+  ## Safety checks applied around the callbacks
 
-    * **Sampling** needs an approval hook; `maxTokens` is clamped to the
-      configured client maximum (4096 by default); requests are rate limited
-      per server; `includeContext` is coerced to `"none"` unless sampling
-      context is enabled; a legacy sampling request with no related call is
-      denied.
-    * **Elicitation**: the client never fetches or opens a URL. For URL mode
-      the context carries the full URL, its host, an `idn` flag and an
-      origin-mismatch flag; only `https` is accepted. Form schemas are checked
-      against the flat primitive subset, secret-looking fields are flagged,
-      and responses are validated before they are sent. A mode that was not
-      declared is refused with `-32602`.
-    * **Roots** are per server and `file://` only.
+  Both eras go through the same checks, before and after the callback:
+
+    * **Budget**: input requests of one server are rate limited
+      (`:input_rate_limit`, 10/s with bursts of 20).
+    * **Sampling**: this callback is the approval point. `maxTokens` must be
+      a positive integer and is clamped to `sampling: [max_tokens: _]`
+      (4096); `includeContext` is coerced to `"none"` unless
+      `sampling: [context: true]`; a legacy sampling request that arrives
+      while no call is in flight is refused unless
+      `sampling: [allow_idle: true]`. Refusals (idle, over budget) use
+      `sampling: [rejection_code: _]` (default `-1`).
+    * **Elicitation**: the client never fetches or opens a URL. A mode the
+      handler does not declare is refused with `-32602`. URL mode accepts
+      only absolute `https` URLs without userinfo (`javascript:`, `http:`,
+      `file:` are refused with `-32602`); the context carries the full
+      `:url`, its `:host`, `:idn?` (a punycode `xn--` label) and
+      `:origin_mismatch?` (true unless the URL has the server's origin,
+      which HTTP transports report and `elicitation: [origin: _]` sets;
+      always true when unknown). Form schemas must be the spec's flat
+      primitive subset (else `-32602`), and the context carries `:fields`,
+      `%{name => %{sensitive_suspected: boolean}}` flagging secret-looking
+      fields. Answers are validated before they are sent: `"action"` must be
+      `"accept"`, `"decline"` or `"cancel"`, a form `accept` must fit the
+      schema, a URL `accept` carries no content (else `-32603`).
+    * **Roots** are asked per server (the context has `:server_id`); only
+      `file://` URIs on the local host are sent, with `.`/`..` resolved.
+
+  ## Notifications
+
+  `handle_notification/3` and `handle_log/3` run in a process of their own,
+  one notification at a time in arrival order; a raise is logged and
+  skipped, and beyond 1 000 waiting notifications new ones are dropped.
 
   ## Context
 
-  Every callback receives a context map. The client sets at least:
+  Every callback receives a context map (notification callbacks get only
+  `:client`, `:server_id` and `:era`):
 
+    * `:client` - the client's `:name`.
     * `:server_id` - the operator-assigned id of the asking server.
     * `:era` - `:modern` or `:legacy`.
-    * `:assigns` - the `assigns` of the related call, or of the connection
-      when the request is not tied to a call.
+    * `:assigns` - the `:assigns` of the related call, or the client's
+      `:assigns` when the request is not tied to a call.
     * `:related_request_id` - the in-flight request this input belongs to,
-      or `nil`.
+      or `nil` (always `nil` for modern input).
+    * Elicitation adds `:mode` (`:form` or `:url`) and the keys above.
   """
 
   @typedoc "Context passed to every callback; see the moduledoc for keys."

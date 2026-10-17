@@ -81,28 +81,49 @@ defmodule ConduitMcp.Client.Connection do
   Every server notification but `notifications/progress` and
   `notifications/cancelled` is sent to each process subscribed with
   `ConduitMcp.Client.subscribe_notifications/2` as
-  `{:mcp_notification, name, method, params}`. A burst of one
-  `notifications/*/list_changed` kind is coalesced: the first is delivered
-  at once, and any further ones within the next 250 ms are delivered as one
-  trailing notification, so a flood reaches subscribers at most twice per
-  window.
+  `{:mcp_notification, name, method, params}`, and to the handler's
+  `handle_notification/3` / `handle_log/3` (run in a separate process, in
+  order). A burst of one `notifications/*/list_changed` kind is coalesced:
+  the first is delivered at once, and any further ones within the next
+  250 ms are delivered as one trailing notification, so a flood reaches
+  subscribers at most twice per window. Each delivered `list_changed`
+  marks the matching `ConduitMcp.Client.Cache` list stale and, if it was
+  ever fetched, refreshes it (at most two refreshes per burst).
 
-  Legacy server-to-client requests: `ping` is answered `{}`; any other
-  method is answered `-32601`.
+  ## Cache
+
+  The connection owns and is the only writer of the client's
+  `ConduitMcp.Client.Cache` table, but never fetches lists itself: a
+  refresh runs in a task under the client's `Task.Supervisor` and reports
+  back. Losing the connection marks every cached list stale.
+
+  ## Server-to-client requests (legacy)
+
+  `ping` is answered `{}`. `sampling/createMessage`, `elicitation/create`
+  and `roots/list` run the client's `ConduitMcp.Client.Handler` in a task
+  under the client's `Task.Supervisor`, never here, with the limits of
+  `:handler_timeout` and `:max_server_requests`; the related call's
+  deadline is paused meanwhile (bounded by its `:max_total_timeout`). A
+  server `notifications/cancelled` kills the task. Any other method, or one
+  whose capability was not declared, is answered `-32601`.
 
   ## Telemetry
 
   Emits `[:conduit_mcp, :client, :connection, :transition]`,
   `[:conduit_mcp, :client, :request, :cancel]`,
-  `[:conduit_mcp, :client, :response, :dropped]` and
-  `[:conduit_mcp, :client, :notification]` from this process; handlers
-  attached to them run here and must be fast (see `ConduitMcp.Telemetry`).
+  `[:conduit_mcp, :client, :response, :dropped]`,
+  `[:conduit_mcp, :client, :notification]`,
+  `[:conduit_mcp, :client, :cache, :refresh, :start | :stop]` and
+  `[:conduit_mcp, :client, :tool, :definition_changed]` from this process;
+  handlers attached to them run here and must be fast (see
+  `ConduitMcp.Telemetry`).
 
   ## Crash reports
 
-  `format_status/1` replaces the transport state, the transport options and
-  the params of queued requests with `:redacted`, so a crash report never
-  carries credentials, session ids or tool arguments.
+  `format_status/1` replaces the transport state, the transport options,
+  the params of queued requests and every `assigns` (the client's and each
+  pending call's) with `:redacted`, so a crash report never carries
+  credentials, session ids, host data or tool arguments.
   """
 
   @behaviour :gen_statem
@@ -113,7 +134,11 @@ defmodule ConduitMcp.Client.Connection do
   alias ConduitMcp.Client.Connection.Data
   alias ConduitMcp.Client.Connection.Handshake
   alias ConduitMcp.Client.Connection.Inbound
+  alias ConduitMcp.Client.Connection.Notifier
+  alias ConduitMcp.Client.Connection.Refresh
   alias ConduitMcp.Client.Connection.Requests
+  alias ConduitMcp.Client.Connection.ServerRequests
+  alias ConduitMcp.Client.Connection.TaskWatch
   alias ConduitMcp.Client.Error
   alias ConduitMcp.Client.Registry
   alias ConduitMcp.Client.Telemetry
@@ -149,6 +174,13 @@ defmodule ConduitMcp.Client.Connection do
     case transport.init(opts, %{owner: self(), task_sup: task_sup, key: config.name}) do
       {:ok, tstate} ->
         data = Data.new(config, task_sup, tstate)
+
+        notifier =
+          Notifier.start(config.handler, %{client: config.name, server_id: config.server_id})
+
+        data = %{data | notifier: notifier}
+        :ok = Data.register(data)
+        :ok = Data.publish(data, :connecting)
         {:ok, :connecting, data, [{:next_event, :internal, :connect}]}
 
       {:error, reason} ->
@@ -180,6 +212,14 @@ defmodule ConduitMcp.Client.Connection do
   def handle_event(:info, {:DOWN, ref, :process, _pid, _reason} = message, state, data),
     do: down(ref, message, state, data)
 
+  def handle_event(:info, {ref, answer} = message, state, data) when is_reference(ref) do
+    case Data.job(data, ref) do
+      {:server_request, id} -> result(ServerRequests.reply(id, ref, answer, data))
+      {:refresh, kind} -> {:keep_state, Refresh.done(kind, ref, answer, data)}
+      :error -> transport_info(message, state, data)
+    end
+  end
+
   def handle_event(:info, message, state, data), do: transport_info(message, state, data)
 
   def handle_event({:timeout, {:req, id}}, id, _state, data),
@@ -187,6 +227,9 @@ defmodule ConduitMcp.Client.Connection do
 
   def handle_event({:timeout, {:list_changed, method}}, nil, _state, data),
     do: result(Inbound.window_end(method, data))
+
+  def handle_event({:timeout, {:server_request, id}}, id, _state, data),
+    do: result(ServerRequests.timeout(id, data))
 
   def handle_event({:timeout, :health}, nil, :ready, data), do: Handshake.health_tick(data)
   def handle_event({:timeout, :health}, nil, _state, _data), do: :keep_state_and_data
@@ -228,7 +271,9 @@ defmodule ConduitMcp.Client.Connection do
     end
   end
 
-  defp transport_event({:connected, _info}, :connecting, data), do: Handshake.connected(data)
+  defp transport_event({:connected, info}, :connecting, data),
+    do: Handshake.connected(%{data | origin: origin(info)})
+
   defp transport_event({:connected, _info}, _state, _data), do: :keep_state_and_data
 
   defp transport_event({:response, id, message}, state, data) do
@@ -258,8 +303,8 @@ defmodule ConduitMcp.Client.Connection do
   defp transport_event({:notification, method, params}, _state, data),
     do: result(Inbound.notification(method, params, data))
 
-  defp transport_event({:server_request, id, message, _related}, _state, data),
-    do: {:keep_state, Inbound.server_request(id, message, data)}
+  defp transport_event({:server_request, id, message, related}, _state, data),
+    do: result(ServerRequests.start(id, message, related, data))
 
   defp transport_event({:closed, reason}, state, data),
     do: Handshake.transport_closed(state, reason, data)
@@ -281,11 +326,26 @@ defmodule ConduitMcp.Client.Connection do
 
   defp add_actions(other, _more), do: other
 
+  defp origin(%{origin: origin}) when is_binary(origin), do: origin
+  defp origin(_info), do: nil
+
+  # A task this process started (a server request handler or a cache
+  # refresh) exited without answering.
+  defp task_down(ref, data) do
+    case Data.job(data, ref) do
+      {:server_request, id} -> ServerRequests.down(id, data)
+      {:refresh, kind} -> Refresh.down(kind, data)
+      :error -> :unknown
+    end
+  end
+
   # --- monitors ----------------------------------------------------------------
 
   defp down(ref, message, state, data) do
     with :unknown <- Requests.cancel_ref(ref, :caller_down, data),
-         :unknown <- Inbound.subscriber_down(ref, data) do
+         :unknown <- Inbound.subscriber_down(ref, data),
+         :unknown <- task_down(ref, data),
+         :unknown <- TaskWatch.down(ref, state, data) do
       transport_info(message, state, data)
     else
       %Data{} = data -> {:keep_state, data}
@@ -326,6 +386,19 @@ defmodule ConduitMcp.Client.Connection do
     {:keep_state, Inbound.unsubscribe(pid, data)}
   end
 
+  defp control({:refresh, kind, opts}, mref, _state, data),
+    do: {:keep_state, Refresh.demand(kind, mref, opts, data)}
+
+  defp control({:watch_task, pid, task_id}, mref, _state, data) do
+    Requests.reply(mref, :ok)
+    {:keep_state, TaskWatch.watch(pid, task_id, data)}
+  end
+
+  defp control({:unwatch_task, pid, task_id}, mref, _state, data) do
+    Requests.reply(mref, :ok)
+    {:keep_state, TaskWatch.unwatch(pid, task_id, data)}
+  end
+
   defp control(_unknown, mref, _state, _data),
     do: reply(mref, {:error, Error.new(:protocol, :unknown_control_call)})
 
@@ -357,8 +430,15 @@ defmodule ConduitMcp.Client.Connection do
 
   # Transport options (in the config) may carry credentials just like the
   # transport state built from them.
-  defp redact_data(%Data{config: %{transport: {transport, _opts}} = config} = data),
-    do: %{data | tstate: :redacted, config: %{config | transport: {transport, :redacted}}}
+  defp redact_data(%Data{config: %{transport: {transport, _opts}} = config} = data) do
+    %{
+      data
+      | tstate: :redacted,
+        input: :redacted,
+        pending: Map.new(data.pending, fn {id, entry} -> {id, %{entry | assigns: :redacted}} end),
+        config: %{config | transport: {transport, :redacted}, assigns: :redacted}
+    }
+  end
 
   defp redact_data(other), do: other
 

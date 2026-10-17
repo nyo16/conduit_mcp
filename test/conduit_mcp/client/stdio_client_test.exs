@@ -94,11 +94,10 @@ defmodule ConduitMcp.Client.StdioClientTest do
     end
   end
 
-  # The client answers no input requests yet (`ConduitMcp.Client.Handler`
-  # dispatch is a later task), so the round trip ends in the caller with
-  # `:input_handler` - after the server's sealed `InputRequiredResult`
-  # crossed stdio and was accepted by the MRTR loop.
-  test "an MRTR InputRequiredResult reaches the caller over modern stdio" do
+  # The server's sealed `InputRequiredResult` crosses stdio, the caller's
+  # MRTR loop hands the elicitation to `ElicitHandler`, and the retry with
+  # the echoed `requestState` completes the call.
+  test "an MRTR round trip completes over modern stdio" do
     name =
       start_ready(StdioFixture.server("normal", server: StdioMrtrServer),
         protocol: :modern,
@@ -108,7 +107,9 @@ defmodule ConduitMcp.Client.StdioClientTest do
     assert {:ok, %ToolResult{content: [%{"text" => "hi"}]}} =
              Client.call_tool(name, "echo", %{"message" => "hi"})
 
-    assert {:error, %Error{kind: :input_handler}} = Client.call_tool(name, "approve")
+    assert {:ok, %ToolResult{content: [%{"text" => "approval: accept"}], is_error: false}} =
+             Client.call_tool(name, "approve")
+
     assert_no_leaks(name)
   end
 
