@@ -146,7 +146,7 @@ defmodule ConduitMcp.Server do
   client retries the same request with the answers. Return
   `{:input_required, input_requests, state}` from `handle_call_tool/3`,
   `handle_read_resource/2` or `handle_get_prompt/3` (or a DSL handler or
-  `ConduitMcp.Component.execute/2` behind them):
+  `c:ConduitMcp.Component.execute/2` behind them):
 
       def handle_call_tool(conn, "deploy", args) do
         case conn.assigns[:mcp_input] do

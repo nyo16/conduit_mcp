@@ -94,10 +94,12 @@ defmodule ConduitMcp.Client.Adapters.OpenAI do
 
   @type api :: :chat | :responses
   @type null_path :: [String.t() | :items]
+  @typedoc "Why a schema has no strict form: the schema path and the offending keyword."
+  @type strict_error :: {:unsupported, [String.t() | non_neg_integer()], String.t() | atom()}
   @type report :: %{
           null_paths: %{ToolSet.exposed_name() => [null_path()]},
-          fallbacks: [{ToolSet.exposed_name(), Strict.error()}],
-          excluded: [{ToolSet.exposed_name(), Strict.error()}]
+          fallbacks: [{ToolSet.exposed_name(), strict_error()}],
+          excluded: [{ToolSet.exposed_name(), strict_error()}]
         }
 
   @doc """
@@ -196,7 +198,7 @@ defmodule ConduitMcp.Client.Adapters.OpenAI do
       ...> })
       {:error, {:unsupported, ["properties", "v"], "oneOf"}}
   """
-  @spec strict_schema(term()) :: {:ok, map(), [null_path()]} | {:error, Strict.error()}
+  @spec strict_schema(term()) :: {:ok, map(), [null_path()]} | {:error, strict_error()}
   def strict_schema(schema), do: Strict.convert(schema)
 
   @doc """

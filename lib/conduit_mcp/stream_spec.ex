@@ -4,7 +4,7 @@ defmodule ConduitMcp.StreamSpec do
   of a single JSON body: the `{:stream, spec}` reply of
   `ConduitMcp.Handler.dispatch/3`.
 
-  `ConduitMcp.Handler.Modern` returns one of two kinds:
+  The modern handler returns one of two kinds:
 
     * `:response` — a modern `tools/call` whose `_meta` carries a
       `progressToken` or `io.modelcontextprotocol/logLevel`: the requests
@@ -58,7 +58,7 @@ defmodule ConduitMcp.StreamSpec do
       `ConduitMcp.Ctx` is stored in it).
     * `:run` — `:response` only: `(Plug.Conn.t() -> map())`, the work:
       returns the JSON-RPC response map. It must not raise;
-      `ConduitMcp.Handler.Modern` builds it around the same guard as every
+      the modern handler builds it around the same guard as every
       other request.
     * `:subscription` — `:listen` only: the honoured
       `ConduitMcp.Subscriptions.Filter`.

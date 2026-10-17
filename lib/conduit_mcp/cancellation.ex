@@ -343,7 +343,7 @@ defmodule ConduitMcp.Cancellation do
   For cancellations the server decides on — a modern client closing its
   response stream, a stream reaching `:max_stream_lifetime` — rather than a
   client's `notifications/cancelled`. The row is keyed to the request's
-  private token (assigned by `ConduitMcp.Handler.Pipeline.in_flight/3`), not
+  private token (assigned by the handler pipeline when it tracks the request), not
   to `{scope, id}`: two clients behind one address without a session or
   principal share a scope, and both number their requests from 1, so a
   `{scope, id}` row would be visible to — and cleared by — the other

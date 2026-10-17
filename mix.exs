@@ -1,7 +1,7 @@
 defmodule ConduitMcp.MixProject do
   use Mix.Project
 
-  @version "0.10.1"
+  @version "0.11.0"
   @source_url "https://github.com/nyo16/conduit_mcp"
 
   def project do
@@ -130,10 +130,12 @@ defmodule ConduitMcp.MixProject do
 
   defp description do
     """
-    Elixir implementation of the Model Context Protocol (MCP) specification.
-    Build MCP servers to expose tools, resources, and prompts to LLM applications
-    like Claude Desktop and VS Code extensions. Supports both Streamable HTTP
-    and SSE transports with configurable authentication and CORS.
+    Elixir implementation of the Model Context Protocol (MCP). Build dual-era MCP
+    servers that serve the modern 2026-07-28 protocol and the legacy 2025-11-25 /
+    2025-06-18 protocols side by side, exposing tools, resources, and prompts over
+    Streamable HTTP and SSE with authentication, rate limiting, and CORS. Includes a
+    governed MCP client (stdio and Streamable HTTP, multi-server hub, LLM adapters,
+    OAuth 2.1).
     """
   end
 
@@ -218,7 +220,19 @@ defmodule ConduitMcp.MixProject do
           ConduitMcp.DSL.SchemaBuilder,
           ConduitMcp.OptionalDeps,
           ConduitMcp.OptionalDependencyError,
-          ConduitMcp.Principal
+          ConduitMcp.Principal,
+          ConduitMcp.Reflect
+        ],
+        Supervision: [
+          ConduitMcp.EtsOwner,
+          ConduitMcp.Cancellation.Owner,
+          ConduitMcp.Cancellation.InFlightOwner,
+          ConduitMcp.Session.EtsStore.Owner,
+          ConduitMcp.Tasks.EtsStore.Owner,
+          ConduitMcp.Transport.SSE.Owner,
+          ConduitMcp.Transport.SSEStream.Owner,
+          ConduitMcp.Ext.Tasks.EtsStore.Owner,
+          ConduitMcp.OAuth.KeyProvider.JWKS.Owner
         ],
         "Endpoint Mode": [
           ConduitMcp.Endpoint,
@@ -232,6 +246,31 @@ defmodule ConduitMcp.MixProject do
           ConduitMcp.Capabilities,
           ConduitMcp.Errors,
           ConduitMcp.Cancellation
+        ],
+        "Modern era (2026-07-28)": [
+          ConduitMcp.Ctx,
+          ConduitMcp.Era,
+          ConduitMcp.Headers,
+          ConduitMcp.Discover,
+          ConduitMcp.Protocol.Modern,
+          ConduitMcp.Plugs.HeaderValidation,
+          ConduitMcp.MRTR,
+          ConduitMcp.MRTR.State,
+          ConduitMcp.Notifications,
+          ConduitMcp.Subscriptions,
+          ConduitMcp.Subscriptions.Filter,
+          ConduitMcp.CacheHints,
+          ConduitMcp.StreamSpec,
+          ConduitMcp.Progress,
+          ConduitMcp.Log,
+          ConduitMcp.Transport.SSEStream
+        ],
+        "Tasks extension (experimental)": [
+          ConduitMcp.Ext.Tasks,
+          ConduitMcp.Ext.Tasks.Store,
+          ConduitMcp.Ext.Tasks.EtsStore,
+          ConduitMcp.Ext.Tasks.Notifier,
+          ConduitMcp.Ext.Tasks.ListenNotifier
         ],
         Transport: [
           ConduitMcp.Transport.StreamableHTTP,
@@ -260,14 +299,87 @@ defmodule ConduitMcp.MixProject do
           ConduitMcp.Session.EtsStore,
           ConduitMcp.Session.Janitor
         ],
-        Tasks: [
+        "Tasks (legacy)": [
           ConduitMcp.Tasks,
           ConduitMcp.Tasks.Store,
           ConduitMcp.Tasks.EtsStore,
           ConduitMcp.Tasks.Janitor
         ],
-        Client: [
-          ConduitMcp.Client
+        "Client: Core": [
+          ConduitMcp.Client,
+          ConduitMcp.Client.Config,
+          ConduitMcp.Client.Connection,
+          ConduitMcp.Client.Request,
+          ConduitMcp.Client.Request.MRTR,
+          ConduitMcp.Client.Registry,
+          ConduitMcp.Client.Cache,
+          ConduitMcp.Client.Handler,
+          ConduitMcp.Client.Negotiation,
+          ConduitMcp.Client.Backoff,
+          ConduitMcp.Client.Secret,
+          ConduitMcp.Client.Error,
+          ConduitMcp.Client.Tool,
+          ConduitMcp.Client.ToolCall,
+          ConduitMcp.Client.ToolResult,
+          ConduitMcp.Client.Resource,
+          ConduitMcp.Client.Prompt,
+          ConduitMcp.Client.Task,
+          ConduitMcp.Client.DiscoverResult,
+          ConduitMcp.Client.ServerInfo
+        ],
+        "Client: Transports": [
+          ConduitMcp.Client.Transport,
+          ConduitMcp.Client.Transport.InProcess,
+          ConduitMcp.Client.Transport.Stdio,
+          ConduitMcp.Client.Transport.Stdio.Framer,
+          ConduitMcp.Client.Transport.StreamableHTTP,
+          ConduitMcp.Client.SSE,
+          ConduitMcp.Client.SSE.Event,
+          ConduitMcp.Client.URLPolicy
+        ],
+        "Client: Governance": [
+          ConduitMcp.Client.Pipeline,
+          ConduitMcp.Client.Policy,
+          ConduitMcp.Client.Policy.Decision,
+          ConduitMcp.Client.Policy.Paths,
+          ConduitMcp.Client.Hooks,
+          ConduitMcp.Client.Grants,
+          ConduitMcp.Client.ToolFilter,
+          ConduitMcp.Client.Fingerprint,
+          ConduitMcp.Client.SchemaValidator,
+          ConduitMcp.Client.SchemaValidator.JSV
+        ],
+        "Client: Hub": [
+          ConduitMcp.Client.Hub,
+          ConduitMcp.Client.Hub.Config,
+          ConduitMcp.Client.ToolSet,
+          ConduitMcp.Client.Naming
+        ],
+        "Client: Adapters": [
+          ConduitMcp.Client.Adapters,
+          ConduitMcp.Client.Adapters.Anthropic,
+          ConduitMcp.Client.Adapters.OpenAI,
+          ConduitMcp.Client.Adapters.Gemini
+        ],
+        "Client: OAuth": [
+          ConduitMcp.Client.OAuth,
+          ConduitMcp.Client.OAuth.Config,
+          ConduitMcp.Client.OAuth.TokenStore,
+          ConduitMcp.Client.OAuth.TokenStore.ETS,
+          ConduitMcp.Client.OAuth.Discovery,
+          ConduitMcp.Client.OAuth.Discovery.Fetch,
+          ConduitMcp.Client.OAuth.Registration,
+          ConduitMcp.Client.OAuth.CIMD,
+          ConduitMcp.Client.OAuth.ClientCredentials,
+          ConduitMcp.Client.OAuth.Loopback,
+          ConduitMcp.Client.OAuth.Pending,
+          ConduitMcp.Client.OAuth.Callback,
+          ConduitMcp.Client.OAuth.Challenge,
+          ConduitMcp.Client.OAuth.PKCE,
+          ConduitMcp.Client.OAuth.Resource,
+          ConduitMcp.Client.OAuth.Scopes,
+          ConduitMcp.Client.OAuth.Tokens,
+          ConduitMcp.Client.OAuth.Error
         ],
         Validation: [
           ConduitMcp.Validation,

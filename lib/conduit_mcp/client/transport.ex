@@ -198,9 +198,9 @@ defmodule ConduitMcp.Client.Transport do
               state()
 
   @doc """
-  Gives the transport the connection's OAuth session (a
-  `ConduitMcp.Client.OAuth.Session`, holding the OAuth options and what
-  discovery found) for a transport configured with `auth: {:oauth, ...}`.
+  Gives the transport the connection's OAuth session (an opaque term,
+  holding the OAuth options and what discovery found) for a transport
+  configured with `auth: {:oauth, ...}`.
   Called after every `c:init/2` and whenever the session changes; requests
   started afterwards read their bearer token through it.
   """

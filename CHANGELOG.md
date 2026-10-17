@@ -5,15 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.11.0] - 2026-10-17
 
-P1 hardening: everything the 2026-08-24 audit classified as broken today for a
-consumer. No public API removals.
+Three things ship together in 0.11.0:
+
+- **P1 hardening**: everything the 2026-08-24 audit classified as broken
+  today for a consumer.
+- **A dual-era server.** The same server modules now answer MCP
+  `2026-07-28` (stateless, per-request `_meta`: `server/discover`, multi
+  round-trip requests, `subscriptions/listen`, streamed responses, cache
+  hints, `Mcp-*` header validation, the tasks extension) alongside
+  `2025-11-25` and `2025-06-18`. The era is classified per request; legacy
+  clients see the protocol they always did, apart from the conformance
+  fixes listed below.
+- **An MCP client.** `ConduitMcp.Client` is now a supervised, dual-era MCP
+  client with stdio and Streamable HTTP transports, a multi-server
+  `ConduitMcp.Client.Hub`, policy/approval/hook governance, Anthropic,
+  OpenAI and Gemini adapters, and OAuth 2.1. The module name was taken from
+  the old payload builders, which moved (see Breaking changes).
 
 ### Breaking changes
 
-Twelve behaviour changes, because the old behaviour was unsafe or wrong. Each
-bullet names its one-line opt-out, or says why it has none.
+Twenty-two behaviour changes, because the old behaviour was unsafe, wrong,
+or in the way of the new protocol. Each bullet names its one-line opt-out,
+or says why it has none.
 
 - **CORS is off by default.** `:cors_origin` no longer defaults to `"*"`, and
   no `access-control-allow-*` header is emitted unless you set it. Previously
@@ -105,6 +120,66 @@ bullet names its one-line opt-out, or says why it has none.
   `System.get_env("API_KEY", "")` with the variable unset) authenticated any
   request that sent an empty header.
   No opt-out: configure a real secret, or omit the option and use `:verify`.
+- **`ConduitMcp.Client` is the new MCP client; its payload builders moved.**
+  The notification builders now live in `ConduitMcp.Notifications` with the
+  same names (`progress_notification/3`, `log_notification/3`,
+  `resource_updated_notification/1`, `*_list_changed_notification/0`). The
+  server-to-client request builders (`create_message_request/2`,
+  `elicit_request/2`, `list_roots_request/0`) are gone: in `2026-07-28`
+  these are MRTR input requests, not JSON-RPC requests, built with
+  `ConduitMcp.MRTR.elicit/2`, `sample/2` (deprecated) and `list_roots/0`
+  (deprecated). The old builders had no transport that could deliver them.
+  No opt-out: the module name is reused by the client; rename the
+  notification calls.
+- **`ConduitMcp.Errors.resource_not_found()` is removed.** One code cannot be
+  right for both eras: legacy resource-not-found is `-32002`, modern is
+  `-32602`. Return `ConduitMcp.Protocol.Legacy.resource_not_found()` from
+  `handle_read_resource/2`; `ConduitMcp.Protocol.Modern` rewrites it to
+  `-32602` for modern clients.
+  No opt-out: replace the call.
+- **Notifications and JSON-RPC responses POSTed to Streamable HTTP are
+  answered `202 Accepted`, not 204.** The Streamable HTTP spec requires 202,
+  and strict clients treat 204 as a failure. A POSTed client response no
+  longer gets an invalid-request error.
+  No opt-out: spec conformance.
+- **`GET /` with `Accept: text/event-stream` returns 405 with `Allow`
+  (Streamable HTTP).** Answering 200 with the info JSON told an SSE client
+  its stream had opened. Other GETs still get the info JSON.
+  No opt-out: spec conformance.
+- **Insufficient OAuth scope returns HTTP 403 with
+  `WWW-Authenticate: Bearer error="insufficient_scope", scope="…"`**
+  (`strategy: :oauth`), instead of a `-32000` error at 200. This is what
+  lets a client step up its authorization. The body is still the JSON-RPC
+  error, which now carries `data: {"error": "insufficient_scope", "scope": …}`
+  under every auth strategy.
+  No opt-out: non-OAuth strategies keep 200.
+- **The default CORS headers changed.** When `:cors_origin` is set,
+  `access-control-allow-headers` now includes `mcp-session-id`,
+  `mcp-protocol-version`, `mcp-method` and `mcp-name`,
+  `access-control-expose-headers: mcp-session-id, mcp-protocol-version` is
+  sent, and Streamable HTTP allows `DELETE`. Without these a browser client
+  could neither present nor read its session, nor send the modern headers.
+  `Mcp-Param-*` names depend on your tools: list them in `:cors_headers`.
+  Opt out: set `:cors_headers` / `:cors_methods`.
+- **A legacy request with an unsupported `MCP-Protocol-Version` header gets
+  400.** The 2025-11-25 transports spec requires it; the header used to be
+  ignored. A missing header is still allowed, and `initialize` is exempt.
+  No opt-out: fix the client's header.
+- **Legacy `tasks/get`, `tasks/result` and `tasks/cancel` on a missing or
+  foreign task answer `-32602`, not `-32002`.** 2025-11-25 tasks specifies
+  `-32602` for an invalid or nonexistent `taskId`; `-32002` means
+  resource-not-found.
+  No opt-out: spec conformance.
+- **DSL `complete` declarations are now served, and checked at compile
+  time.** A `complete` naming an argument its `prompt` or `resource` block
+  does not declare is a `CompileError`. The declarations used to compile
+  and do nothing (see Fixed), so a typo went unnoticed.
+  No opt-out: fix or delete the declaration.
+- **`image/1` is spec-conformant and raises on unknown data.** A URL becomes
+  a `resource_link` content item; base64 PNG, JPEG, GIF or WebP gets its
+  `mimeType`; anything else raises `ArgumentError` instead of producing an
+  image item with no `mimeType`, which the spec requires.
+  Opt out: `image(data, mime_type)` (new `image/2`).
 
 Smaller behaviour changes worth knowing about:
 
@@ -130,6 +205,20 @@ Smaller behaviour changes worth knowing about:
 - `ConduitMcp.Validation.validate_tool_params/3` and `validate_prompt_args/3`
   return string-keyed error maps on every path. The non-map-input path returned
   atom keys.
+- The legacy SSE keep-alive frame changed from `": keepalive\n\n"` to
+  `":\r\n"`, shared with the new response streams. Both are SSE comments
+  that clients discard.
+- `ConduitMcp.Supervisor` starts three more children:
+  `ConduitMcp.Subscriptions` (a `Registry`), `ConduitMcp.Client.Registry` (a
+  `Registry`; no process per client) and
+  `ConduitMcp.Transport.SSEStream.Owner`, plus the `ConduitMcp.Ext.Tasks`
+  table owner and janitor when the tasks extension is enabled.
+- Sessions store a `"principal"` key, so a modern request carrying a legacy
+  session id can be checked against the session's principal. Custom
+  `ConduitMcp.Session.Store`s store whatever map they are given.
+- `[:conduit_mcp, :request, :stop]` metadata gains `era`,
+  `protocol_version` and trace-context keys; the existing keys are
+  unchanged.
 
 ### Security
 
@@ -143,10 +232,13 @@ Smaller behaviour changes worth knowing about:
   consumers). Bandit's HTTP/2 stack depends on it, and Bandit's own
   requirement still admits hpax 1.0.0–1.0.3 (CVE-2026-58226, unauthenticated
   HPACK decoding DoS).
-- **Bandit is pinned to a security floor of 1.12.5** (`~> 1.12 and >= 1.12.5`).
+- **Bandit is pinned to a security floor of 1.13.1** (`~> 1.13 and >= 1.13.1`).
   Bandit is a non-optional dependency and is the server both transports run
-  on, so consumers inherited two HTTP/2 advisories against versions the old
-  `~> 1.9` admitted:
+  on. 1.12.5 carries EEF-CVE-2026-105659 (HIGH) — an HTTP/2 blocked-send
+  deadline that every `WINDOW_UPDATE` resets, so a trickling peer pins
+  stream processes indefinitely — and EEF-CVE-2026-105660 (MEDIUM) — an
+  unvalidated HTTP/1 request-target authority lets the client choose
+  `conn.host`/`conn.port`. Releases the old `~> 1.9` admitted also carry
   [CVE-2026-74836](https://osv.dev/vulnerability/EEF-CVE-2026-74836) (HIGH) —
   connection-window starvation pins an unbounded number of Plug processes
   indefinitely, and a client `RST_STREAM` cannot free them because the stream
@@ -154,6 +246,10 @@ Smaller behaviour changes worth knowing about:
   [CVE-2026-75484](https://osv.dev/vulnerability/EEF-CVE-2026-75484) (MEDIUM) —
   HTTP/2 header values containing CR, LF or NUL reach `conn.req_headers`
   unvalidated, which the HTTP/1 path already rejected.
+- **mint is floored at 1.11** (`optional: true`, so no new dependency for
+  consumers). It is the HTTP stack under the client's optional `:finch`;
+  1.10.x carries EEF-CVE-2026-91043 (HIGH, HPACK-indexed cookies bypass
+  `max_header_list_size`), EEF-CVE-2026-92103 and EEF-CVE-2026-94194.
 - **`exp` is now enforced.** `Joken.Config.default_claims(default_exp: 3600)`
   only affects token *generation*; Joken validates by folding over the claims
   the token actually carries, so a token with **no `exp` was accepted forever**.
@@ -409,6 +505,28 @@ Smaller behaviour changes worth knowing about:
 - Supervision documentation now matches the actual tree (`CLAUDE.md`,
   `ConduitMcp.Server`, `ConduitMcp.Session.EtsStore`), and
   `ConduitMcp.Application` appears in the generated docs.
+- **`mcp-protocol-version` echoes the negotiated version.** Every legacy
+  response carried a hardcoded `2025-11-25`, so a client that negotiated
+  `2025-06-18` was told another version. The header now comes from the
+  `initialize` result, then the session, then a supported request header.
+- **`ConduitMcp.Telemetry.events/0` lists every event the library emits.**
+  `request.cancelled`, the `cancellation.*` events, `session.cleanup` and
+  `tasks.cleanup` were emitted but missing from `events/0`, its docs, the
+  default log handlers and PromEx, so handlers attached from the list never
+  saw them. A test now pins the list to the events actually emitted.
+- **DSL `complete` declarations work.** Completions declared in `prompt` and
+  `resource` blocks were stored but never served: a later `complete`
+  overwrote an earlier one, a resource block's `complete` was filed under
+  prompts, and no `handle_complete/3` was generated, so `completion/complete`
+  always answered empty and `completions` was never advertised. They now
+  generate `handle_complete/3` (at most 100 values, with `total` and
+  `hasMore`; the block's `scope` applies).
+- **DSL and Component resources include `name`**, set to the URI. Every MCP
+  revision requires it, and strict clients rejected the listing.
+- **`param :x, :string, opts` (DSL) and `field` (Component) without a
+  description keep their options.** The options were dropped and the keyword
+  list sent as the `"description"`, which broke `tools/list`.
+- **`image/1` returns spec-conformant content** (see Breaking changes).
 
 ### Added
 
@@ -469,7 +587,202 @@ Smaller behaviour changes worth knowing about:
 - A per-parameter `type_coercion: boolean` validation option overrides the
   global `:type_coercion` setting for that parameter; an object parameter's
   fields inherit it.
-- **Test coverage** expanded to 1 067 tests (up from 745), 91.6% coverage.
+- **The `2026-07-28` (modern) protocol era, served next to the legacy one.**
+  `ConduitMcp.Era` classifies each request (per-request `_meta` ⇒ modern;
+  `initialize`, sessions ⇒ legacy) right after `Plug.Parsers`. Modern
+  requests never create, require or look up a session (a supplied session
+  id is still checked against its principal), echo their own version, and
+  get modern errors and statuses: `-32020` header mismatch, `-32021` missing
+  client capability (with `data.requiredCapabilities`), `-32022` unsupported
+  version, 400/404 HTTP statuses (`ConduitMcp.Protocol.Modern`). Results
+  carry `resultType` and `_meta["io.modelcontextprotocol/serverInfo"]`. Why:
+  `2026-07-28` is the new MCP revision, and clients of both eras exist.
+  Opt out: none needed; legacy clients are served as before.
+- **`server/discover`** (`ConduitMcp.Discover`) advertises
+  `supportedVersions`, capabilities (`ConduitMcp.Capabilities.build/2`) and
+  instructions. It stays authenticated.
+- **`:instructions` option** on `use ConduitMcp.Server`, `ConduitMcp.Endpoint`
+  and both transports, returned by `initialize` and `server/discover`. Unset
+  emits nothing.
+- **Header validation** (`ConduitMcp.Plugs.HeaderValidation`, codec
+  `ConduitMcp.Headers`). Modern requests must agree with `Mcp-Method`,
+  `Mcp-Name` (on `tools/call`, `resources/read`, `prompts/get`) and any
+  `Mcp-Param-*`; the version header must match `_meta`. It runs before
+  `:message_rate_limit`, so rejected requests aren't counted, and never
+  echoes a header value. The DSL/Component `header:` param option publishes
+  `x-mcp-header`; an invalid annotation (number type, inside array items,
+  duplicate name, not an HTTP token) is a `CompileError`, because conforming
+  clients drop such tools. Manual mode validates the `handle_list_tools`
+  schema at runtime and logs bad annotations.
+- **Multi round-trip requests (MRTR).** Tools, resources and prompts (DSL,
+  Component, manual) can return `{:input_required, input_requests, state}`,
+  with requests built by `ConduitMcp.MRTR.elicit/2` (and the deprecated
+  `sample/2`, `list_roots/0`). Each request is checked against the client's
+  capabilities (`ConduitMcp.MRTR.missing_capabilities/2`); `state` is sealed
+  into `requestState` by `ConduitMcp.MRTR.State` (AES-256-GCM, bound to the
+  version, method, salient params and principal, 5-minute expiry), and the
+  retry finds `%{state:, responses:}` in `conn.assigns[:mcp_input]`. A
+  tampered or foreign token gets a flat `-32602`. Requires
+  `config :conduit_mcp, :mrtr_keys, [{kid, key32}]`, validated at boot when
+  set; the first key seals and the rest still open, which is how rotation
+  works. A legacy-era request returning `{:input_required, …}` gets
+  `-32603`. Opt out: none needed; opt-in by return value.
+- **Streamed `tools/call` responses.** A modern request with
+  `_meta.progressToken` or `logLevel`, from a client accepting
+  `text/event-stream`, may receive `notifications/progress` /
+  `notifications/message` (`ConduitMcp.Progress.report/3`,
+  `ConduitMcp.Log.log/4`) before its result, with `:\r\n` keep-alives
+  (`ConduitMcp.Transport.SSEStream`, `ConduitMcp.StreamSpec`). Closing the
+  stream cancels the request: the server records it with
+  `ConduitMcp.Cancellation.cancel_request/2`, keyed to the request itself so
+  two anonymous clients behind one address cannot clear each other's
+  cancellation. Bounded by `:max_streams` (JSON fallback at the cap),
+  `:max_stream_lifetime` and `:stream_cancel_timeout`. Opt out: none needed;
+  without those `_meta` keys or the Accept type, responses stay JSON, and
+  both functions do nothing on legacy requests.
+- **`subscriptions/listen`** (`ConduitMcp.Subscriptions`,
+  `ConduitMcp.Subscriptions.Filter`). A modern client opens a stream with a
+  filter (`toolsListChanged`, `promptsListChanged`, `resourcesListChanged`,
+  `resourceSubscriptions`, `taskIds`), is acknowledged with the honoured
+  subset, and receives the matching notifications tagged with its
+  `subscriptionId`. Push them with `ConduitMcp.notify_tools_changed/0`,
+  `notify_prompts_changed/0`, `notify_resources_changed/0` and
+  `notify_resource_updated/1` (node-local; broadcast on your own PubSub for a
+  cluster). Resource URIs are authorized per URI and silently dropped when
+  unauthorized; the stream closes at token `exp` or
+  `:max_stream_lifetime`; `:max_listens_per_principal` (4, then 429) and
+  `:listen_idle_timeout` bound it; 503 at `:max_streams`, 406 without the
+  event-stream Accept. Modern capabilities advertise `listChanged: true` and
+  `resources.subscribe: true`. New
+  `Notifications.subscriptions_acknowledged_notification/1` and
+  `cancelled_notification/2`.
+- **Cache hints.** Cacheable modern results (the three lists, templates,
+  `resources/read`, `prompts/get`) carry `ttlMs` and `cacheScope`, never on
+  interim results. Global `config :conduit_mcp, cache_ttl_ms:, cache_scope:`
+  (validated at boot), per declaration with the DSL `cache ttl_ms:, scope:`
+  macro or the Component `cache:` option (`ConduitMcp.CacheHints`). A list
+  takes the minimum TTL and stays `private` if any item is private or
+  scoped; `scope` plus `cache_scope: :public` is a compile error. Opt out:
+  omit `cache`; the global defaults apply.
+- **Tasks extension (experimental).** `ConduitMcp.Ext.Tasks` implements
+  `io.modelcontextprotocol/tasks` for `2026-07-28`: a `tools/call` returning
+  `{:task, attrs}` gets `resultType: "task"` when the client declared the
+  extension (else `-32021`), served by `tasks/get`, `tasks/update` and
+  `tasks/cancel` (which require `Mcp-Name` = the task id). Tasks are
+  owner-scoped, ids are 32-byte bearer tokens, and the store is a behaviour
+  (`Ext.Tasks.Store`, default `Ext.Tasks.EtsStore`). Status changes go to
+  the owner's listen streams as `notifications/tasks`
+  (`Ext.Tasks.ListenNotifier`, replaceable via `Ext.Tasks.Notifier`). Opt
+  out: off by default; `config :conduit_mcp, :ext_tasks, true` enables it.
+  The legacy `ConduitMcp.Tasks` is frozen (legacy era only).
+- **`ConduitMcp.Handler.dispatch/3`** returns `{:reply, map} | {:stream,
+  StreamSpec.t()} | :noreply`, so manual-mode routers can serve modern
+  streams; `handle_request/3` keeps its contract and answers a stream-only
+  method with `-32601`. `HeaderValidation.invalidate/1` drops the cached
+  manual-mode tool schemas.
+- **`DELETE /` ends a session (Streamable HTTP, sessions on).** 200 on
+  success, 404 for an unknown id, 400 without one, 405 with sessions off.
+- **`image/2`** takes the data and an explicit MIME type.
+- **The MCP client: `ConduitMcp.Client`.** One supervised connection per
+  server (`Supervisor` + a `:gen_statem` connection) that probes
+  `server/discover` and falls back to `initialize` (`protocol: :auto`, or pin
+  `:modern`, `:legacy` or a version). Starting never blocks; requests made
+  before ready wait within their own timeout; a timed-out or abandoned
+  request is cancelled; nothing that may have executed is retried. Names may
+  be any term (`ConduitMcp.Client.Registry`, no atoms). API: tools,
+  resources, templates, prompts, completion, `ping`, `set_log_level`,
+  `subscribe`/`unsubscribe` (both eras, kept across reconnects),
+  `subscribe_notifications`, `notify_roots_changed`, and
+  `call_tool(…, task: :return | :await)` with `get_task`, `await_task` and
+  `cancel_task`. Errors are `%ConduitMcp.Client.Error{}` with a closed `kind`
+  set; a tool's `isError` is `{:ok, %ToolResult{is_error: true}}`. Options
+  are validated at `child_spec/1` (`ConduitMcp.Client.Config`). Why: Elixir
+  hosts had no way to call MCP servers. Opt out: none needed; the
+  application starts no client.
+- **Client cache.** Tool, prompt and resource lists are cached per
+  connection in a `:protected` table (`list_all_*`, `cached_tools/2`,
+  `tool/3`), honouring `ttlMs` (capped by `:max_cache_ttl`), refreshed on
+  `list_changed` (coalesced, at most once a second per list), with
+  pagination caps. Tool intake drops invalid names, malformed or duplicate
+  definitions and invalid `x-mcp-header` annotations with telemetry and a
+  warning instead of failing the listing. Opt out:
+  `list_all_tools(…, refresh: true)` or `max_cache_ttl`.
+- **`ConduitMcp.Client.Handler`**: sampling, elicitation and roots in both
+  eras (legacy server requests run in supervised tasks; modern MRTR inputs
+  run in the caller), with safety defaults: `maxTokens` clamp,
+  `sampling: [max_tool_iterations: 5]`, an input rate limit,
+  `includeContext` coercion, idle-sampling denial, never-fetched https-only
+  elicitation URLs, a form-schema subset check, `file://` roots only. A
+  client with no handler declares no capabilities.
+- **Client transports.** `Transport.Stdio` runs a local server with no shell
+  (`:spawn_executable`, literal arguments), an allowlisted environment, a
+  junk-output budget, an 8 MiB line cap, and EOF → TERM → KILL shutdown that
+  reaps the server even if the connection is killed.
+  `Transport.StreamableHTTP` (needs `:finch`) talks to remote servers in
+  both eras with byte caps, no decompression, separate total and idle
+  deadlines, no cross-origin redirects, `verify_peer` TLS, session renewal,
+  the legacy GET stream and modern listen. `Transport.InProcess` drives a
+  server module directly, for tests and development. The `Transport`
+  behaviour gains optional `validate_options/1`, so a bad option raises at
+  `child_spec/1`. `ConduitMcp.Client.URLPolicy` blocks private, loopback
+  and link-local addresses for server-originated URLs. Secrets travel as
+  `ConduitMcp.Client.Secret`, which never inspects, logs or encodes its
+  value.
+- **Governed tool calls.** Once `:policy`, `:hooks`, `:tools` or `:validate`
+  is set, `call_tool/4` runs `ConduitMcp.Client.Pipeline` in the caller:
+  selection (`ToolFilter`), pre-hooks, schema validation, policy
+  (deny > pin > ask > allow > default; loose deny/ask, exact allow, on `{server, tool}`;
+  untrusted annotations ignored; `Policy.Paths`; tool fingerprints pin
+  approved definitions), approval via `:on_ask` with per-principal,
+  per-fingerprint 24 h grants (`Client.Grants`), post/failure hooks, and
+  optional LLM shaping (provenance, size cap, invisible-character stripping,
+  MIME allowlist). Hooks fail closed: a raising, timed-out or
+  contract-breaking pre-hook sends nothing, and a failing post-hook withholds
+  the result. Optional JSON Schema validation through `:jsv`
+  (`Client.SchemaValidator.JSV`), with size, depth and remote-`$ref` bounds
+  checked first. Opt out: leave them unset; post and failure hooks take
+  `on_error: :ignore`.
+- **`ConduitMcp.Client.Hub`**: one supervised client per server, tools listed
+  as `server__tool` (`Client.Naming`, `Client.ToolSet`; colliding names
+  exclude every collider) from each client's cache, every call routed
+  through the governed pipeline. It refuses to start without `:policy`. A
+  crash-looping server is restarted with backoff and cannot take the others
+  down; servers can be added and removed at runtime. `taint:` plus
+  `Policy.tainted/1` let rules react to other servers' output in the turn.
+  Servers sharing an authorization server share one in-memory token store.
+  Opt out: use a single `ConduitMcp.Client`.
+- **LLM adapters**: `Client.Adapters.Anthropic`, `Client.Adapters.OpenAI`
+  (Chat and Responses; explicit `strict`, with per-tool fallback and null
+  stripping) and `Client.Adapters.Gemini` (experimental) convert tool lists,
+  parse tool calls and build tool results. `Adapters.execute_tool_calls/4`
+  runs a model's calls concurrently through the pipeline and answers them in
+  order; an approver's halting deny returns `{:halt, results}`.
+  `ToolCall.call_id` carries the provider's id.
+- **Client OAuth 2.1** (`ConduitMcp.Client.OAuth`, needs `:finch`):
+  protected-resource and authorization-server discovery, client ID metadata
+  documents, pre-registration and the deprecated dynamic registration,
+  authorization code with PKCE and RFC 9207 `iss` checks (host-managed
+  `Pending`), refresh with single-flight rotation, 403 step-up with a scope
+  union, `client_credentials` (secret or `private_key_jwt` with `:jose`), a
+  one-shot `Loopback` callback server, and a `TokenStore` behaviour (default
+  `:protected` `TokenStore.ETS`). Every OAuth request is pinned to an address
+  `URLPolicy` vetted. Opt out: leave `auth:` unset.
+- **Telemetry**: `[:conduit_mcp, :mrtr, :input_required]`,
+  `[:conduit_mcp, :subscription, :start | :stop]`, and the client's
+  `[:conduit_mcp, :client, …]` events (requests, connection lifecycle, tool
+  intake, governance, hub, adapters, OAuth, input requests, transport
+  mailbox), all listed in `ConduitMcp.Telemetry.events/0` with their
+  metadata keys. Client metadata comes from an allowlist and never carries
+  arguments, results or secrets; client-spawned processes set `mcp_*`
+  Logger metadata. `ConduitMcp.PromEx` gains MRTR, subscription, client and
+  OAuth metric groups.
+- **Optional dependencies** `:finch` (`~> 0.21`, the client's HTTP transport
+  and OAuth) and `:jsv` (`~> 0.26`, client schema validation), guarded by
+  `ConduitMcp.OptionalDeps.finch!/0`, `jsv!/0`, `oauth_client!/0` and
+  `client_assertion!/0` at init.
+- **Test coverage** expanded to 2 299 tests (2 201 tests, 61 doctests, 37
+  properties; up from 745 in 0.10.1), including real-socket `:integration`
+  and child-process `:stdio` tests that run in the default suite.
 - **Dependencies updated** (lock only; no requirement changed): hammer 7.5.0,
   joken 2.7.0, prom_ex 1.12.0, req 0.7.4, credo 1.7.19, dialyxir 1.4.8,
   ex_doc 0.40.4, sobelow 0.15.0, stream_data 1.4.0, benchee 1.5.1, plus
@@ -1093,7 +1406,8 @@ None - This release is fully backward compatible.
 - Basic authentication
 - Phoenix integration example
 
-[Unreleased]: https://github.com/nyo16/conduit_mcp/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/nyo16/conduit_mcp/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/nyo16/conduit_mcp/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/nyo16/conduit_mcp/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/nyo16/conduit_mcp/compare/v0.9.7...v0.10.0
 [0.9.7]: https://github.com/nyo16/conduit_mcp/compare/v0.9.6...v0.9.7
