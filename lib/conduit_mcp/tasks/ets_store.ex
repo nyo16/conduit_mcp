@@ -3,7 +3,7 @@ defmodule ConduitMcp.Tasks.EtsStore do
   ETS-backed task store. Default implementation of `ConduitMcp.Tasks.Store`.
 
   All state lives in the named ETS table `:conduit_mcp_tasks`. The table
-  is owned by a long-lived `Agent` (`#{inspect(__MODULE__)}.Owner`) started
+  is owned by a long-lived `ConduitMcp.EtsOwner` process (`#{inspect(__MODULE__)}.Owner`) started
   from `ConduitMcp.Application` so the table outlives short-lived request
   processes — without this, a Bandit request handler that creates the
   table dies with it, and the next request sees an empty table. The
@@ -143,25 +143,110 @@ defmodule ConduitMcp.Tasks.EtsStore do
   end
 
   @doc """
-  Lists all tasks, optionally filtered by `:status`.
+  Lists tasks matching `opts`, evaluated as a single `:ets.select/3` match
+  spec so filtering happens in the C layer and only matching rows are copied
+  into the caller's heap.
+
+  Options:
+
+    * `:owner` — the caller's principal restricts to rows that principal may
+      see: its own plus unowned ones, or only its own under
+      `:tasks_require_owner`. `nil` = no principal: sees only unowned tasks;
+      nothing under `:tasks_require_owner` (see `ConduitMcp.Tasks.get/2`).
+      Pass `:any` (the default) for the unscoped listing.
+    * `:status` — restrict to one task status.
+    * `:limit` — maximum number of rows to return.
   """
   @impl true
   def list(opts \\ []) do
     ensure_table()
-    status_filter = Keyword.get(opts, :status)
 
-    tasks = :ets.foldl(fn {_id, task}, acc -> [task | acc] end, [], @table)
+    spec = [{{:_, :"$1"}, guards(opts), [:"$1"]}]
 
-    if status_filter do
-      Enum.filter(tasks, fn task -> task["status"] == to_string(status_filter) end)
-    else
-      tasks
+    case Keyword.get(opts, :limit) do
+      nil ->
+        :ets.select(@table, spec)
+
+      # This module's own convention for "unbounded", used by `:tasks_max_rows`
+      # in `at_capacity?/0`. Without this clause it would fall into the
+      # non-positive branch and return [] for a caller asking for everything.
+      :infinity ->
+        :ets.select(@table, spec)
+
+      limit when is_integer(limit) and limit > 0 ->
+        case :ets.select(@table, spec, limit) do
+          {rows, _continuation} -> rows
+          :"$end_of_table" -> []
+        end
+
+      _non_positive ->
+        []
     end
   end
 
+  defp guards(opts) do
+    Enum.reject(
+      [status_guard(Keyword.get(opts, :status)), owner_guard(Keyword.get(opts, :owner, :any))],
+      &is_nil/1
+    )
+  end
+
+  defp status_guard(nil), do: nil
+
+  defp status_guard(status) do
+    # Every `map_get` sits behind an `is_map_key` `andalso` so a row missing
+    # the key fails the guard cleanly rather than raising inside the spec.
+    # `to_string/1` makes the operand a binary, which a match spec treats as a
+    # literal, so it needs no `{:const, _}` wrapper (compare `owner_guard/1`).
+    {:andalso, {:is_map_key, "status", :"$1"},
+     {:==, {:map_get, "status", :"$1"}, to_string(status)}}
+  end
+
+  # `:any` is the unscoped listing used by `ConduitMcp.Tasks.list/1`.
+  defp owner_guard(:any), do: nil
+
+  # No principal: only rows nobody owns. Previously a `nil` owner matched
+  # *everything*, which made authorization default-open.
+  defp owner_guard(nil) do
+    if require_owner?(), do: {:==, true, false}, else: unowned_guard()
+  end
+
+  defp owner_guard(owner) do
+    # `{:const, _}`: an owner is an arbitrary term, and a bare tuple (or a map
+    # or list containing one) is parsed as a match-spec expression — `{:tenant,
+    # 7}` would make `:ets.select/2` raise "not a valid match specification" —
+    # and a bare `:"$1"` would name the row itself.
+    #
+    # `:"=:="`, not `:==`: `ConduitMcp.Tasks.list/2` re-checks rows with a
+    # pinned match, so under `==` owner `1` would have `1.0`'s rows counted
+    # against `:limit` and then dropped by the facade.
+    owned =
+      {:andalso, {:is_map_key, "owner", :"$1"},
+       {:"=:=", {:map_get, "owner", :"$1"}, {:const, owner}}}
+
+    if require_owner?(), do: owned, else: {:orelse, unowned_guard(), owned}
+  end
+
+  # The only operand is the literal `nil`, an atom, so no `{:const, _}` is needed.
+  defp unowned_guard do
+    {:orelse, {:not, {:is_map_key, "owner", :"$1"}},
+     {:andalso, {:is_map_key, "owner", :"$1"}, {:==, {:map_get, "owner", :"$1"}, nil}}}
+  end
+
+  defp require_owner?, do: Application.get_env(:conduit_mcp, :tasks_require_owner, false)
+
+  @doc false
+  # One source of truth for the table's options. Every sibling owner routes
+  # both its `ensure_table/0` and its `Owner` through a function like this;
+  # tasks kept two literal copies, so a future edit to one (say adding
+  # `write_concurrency: :auto`) would give the table different semantics
+  # depending on whether the Owner or the fallback created it first.
+  @spec table_opts() :: [atom() | tuple()]
+  def table_opts, do: [:named_table, :public, :set, read_concurrency: true]
+
   defp ensure_table do
     if :ets.whereis(@table) == :undefined do
-      :ets.new(@table, [:named_table, :public, :set, read_concurrency: true])
+      :ets.new(@table, table_opts())
     end
 
     :ok
@@ -182,21 +267,17 @@ defmodule ConduitMcp.Tasks.EtsStore do
     started in that case.
     """
 
-    use Agent
+    # Not a GenServer itself: the process is a `ConduitMcp.EtsOwner`
+    # registered under this module's name. This module is the child spec.
+    def child_spec(opts) do
+      %{id: __MODULE__, start: {__MODULE__, :start_link, [opts]}}
+    end
 
     def start_link(_opts) do
-      Agent.start_link(
-        fn ->
-          :ets.new(:conduit_mcp_tasks, [
-            :named_table,
-            :public,
-            :set,
-            read_concurrency: true
-          ])
-
-          :ok
-        end,
-        name: __MODULE__
+      ConduitMcp.EtsOwner.start_link(
+        __MODULE__,
+        :conduit_mcp_tasks,
+        ConduitMcp.Tasks.EtsStore.table_opts()
       )
     end
   end

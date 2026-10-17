@@ -76,11 +76,13 @@ defmodule ConduitMcp.Tasks.Store do
   the top level in its `to_map`/read path, e.g. add an `owner` column and
   surface it as `"owner"`.
 
-  Scoping is **fully opt-in and back-compatible**: a `nil` caller principal
-  (unauthenticated, or the 2-arg `ConduitMcp.Handler.handle_request/2` path) and
-  an unowned task (`"owner"` absent/`nil`) are always accessible. Scoping only
-  ever denies when the caller has a principal *and* the task is stamped with a
-  different one. Apps that never stamp an owner see no behaviour change.
+  Scoping is **opt-in per task**: it only bites once a task is created with an
+  owner. But it is **not** default-open. The matrix is documented on
+  `ConduitMcp.Tasks.get/2`; the short version is that a caller with no
+  principal sees only unowned tasks, and
+  `config :conduit_mcp, :tasks_require_owner, true` removes even those.
+  Apps that never stamp an owner are unaffected; a task stamped with an owner
+  is never visible to an unauthenticated caller.
 
   ## Configuration
 
@@ -136,7 +138,29 @@ defmodule ConduitMcp.Tasks.Store do
   @callback delete(task_id) :: :ok
 
   @doc """
-  Lists tasks, optionally filtered by `:status`.
+  Lists tasks matching `opts`.
+
+  Recognised options:
+
+    * `:status` — restrict to one task status (a string or atom).
+    * `:limit` — maximum number of rows to return.
+    * `:owner` — the caller's principal, or `:any` for an unscoped listing.
+      `nil` = no principal: sees only unowned tasks; nothing under
+      `:tasks_require_owner` (see `ConduitMcp.Tasks.get/2`).
+
+  **`:owner` is an authorization filter, not a convenience.** Expressing it as
+  a query predicate is what keeps `tasks/list` from copying every row into the
+  caller's heap before deciding they may not see it. Compare owners with exact
+  equality (`===`), as `ConduitMcp.Tasks` does, so `1` and `1.0` are distinct
+  principals.
+
+  `ConduitMcp.Tasks.list/2` re-checks the returned rows and re-applies
+  `:limit`, so a store that ignores `:owner` cannot leak another principal's
+  tasks. **A store that ignores `:owner` must also ignore `:limit`**: honouring
+  `:limit` alone returns the first N rows of *any* owner, and the owner
+  re-check then leaves the caller with fewer of their own rows than exist, or
+  none. Even when it ignores both, the store copies every row on each call,
+  which on a large table is the DoS this contract exists to prevent.
   """
   @callback list(opts :: keyword()) :: [task]
 

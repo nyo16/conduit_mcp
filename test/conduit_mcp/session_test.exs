@@ -99,4 +99,78 @@ defmodule ConduitMcp.SessionTest do
       assert metadata["extra"] == "data"
     end
   end
+
+  describe "supervised table ownership" do
+    test "the table is owned by the supervised Owner, not by a request process" do
+      assert is_pid(Process.whereis(EtsStore.Owner))
+      assert :ets.info(:conduit_mcp_sessions, :owner) == Process.whereis(EtsStore.Owner)
+    end
+
+    test "a session survives the exit of the process that created it" do
+      # This is the regression: before the Owner existed, the table belonged to
+      # whichever Bandit request process touched it first. When that request
+      # finished, the table vanished and every session created through it was
+      # lost — Session.get/2 returned {:error, :not_found} for an id the client
+      # had just been handed.
+      parent = self()
+
+      creator =
+        spawn(fn ->
+          :ok = EtsStore.create("survivor", %{"protocol_version" => "2025-11-25"})
+          send(parent, :created)
+
+          receive do
+            :exit -> :ok
+          end
+        end)
+
+      assert_receive :created
+      ref = Process.monitor(creator)
+      send(creator, :exit)
+      assert_receive {:DOWN, ^ref, :process, ^creator, _}
+
+      assert :ets.whereis(:conduit_mcp_sessions) != :undefined
+      assert {:ok, metadata} = EtsStore.get("survivor")
+      assert metadata["protocol_version"] == "2025-11-25"
+    end
+  end
+
+  describe "row cap" do
+    setup do
+      previous = Application.get_env(:conduit_mcp, :sessions_max_rows)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:conduit_mcp, :sessions_max_rows)
+          value -> Application.put_env(:conduit_mcp, :sessions_max_rows, value)
+        end
+      end)
+
+      :ok
+    end
+
+    test "create/2 refuses to grow the table past the cap" do
+      Application.put_env(:conduit_mcp, :sessions_max_rows, 2)
+
+      assert :ok = EtsStore.create("cap-1", %{})
+      assert :ok = EtsStore.create("cap-2", %{})
+      assert {:error, :session_limit_reached} = EtsStore.create("cap-3", %{})
+
+      assert :ets.info(:conduit_mcp_sessions, :size) == 2
+      assert {:error, :not_found} = EtsStore.get("cap-3")
+    end
+
+    test ":infinity disables the cap" do
+      Application.put_env(:conduit_mcp, :sessions_max_rows, :infinity)
+
+      for i <- 1..5, do: assert(:ok = EtsStore.create("uncapped-#{i}", %{}))
+      assert :ets.info(:conduit_mcp_sessions, :size) == 5
+    end
+
+    test "the facade propagates the cap error" do
+      Application.put_env(:conduit_mcp, :sessions_max_rows, 0)
+
+      assert {:error, :session_limit_reached} = Session.create(Session.generate_id(), %{})
+    end
+  end
 end

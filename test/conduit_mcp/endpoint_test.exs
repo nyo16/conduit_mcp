@@ -181,15 +181,18 @@ defmodule ConduitMcp.EndpointTest do
     end
 
     test "returns error for unknown tool", %{conn: conn} do
-      assert {:error, %{"code" => -32601, "message" => msg}} =
+      assert {:error, %{"code" => code, "message" => msg}} =
                FullEndpoint.handle_call_tool(conn, "nonexistent", %{})
 
-      assert msg =~ "Tool not found"
+      assert code == ConduitMcp.Errors.invalid_params()
+      assert msg == "Unknown tool: nonexistent"
     end
 
     test "empty endpoint returns error for any tool", %{conn: conn} do
-      assert {:error, %{"code" => -32601}} =
+      assert {:error, %{"code" => code, "message" => "Unknown tool: anything"}} =
                EmptyEndpoint.handle_call_tool(conn, "anything", %{})
+
+      assert code == ConduitMcp.Errors.invalid_params()
     end
   end
 
@@ -287,10 +290,11 @@ defmodule ConduitMcp.EndpointTest do
     end
 
     test "returns error for unknown prompt", %{conn: conn} do
-      assert {:error, %{"code" => -32601, "message" => msg}} =
+      assert {:error, %{"code" => code, "message" => msg}} =
                FullEndpoint.handle_get_prompt(conn, "nonexistent", %{})
 
-      assert msg =~ "Prompt not found"
+      assert code == ConduitMcp.Errors.invalid_params()
+      assert msg == "Unknown prompt: nonexistent"
     end
   end
 
@@ -582,6 +586,62 @@ defmodule ConduitMcp.EndpointTest do
       end
     end
 
+    test "raises for duplicate prompt names" do
+      assert_raise CompileError, ~r/duplicate prompt name/, fn ->
+        defmodule DuplicatePromptEndpoint do
+          use ConduitMcp.Endpoint, name: "bad", version: "1"
+
+          component(CodeReviewPrompt)
+          component(CodeReviewPrompt)
+        end
+      end
+    end
+
+    # Differently named components, so only the URI collides.
+    defmodule OtherReadmeResource do
+      use ConduitMcp.Component,
+        type: :resource,
+        uri: "static://readme",
+        description: "A second readme",
+        scope: "readme:read"
+
+      @impl true
+      def execute(_params, _conn), do: {:ok, %{"contents" => []}}
+    end
+
+    defmodule OtherUserResource do
+      use ConduitMcp.Component,
+        type: :resource,
+        uri: "user://{id}",
+        description: "A second user resource",
+        scope: "user:read"
+
+      @impl true
+      def execute(_params, _conn), do: {:ok, %{"contents" => []}}
+    end
+
+    test "raises for a static resource URI declared by two components" do
+      assert_raise CompileError, ~r/duplicate resource URI "static:\/\/readme"/, fn ->
+        defmodule DuplicateStaticUriEndpoint do
+          use ConduitMcp.Endpoint, name: "bad", version: "1"
+
+          component(ReadmeResource)
+          component(OtherReadmeResource)
+        end
+      end
+    end
+
+    test "raises for a resource template declared by two components" do
+      assert_raise CompileError, ~r/duplicate resource URI "user:\/\/\{id\}"/, fn ->
+        defmodule DuplicateTemplateEndpoint do
+          use ConduitMcp.Endpoint, name: "bad", version: "1"
+
+          component(UserResource)
+          component(OtherUserResource)
+        end
+      end
+    end
+
     test "raises for invalid component module" do
       assert_raise CompileError, ~r/not a valid ConduitMcp.Component/, fn ->
         defmodule BadComponentEndpoint do
@@ -589,6 +649,39 @@ defmodule ConduitMcp.EndpointTest do
 
           component(String)
         end
+      end
+    end
+  end
+
+  describe "reflected URIs in Endpoint mode" do
+    # RC13 routed every other "Resource not found" through ConduitMcp.Reflect
+    # (dsl.ex, server.ex, endpoint.ex's no-resources catch-all) but missed the
+    # two clauses `generate_resource_clause/1` emits — and those are the
+    # reachable ones whenever an endpoint declares any resource at all. A URI
+    # up to the transports' 1 MB parser cap was echoed back verbatim, control
+    # characters and all.
+    defmodule StaticOnlyEndpoint do
+      use ConduitMcp.Endpoint, name: "static", version: "1"
+
+      component(ReadmeResource)
+    end
+
+    defmodule TemplatedEndpoint do
+      use ConduitMcp.Endpoint, name: "templated", version: "1"
+
+      component(UserResource)
+    end
+
+    test "an unknown URI is clamped and stripped on both generated clauses" do
+      hostile = "zz://\x00\x01evil\u202E" <> String.duplicate("z", 5_000)
+
+      for mod <- [StaticOnlyEndpoint, TemplatedEndpoint] do
+        assert {:error, error} = mod.handle_read_resource(%Plug.Conn{}, hostile)
+
+        assert error["code"] == ConduitMcp.Errors.resource_not_found()
+        assert String.length(error["message"]) <= 260, "#{inspect(mod)} did not clamp"
+        refute error["message"] =~ "\x00", "#{inspect(mod)} reflected a NUL"
+        refute error["message"] =~ "\u202E", "#{inspect(mod)} reflected a bidi override"
       end
     end
   end

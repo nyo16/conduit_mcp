@@ -1,7 +1,7 @@
 Code.require_file("bench/bench_helper.exs")
 
-alias ConduitMcp.Handler
 alias Bench.Fixtures
+alias ConduitMcp.Handler
 
 conn = Fixtures.fake_conn()
 
@@ -120,3 +120,58 @@ Benchee.run(
     {Benchee.Formatters.HTML, file: "bench/output/handler_telemetry.html"}
   ]
 )
+
+# --- Section 4: Concurrent dispatch ---
+#
+# Every request with an id writes the in-flight table on entry and exit and
+# checks the cancellation table on exit. A single-process run cannot show
+# contention on those shared tables; this one runs the same 16 000 requests
+# from 1 process and from 16 processes at once, each a distinct client. A
+# serialized table shows up as the 16-process job running no faster than the
+# 1-process one. Debug logging is raised to :warning for the section: every
+# request logs "Handling method" at :debug, and 16 processes writing to the
+# console would measure the logger instead.
+
+IO.puts("\n--- Concurrent Dispatch (1 vs 16 processes) ---\n")
+
+total_requests = 16_000
+
+concurrent = fn request, processes ->
+  per_process = div(total_requests, processes)
+
+  fn ->
+    1..processes
+    |> Enum.map(fn p ->
+      Task.async(fn ->
+        client = %{conn | remote_ip: {10, 0, 0, p}}
+
+        for i <- 1..per_process do
+          Handler.handle_request(%{request | "id" => i}, Bench.DSLServer, client)
+        end
+      end)
+    end)
+    |> Task.await_many(:infinity)
+  end
+end
+
+ping = Fixtures.ping_request()
+echo = Fixtures.tool_call_request("echo", Fixtures.small_params())
+log_level = Logger.level()
+Logger.configure(level: :warning)
+
+Benchee.run(
+  %{
+    "ping x#{total_requests}, 1 process" => concurrent.(ping, 1),
+    "ping x#{total_requests}, 16 processes" => concurrent.(ping, 16),
+    "tools/call echo x#{total_requests}, 1 process" => concurrent.(echo, 1),
+    "tools/call echo x#{total_requests}, 16 processes" => concurrent.(echo, 16)
+  },
+  warmup: 2,
+  time: 5,
+  formatters: [
+    Benchee.Formatters.Console,
+    {Benchee.Formatters.HTML, file: "bench/output/handler_concurrent.html"}
+  ]
+)
+
+Logger.configure(level: log_level)

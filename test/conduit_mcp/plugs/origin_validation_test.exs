@@ -12,13 +12,72 @@ defmodule ConduitMcp.Plugs.OriginValidationTest do
   end
 
   describe "origin validation" do
-    test "passes when no origin restriction configured (nil)" do
+    test "fails closed when no origin restriction is configured (nil)" do
+      # A startup warning does not stop a request. Unset means "no browser
+      # origin is trusted"; `allowed_origins: "*"` is the explicit opt-out.
       conn =
         conn(:post, "/")
         |> put_req_header("origin", "https://any.example.com")
         |> call_with_origins(nil)
 
-      refute conn.halted
+      assert conn.halted
+      assert conn.status == 403
+      assert JSON.decode!(conn.resp_body) == %{"error" => "Origin not allowed"}
+    end
+
+    test "an unset allowlist still passes requests with no Origin header" do
+      # Native MCP clients aren't browsers and send no Origin; rejecting them
+      # would break every legitimate client without adding protection.
+      refute conn(:post, "/") |> call_with_origins(nil) |> Map.get(:halted)
+    end
+
+    test "accepts a bare string, as documented" do
+      refute conn(:post, "/")
+             |> put_req_header("origin", "https://app.example.com")
+             |> call_with_origins("https://app.example.com")
+             |> Map.get(:halted)
+
+      blocked =
+        conn(:post, "/")
+        |> put_req_header("origin", "https://evil.example.com")
+        |> call_with_origins("https://app.example.com")
+
+      assert blocked.halted
+      assert blocked.status == 403
+    end
+
+    test "accepts a Regex, as documented" do
+      pattern = ~r{^https://[a-z0-9-]+\.example\.com$}
+
+      refute conn(:post, "/")
+             |> put_req_header("origin", "https://tenant-7.example.com")
+             |> call_with_origins(pattern)
+             |> Map.get(:halted)
+
+      blocked =
+        conn(:post, "/")
+        |> put_req_header("origin", "https://example.com.evil.test")
+        |> call_with_origins(pattern)
+
+      assert blocked.halted
+      assert blocked.status == 403
+    end
+
+    test "fails closed on an unsupported allowlist value" do
+      blocked =
+        conn(:post, "/")
+        |> put_req_header("origin", "https://app.example.com")
+        |> call_with_origins(%{not: "supported"})
+
+      assert blocked.halted
+      assert blocked.status == 403
+    end
+
+    test "OPTIONS preflight always passes" do
+      refute conn(:options, "/")
+             |> put_req_header("origin", "https://evil.example.com")
+             |> call_with_origins(nil)
+             |> Map.get(:halted)
     end
 
     test "passes when origin restriction is wildcard" do

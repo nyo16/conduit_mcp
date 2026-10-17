@@ -64,7 +64,10 @@ defmodule ConduitMcp.TestServer do
   end
 
   def handle_call_tool(_conn, _name, _params) do
-    {:error, %{"code" => -32601, "message" => "Tool not found"}}
+    # Matches the library's manual-mode default (ConduitMcp.Errors.invalid_params/0).
+    # This fixture backs handler_test, security_test and both transport tests, so
+    # a stale code here is what every request-level miss in the suite observes.
+    {:error, %{"code" => ConduitMcp.Errors.invalid_params(), "message" => "Tool not found"}}
   end
 
   @impl true
@@ -84,7 +87,8 @@ defmodule ConduitMcp.TestServer do
   end
 
   def handle_read_resource(_conn, _uri) do
-    {:error, %{"code" => -32601, "message" => "Resource not found"}}
+    {:error,
+     %{"code" => ConduitMcp.Errors.resource_not_found(), "message" => "Resource not found"}}
   end
 
   @impl true
@@ -109,6 +113,6 @@ defmodule ConduitMcp.TestServer do
   end
 
   def handle_get_prompt(_conn, _name, _args) do
-    {:error, %{"code" => -32601, "message" => "Prompt not found"}}
+    {:error, %{"code" => ConduitMcp.Errors.invalid_params(), "message" => "Prompt not found"}}
   end
 end

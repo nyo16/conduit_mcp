@@ -10,7 +10,8 @@ if Code.ensure_loaded?(Joken) do
 
     - JWT signature verification via pluggable key providers
     - Issuer and audience validation
-    - Token expiration checking
+    - Mandatory `exp` (a token without one is rejected, not accepted forever)
+      and `nbf` enforcement when present
     - Scope extraction and enforcement
     - WWW-Authenticate headers per RFC 9728
     - Protected Resource Metadata endpoint support
@@ -40,10 +41,59 @@ if Code.ensure_loaded?(Joken) do
               keys: [test_key_map]}
           ]}
 
-    ## Token Claims
+    ## Token Claims and the principal
 
-    After successful validation, the token claims are stored in `conn.assigns[:oauth_claims]`
-    and the scopes in `conn.assigns[:oauth_scopes]`.
+    After successful validation the token claims are stored in
+    `conn.assigns[:oauth_claims]` (or `:assign_as`) and the scopes in
+    `conn.assigns[:oauth_scopes]`.
+
+    The canonical `ConduitMcp.Principal` is assigned to
+    `conn.assigns[:mcp_principal]`, with `:id` built from the first claim in
+    `:subject_claims` (default `["sub", "client_id"]`) that holds a non-empty
+    string or an integer, prefixed by that claim's name: `"sub:user-123"`,
+    `"client_id:svc-42"`. The prefix keeps a client-chosen `client_id` from
+    aliasing a user's `sub` (see "Id formats" in `ConduitMcp.Principal`).
+    Task ownership and per-user rate limiting key on that scalar — never on
+    the claims map, which changes every request (`exp`, `iat`, `jti`).
+
+    A verified token carrying **none** of those claims is **rejected** with
+    401. `sub` is optional in a JWT and absent from many client-credentials
+    access tokens, and assigning `id: nil` would produce an authenticated
+    principal that every consumer reads as anonymous: tasks created by that
+    caller would be unowned (visible to every caller unless
+    `:tasks_require_owner` is set), and rate limiting would fall back to the
+    shared IP bucket. Point `:subject_claims` at whatever your
+    authorization server does emit rather than accepting an unidentifiable
+    bearer.
+
+    ## Telemetry
+
+    Every verification emits `[:conduit_mcp, :auth, :verify]` with a
+    `:duration` measurement and `%{strategy: :oauth, status: :ok | :error}`
+    metadata. A failure adds `:reason`, always one of these atoms — never the
+    token, a header value, or a key provider's error term:
+
+    | `reason` | Meaning |
+    |---|---|
+    | `:expired` | `exp` is in the past, or absent (it is mandatory) |
+    | `:not_yet_valid` | `nbf` is in the future, or malformed |
+    | `:invalid_issuer` | `iss` does not equal `:issuer` |
+    | `:invalid_audience` | `aud` does not equal or contain `:audience` |
+    | `:invalid_signature` | the signature did not verify |
+    | `:malformed_token` | the token or its header could not be decoded |
+    | `:missing_alg` | the header has no `alg` |
+    | `:alg_not_allowed` | the header `alg` is not in `:algorithms` |
+    | `:alg_mismatch` | the header `alg` does not fit the signing key |
+    | `:unsupported_key_type` | the signing key has no usable `kty` |
+    | `:invalid_key` | the signing key is malformed |
+    | `:key_not_found` | the key provider has no key for the token's `kid` |
+    | `:key_unavailable` | the key provider returned an error |
+    | `:missing_subject` | the token has none of the `:subject_claims` |
+    | `:verification_failed` | any other verification failure |
+
+    A failure without its own 401 message ("Token verification failed") also
+    logs its detailed reason as a `Logger` warning, clamped and stripped of
+    control characters.
     """
 
     import Plug.Conn
@@ -54,6 +104,31 @@ if Code.ensure_loaded?(Joken) do
     @default_algorithms ~w(RS256 RS384 RS512 ES256 ES384 ES512 PS256 PS384 PS512)
     @rsa_algs ~w(RS256 RS384 RS512 PS256 PS384 PS512)
     @hs_algs ~w(HS256 HS384 HS512)
+
+    # The complete set of `reason` values in failure telemetry. Keep in sync
+    # with the moduledoc's "Telemetry" section.
+    @telemetry_reasons [
+      :expired,
+      :not_yet_valid,
+      :invalid_issuer,
+      :invalid_audience,
+      :invalid_signature,
+      :malformed_token,
+      :missing_alg,
+      :alg_not_allowed,
+      :alg_mismatch,
+      :unsupported_key_type,
+      :invalid_key,
+      :key_not_found,
+      :key_unavailable,
+      :missing_subject,
+      :verification_failed
+    ]
+
+    # Claims consulted, in order, for the principal's stable identity.
+    # `sub` is the usual answer; `client_id` covers client-credentials access
+    # tokens, which routinely carry no `sub`.
+    @default_subject_claims ["sub", "client_id"]
 
     @impl true
     def init(opts) do
@@ -67,6 +142,11 @@ if Code.ensure_loaded?(Joken) do
           mod when is_atom(mod) -> {mod, []}
         end
 
+      # Dispatch in fetch_signing_key/2 is unguarded, so an absent or
+      # non-conforming provider must fail here rather than as an
+      # UndefinedFunctionError on the first authenticated request.
+      :ok = ConduitMcp.OptionalDeps.validate_key_provider!(provider_mod)
+
       %{
         issuer: issuer,
         audience: audience,
@@ -76,6 +156,7 @@ if Code.ensure_loaded?(Joken) do
         key_provider_config: provider_config,
         scope_claim: Keyword.get(opts, :scope_claim, "scope"),
         assign_as: Keyword.get(opts, :assign_as, :oauth_claims),
+        subject_claims: Keyword.get(opts, :subject_claims, @default_subject_claims),
         algorithms: resolve_algorithms(opts, provider_mod, provider_config)
       }
     end
@@ -125,7 +206,8 @@ if Code.ensure_loaded?(Joken) do
         with {:ok, header} <- peek_header(token),
              :ok <- check_alg_allowed(header, opts),
              {:ok, key} <- fetch_signing_key(header, opts),
-             {:ok, claims} <- verify_and_validate(token, header, key, opts) do
+             {:ok, claims} <- verify_and_validate(token, header, key, opts),
+             {:ok, subject} <- resolve_subject(claims, opts) do
           scopes = extract_scopes(claims, opts.scope_claim)
 
           duration = System.monotonic_time() - start_time
@@ -138,8 +220,13 @@ if Code.ensure_loaded?(Joken) do
 
           conn
           |> assign(opts.assign_as, claims)
-          |> assign(:oauth_scopes, scopes)
           |> assign(:current_user, %{claims: claims, scopes: scopes})
+          |> ConduitMcp.Principal.put(%{
+            id: subject,
+            scopes: scopes,
+            strategy: :oauth,
+            claims: claims
+          })
         end
 
       case result do
@@ -161,6 +248,23 @@ if Code.ensure_loaded?(Joken) do
           emit_auth_error(duration, :invalid_issuer)
           unauthorized(conn, opts, "Invalid token issuer")
 
+        {:error, :not_yet_valid} ->
+          duration = System.monotonic_time() - start_time
+          emit_auth_error(duration, :not_yet_valid)
+          unauthorized(conn, opts, "Token not yet valid")
+
+        {:error, :missing_subject} ->
+          duration = System.monotonic_time() - start_time
+          emit_auth_error(duration, :missing_subject)
+
+          Logger.warning(
+            "OAuth token carries none of #{inspect(opts.subject_claims)}; cannot identify " <>
+              "the bearer, so ownership and per-user rate limiting would silently collapse. " <>
+              "Configure :subject_claims for this authorization server."
+          )
+
+          unauthorized(conn, opts, "Token has no usable subject claim")
+
         {:error, :not_found} ->
           duration = System.monotonic_time() - start_time
           emit_auth_error(duration, :key_not_found)
@@ -168,8 +272,10 @@ if Code.ensure_loaded?(Joken) do
 
         {:error, reason} ->
           duration = System.monotonic_time() - start_time
-          emit_auth_error(duration, reason)
-          Logger.warning("OAuth token verification failed: #{inspect(reason)}")
+          emit_auth_error(duration, __telemetry_reason__(reason))
+          # The raw reason may carry header-derived text (a rejected `alg`), so
+          # it is clamped and stripped of control characters before logging.
+          Logger.warning("OAuth token verification failed: #{ConduitMcp.Reflect.text(reason)}")
           unauthorized(conn, opts, "Token verification failed")
       end
     end
@@ -186,14 +292,24 @@ if Code.ensure_loaded?(Joken) do
     defp fetch_signing_key(header, opts) do
       kid = Map.get(header, "kid")
 
-      if kid do
-        opts.key_provider.fetch_key(kid, opts.key_provider_config)
-      else
-        case opts.key_provider.fetch_keys(opts.key_provider_config) do
-          {:ok, [key | _]} -> {:ok, key}
-          {:ok, []} -> {:error, :not_found}
-          error -> error
+      result =
+        if kid do
+          opts.key_provider.fetch_key(kid, opts.key_provider_config)
+        else
+          case opts.key_provider.fetch_keys(opts.key_provider_config) do
+            {:ok, [key | _]} -> {:ok, key}
+            {:ok, []} -> {:error, :not_found}
+            error -> error
+          end
         end
+
+      # A provider's error is an open-ended term — `{:http_error, 503}`, a
+      # `%Req.TransportError{}` naming the host. Tag it so `__telemetry_reason__/1`
+      # maps it to one atom while the log line keeps the detail.
+      case result do
+        {:error, :not_found} -> {:error, :not_found}
+        {:error, reason} -> {:error, {:key_unavailable, reason}}
+        ok -> ok
       end
     end
 
@@ -245,23 +361,57 @@ if Code.ensure_loaded?(Joken) do
       end
     end
 
-    defp normalize_joken_error(reason) do
-      reason_str = inspect(reason)
-
-      cond do
-        String.contains?(reason_str, "expired") -> {:error, :expired}
-        String.contains?(reason_str, "Invalid") -> {:error, :invalid_signature}
-        String.contains?(reason_str, "signature") -> {:error, :invalid_signature}
-        true -> {:error, reason}
+    # Joken reports a failed claim as a keyword list carrying `:claim`; the
+    # previous substring match on `inspect(reason)` never saw "expired"
+    # (the rendered message is "Invalid token"), so every claim failure —
+    # expiry, wrong issuer, wrong audience — collapsed into
+    # `:invalid_signature` and reported "Token verification failed". Clients
+    # could not tell "refresh your token" from "this token is forged".
+    defp normalize_joken_error(reason) when is_list(reason) do
+      case Keyword.get(reason, :claim) do
+        "exp" -> {:error, :expired}
+        "nbf" -> {:error, :not_yet_valid}
+        "iss" -> {:error, :invalid_issuer}
+        "aud" -> {:error, :invalid_audience}
+        _ -> {:error, :invalid_signature}
       end
     end
 
+    defp normalize_joken_error(:signature_error), do: {:error, :invalid_signature}
+    defp normalize_joken_error(:token_malformed), do: {:error, :malformed_token}
+    defp normalize_joken_error(:empty_signer), do: {:error, :invalid_key}
+
+    # Joken's error is `atom() | Keyword.t()`; any atom not named above is a
+    # verification failure the token did not survive.
+    defp normalize_joken_error(reason) when is_atom(reason), do: {:error, :invalid_signature}
+
     defp validate_claims(claims, opts) do
-      with :ok <- validate_issuer(claims, opts.issuer),
+      with :ok <- validate_exp(claims),
+           :ok <- validate_nbf(claims),
+           :ok <- validate_issuer(claims, opts.issuer),
            :ok <- validate_audience(claims, opts.audience) do
         {:ok, claims}
       end
     end
+
+    # `Joken.Config.default_claims(default_exp: 3600)` only affects token
+    # *generation*. Validation folds over the claims the token actually
+    # carries, so a token with no `exp` was never checked against anything
+    # and was accepted forever. `exp` is mandatory here.
+    defp validate_exp(%{"exp" => exp}) when is_integer(exp) do
+      if exp > System.system_time(:second), do: :ok, else: {:error, :expired}
+    end
+
+    defp validate_exp(_claims), do: {:error, :expired}
+
+    # `nbf` is optional, but a present one must hold — and a malformed one
+    # must not be silently ignored.
+    defp validate_nbf(%{"nbf" => nbf}) when is_integer(nbf) do
+      if nbf <= System.system_time(:second), do: :ok, else: {:error, :not_yet_valid}
+    end
+
+    defp validate_nbf(%{"nbf" => _malformed}), do: {:error, :not_yet_valid}
+    defp validate_nbf(_claims), do: :ok
 
     defp validate_issuer(claims, expected_issuer) do
       case Map.get(claims, "iss") do
@@ -282,6 +432,37 @@ if Code.ensure_loaded?(Joken) do
           {:error, :invalid_audience}
       end
     end
+
+    # The claims map is issuer-controlled and `sub` is optional in a JWT, so a
+    # verified token can carry no subject at all. Assigning `id: nil` in that
+    # case produces an *authenticated* principal that every consumer reads as
+    # anonymous: `Tasks.owner/1` returns nil, so the caller's tasks are created
+    # unowned and shared with every other caller, and rate limiting falls back
+    # to the IP bucket. Fail closed instead.
+    # The id is namespaced by the claim that produced it, so `sub` and
+    # `client_id` cannot alias. Without the prefix, an authorization server that
+    # lets a client choose its `client_id` lets that client register the
+    # `client_id` of a target user's `sub`, obtain a client-credentials token
+    # (no `sub`, so the fallback wins) and resolve to the *same* principal id —
+    # reading and cancelling that user's tasks. `scalar_claim/1` widens it
+    # further: integer `sub: 1` and string `client_id: "1"` both render as "1".
+    defp resolve_subject(claims, opts) do
+      opts.subject_claims
+      |> Enum.find_value(fn claim ->
+        case scalar_claim(Map.get(claims, claim)) do
+          nil -> nil
+          value -> claim <> ":" <> value
+        end
+      end)
+      |> case do
+        nil -> {:error, :missing_subject}
+        subject -> {:ok, subject}
+      end
+    end
+
+    defp scalar_claim(value) when is_binary(value) and value != "", do: value
+    defp scalar_claim(value) when is_integer(value), do: Integer.to_string(value)
+    defp scalar_claim(_value), do: nil
 
     defp extract_scopes(claims, scope_claim) do
       case Map.get(claims, scope_claim) do
@@ -333,6 +514,29 @@ if Code.ensure_loaded?(Joken) do
         %{strategy: :oauth, status: :error, reason: reason}
       )
     end
+
+    # Telemetry metadata ships verbatim to metrics backends and dashboards, and
+    # several internal reasons carry token-header text (`{:alg_not_allowed,
+    # alg}`) or provider terms. Every failure maps to one atom of the set the
+    # moduledoc's "Telemetry" section documents; a reason no clause names maps
+    # to `:verification_failed`, so a new producer yields a 401, not a
+    # `FunctionClauseError`. It is public (undocumented) because it must accept
+    # any term: as a private function the type checker narrows its input to
+    # today's producers and reports the fallback clause as unreachable.
+    @doc false
+    @spec __telemetry_reason__(term()) :: atom()
+    def __telemetry_reason__(reason) when reason in @telemetry_reasons, do: reason
+    def __telemetry_reason__({:alg_not_allowed, _alg}), do: :alg_not_allowed
+    def __telemetry_reason__({:invalid_token, _detail}), do: :malformed_token
+    def __telemetry_reason__(:invalid_token_format), do: :malformed_token
+    def __telemetry_reason__({:invalid_key, _detail}), do: :invalid_key
+    def __telemetry_reason__({:key_unavailable, _detail}), do: :key_unavailable
+    def __telemetry_reason__(_reason), do: :verification_failed
+
+    # The documented failure-reason set, for tests that pin it to the moduledoc.
+    @doc false
+    @spec __telemetry_reasons__() :: [atom()]
+    def __telemetry_reasons__, do: @telemetry_reasons
 
     @doc """
     Checks if the authenticated request has the required scope.

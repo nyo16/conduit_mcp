@@ -62,8 +62,8 @@ defmodule ConduitMcp.Tasks do
 
   Pass `owner` (typically `owner(conn)`) to stamp the task with a principal so
   it can be owner-scoped via `get/2`, `cancel/2`, and `list/2`. When `owner` is
-  `nil` (the default) the task is left unowned and readable by anyone, which
-  preserves back-compatibility for apps that don't use scoping.
+  `nil` (the default) the task is left unowned: every caller may see it, unless
+  `:tasks_require_owner` is set, in which case no caller may (see `get/2`).
 
   The owner is stored under the top-level `"owner"` key of the task metadata —
   see the "Owner scoping" section of `ConduitMcp.Tasks.Store`.
@@ -80,10 +80,23 @@ defmodule ConduitMcp.Tasks do
   @doc """
   Gets a task by ID, scoped to `owner`.
 
-  Returns `{:error, :not_found}` when the task is owned by a *different*
-  principal, so a task's existence is never leaked to a non-owner. A `nil`
-  `owner` (no principal) or an unowned task is always accessible — see the
-  "Owner scoping" section of `ConduitMcp.Tasks.Store`.
+  Returns `{:error, :not_found}` when the caller may not see the task, so a
+  task's existence is never leaked to a non-owner.
+
+  | task `"owner"` | caller `owner` | default | `:tasks_require_owner` |
+  |---|---|---|---|
+  | unowned | `nil` | allow | deny |
+  | unowned | `X` | allow | deny |
+  | `Y` | `nil` | **deny** | deny |
+  | `Y` | `Y` | allow | allow |
+  | `Y` | `X` | deny | deny |
+
+  The `Y`/`nil` row keeps authorization default-closed: an unauthenticated
+  request never reads a principal's task. Set
+  `config :conduit_mcp, :tasks_require_owner, true` to also refuse unowned
+  tasks, which is the right posture once every creation site stamps an owner.
+
+  See the "Owner scoping" section of `ConduitMcp.Tasks.Store`.
   """
   def get(task_id, owner), do: authorize(store().get(task_id), owner)
 
@@ -136,36 +149,56 @@ defmodule ConduitMcp.Tasks do
     end
   end
 
-  @doc "Lists tasks, optionally filtered by `:status`. See `ConduitMcp.Tasks.Store`."
+  @doc "Lists tasks, optionally filtered by `:status` and `:limit`. See `ConduitMcp.Tasks.Store`."
   def list(opts \\ []), do: store().list(opts)
 
   @doc """
-  Lists tasks scoped to `owner`, optionally filtered by `:status`.
+  Lists tasks scoped to `owner`, optionally filtered by `:status` and
+  `:limit`.
 
-  Returns only tasks the caller may see: their own (matching `"owner"`) plus
-  any unowned tasks. A `nil` `owner` (no principal) returns everything, matching
-  `list/1`. See `get/2` for the scoping rules.
+  The owner is pushed into the store query rather than applied afterwards, so
+  a store can express it as a predicate (the default `EtsStore` compiles all
+  three options into one `:ets.select/3` match spec). The facade re-checks the
+  returned rows and then applies `:limit` itself: a custom store that ignores
+  `:owner` must not turn into a silent authorization bypass, nor return more
+  than `:limit` rows. Such a store must ignore `:limit` too, or it truncates the
+  caller's own rows before the re-check (see `c:ConduitMcp.Tasks.Store.list/1`).
+
+  Returns the caller's own tasks plus unowned ones. `nil` = no principal: sees
+  only unowned tasks; nothing under `:tasks_require_owner` (see `get/2`).
   """
-  def list(opts, owner), do: store().list(opts) |> Enum.filter(&authorized?(&1, owner))
+  def list(opts, owner) do
+    opts
+    |> Keyword.put(:owner, owner)
+    |> store().list()
+    |> Enum.filter(&authorized?(&1, owner))
+    |> take_limit(Keyword.get(opts, :limit))
+  end
+
+  # Same `:limit` semantics as `ConduitMcp.Tasks.EtsStore.list/1`.
+  defp take_limit(rows, limit) when is_integer(limit) and limit > 0, do: Enum.take(rows, limit)
+  defp take_limit(rows, limit) when limit in [nil, :infinity], do: rows
+  defp take_limit(_rows, _non_positive), do: []
 
   @doc """
   Extracts the owner principal from a `Plug.Conn` (or conn-like map).
 
   Applies the configured `:task_owner_fun`
   (`config :conduit_mcp, :task_owner_fun`), which defaults to
-  `conn.assigns[:current_user]`. Returns `nil` for `nil`/non-conn input or when
-  no principal is present — `nil` means "no scoping" throughout this module.
+  `ConduitMcp.Principal.id/1` — the stable scalar identity assigned by both
+  auth plugs. Returns `nil` for `nil`/non-conn input or when no principal is
+  present. `nil` = no principal: sees only unowned tasks; nothing under
+  `:tasks_require_owner` (see `get/2`).
 
   > #### Return a stable scalar {: .warning}
   >
-  > Ownership is checked by **exact match** (`==`), so the extractor should
-  > return a stable, comparable identity — typically the user's `sub`/`id`
-  > scalar, not the whole `current_user` struct. A struct carrying any
-  > per-request volatile field would fail to match its own tasks on a later
-  > request, and an extractor that maps distinct users to equal terms would
-  > leak tasks between them. The default works when `current_user` is itself a
-  > stable id; map it to one otherwise, e.g.
-  > `task_owner_fun: &(&1.assigns[:current_user] && &1.assigns.current_user.id)`.
+  > Ownership is checked by **exact match** (`===`), so a custom extractor must
+  > return a stable, comparable identity — the user's `sub`/`id` scalar, never
+  > a struct or claims map. A term carrying any per-request volatile field
+  > (`exp`, `iat`, `jti`) fails to match its own tasks on the next request, so
+  > the owner's own task 404s; an extractor mapping distinct users to equal
+  > terms leaks tasks between them. `ConduitMcp.Principal.id/1` is already
+  > such a scalar — prefer it.
   """
   def owner(nil), do: nil
 
@@ -174,30 +207,45 @@ defmodule ConduitMcp.Tasks do
     fun.(conn)
   end
 
-  defp default_owner(%{assigns: assigns}) when is_map(assigns),
-    do: Map.get(assigns, :current_user)
+  defp default_owner(%{assigns: assigns} = conn) when is_map(assigns) do
+    case ConduitMcp.Principal.id(conn) do
+      nil -> legacy_scalar_owner(assigns)
+      id -> id
+    end
+  end
 
   defp default_owner(_), do: nil
 
-  # A task is accessible when the caller has no principal (no scoping requested),
-  # the task is unowned (back-compat), or the owners match. On mismatch we report
-  # `{:error, :not_found}` so a non-owner can't distinguish "exists but yours"
-  # from "doesn't exist".
+  # Back-compat: an app that assigned a bare scalar to :current_user (the one
+  # shape the old default actually worked for) keeps working. A map or struct
+  # is deliberately *not* accepted — that is the shape that silently 404'd.
+  defp legacy_scalar_owner(assigns) do
+    case Map.get(assigns, :current_user) do
+      value when is_binary(value) -> value
+      value when is_integer(value) -> Integer.to_string(value)
+      _ -> nil
+    end
+  end
+
+  # A task is accessible when the owners match, or when the task is unowned
+  # and unowned tasks are still readable. On mismatch we report
+  # `{:error, :not_found}` so a non-owner can't distinguish "exists but
+  # yours" from "doesn't exist".
   defp authorize({:ok, task} = ok, owner) do
     if authorized?(task, owner), do: ok, else: {:error, :not_found}
   end
 
   defp authorize({:error, _} = err, _owner), do: err
 
-  defp authorized?(_task, nil), do: true
-
   defp authorized?(task, owner) do
     case Map.get(task, "owner") do
-      nil -> true
+      nil -> not require_owner?()
       ^owner -> true
-      _ -> false
+      _other -> false
     end
   end
+
+  defp require_owner?, do: Application.get_env(:conduit_mcp, :tasks_require_owner, false)
 
   @doc """
   Validates that a status transition is allowed.

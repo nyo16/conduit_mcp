@@ -162,12 +162,11 @@ if Code.ensure_loaded?(PromEx) do
       end
     end
   end
-else
-  defmodule ConduitMcp.PromExTest do
-    use ExUnit.Case, async: true
-
-    test "PromEx plugin not available when PromEx not loaded" do
-      refute Code.ensure_loaded?(ConduitMcp.PromEx)
-    end
-  end
 end
+
+# There is deliberately no `else` branch. `:prom_ex` is an optional dependency
+# of this project, so it is always fetched and compiled for this suite and
+# `Code.ensure_loaded?(PromEx)` is always true here — an "absent PromEx"
+# assertion in this file can never fail. That configuration is covered for
+# real by the bare-consumer CI job (`.github/scripts/bare_consumer_check.sh`),
+# which builds conduit_mcp inside a consumer that declares no optional deps.

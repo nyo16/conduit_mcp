@@ -202,7 +202,10 @@ defmodule ConduitMcp.TelemetryTest do
       assert_receive {[:conduit_mcp, :auth, :verify], ^ref, _measurements, metadata}
       assert metadata.strategy == :bearer_token
       assert metadata.status == :error
-      assert metadata.reason == "Invalid token"
+      # A coarse atom, never the verifier's reason: telemetry metadata ships
+      # verbatim to metrics backends and a :verify function may embed the
+      # credential in its reason.
+      assert metadata.reason == :invalid_credential
     end
 
     test "emits telemetry for custom verification function" do
@@ -220,16 +223,7 @@ defmodule ConduitMcp.TelemetryTest do
 
       Auth.call(conn, opts)
 
-      # Drain any stale telemetry events from concurrent tests, then match ours
       assert_receive {[:conduit_mcp, :auth, :verify], ^ref, _measurements, metadata}
-
-      metadata =
-        if metadata.strategy != :function do
-          assert_receive {[:conduit_mcp, :auth, :verify], ^ref, _measurements, m}
-          m
-        else
-          metadata
-        end
 
       assert metadata.strategy == :function
       assert metadata.status == :ok
@@ -268,6 +262,16 @@ defmodule ConduitMcp.TelemetryTest do
   end
 
   describe "default handlers" do
+    # `"conduit-mcp-default-logger"` is a *global* :telemetry handler. Leaking
+    # it makes the third test below fail (detach returns :ok instead of
+    # {:error, :not_found}) — order-dependent, and reported against the wrong
+    # test — and a leaked handler fires for every subsequent [:conduit_mcp, *]
+    # event while dot-dereferencing metadata.
+    setup do
+      on_exit(fn -> ConduitMcp.Telemetry.detach_default_handlers() end)
+      :ok
+    end
+
     test "can attach and detach default handlers" do
       assert :ok == ConduitMcp.Telemetry.attach_default_handlers()
       assert :ok == ConduitMcp.Telemetry.detach_default_handlers()
@@ -284,5 +288,53 @@ defmodule ConduitMcp.TelemetryTest do
     test "returns error when detaching non-existent handlers" do
       assert {:error, :not_found} = ConduitMcp.Telemetry.detach_default_handlers()
     end
+
+    # The default handlers log at :debug, so the level is raised for this
+    # process only: the handler runs in the emitting process, which is the test
+    # process because `Handler.handle_request/2` is called directly.
+    test "a non-string resource uri neither raises in nor detaches the default logger" do
+      :ok = ConduitMcp.Telemetry.attach_default_handlers()
+      Logger.put_process_level(self(), :debug)
+
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "resources/read",
+        "params" => %{"uri" => %{}}
+      }
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
+          assert %{"error" => %{"code" => -32_602}} = Handler.handle_request(request, TestServer)
+        end)
+
+      assert "conduit-mcp-default-logger" in default_logger_ids([:conduit_mcp, :resource, :read])
+      assert "conduit-mcp-default-logger" in default_logger_ids([:conduit_mcp, :request, :stop])
+      assert log =~ "Resource read: uri= status=error"
+    end
+
+    test "client-sourced metadata cannot forge a log line" do
+      :ok = ConduitMcp.Telemetry.attach_default_handlers()
+      Logger.put_process_level(self(), :debug)
+
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tools/call",
+        "params" => %{"name" => "nope\n[error] FORGED", "arguments" => %{}}
+      }
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
+          Handler.handle_request(request, TestServer)
+        end)
+
+      assert log =~ "Tool executed: tool=nope[error] FORGED status=error"
+      refute log =~ "\n[error] FORGED"
+    end
+  end
+
+  defp default_logger_ids(event) do
+    event |> :telemetry.list_handlers() |> Enum.map(& &1.id)
   end
 end

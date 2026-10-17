@@ -42,6 +42,8 @@ defmodule ConduitMcp.ServerMeta do
   defp compute(server_module) do
     %{
       scope_for_tool: function_exported?(server_module, :__scope_for_tool__, 1),
+      scope_for_prompt: function_exported?(server_module, :__scope_for_prompt__, 1),
+      scope_for_resource: function_exported?(server_module, :__scope_for_resource__, 1),
       validation_schema_tool:
         function_exported?(server_module, :__validation_schema_for_tool__, 1),
       validation_schema_prompt:

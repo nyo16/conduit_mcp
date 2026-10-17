@@ -9,10 +9,36 @@ defmodule ConduitMcp.Server do
 
   Server modules are stateless — just pure compiled functions:
 
-  - No GenServer, no Agent, no process overhead
-  - No supervision tree required
+  - No GenServer, no Agent, no process overhead in *your* module
+  - Nothing for you to add to your supervision tree for the server itself
   - Callbacks receive the `Plug.Conn` for request context
   - Each HTTP request runs in parallel (limited only by Bandit's process pool)
+
+  The library does run a small supervision tree of its own
+  (`ConduitMcp.Application`). It starts automatically with the `:conduit_mcp`
+  application and owns the long-lived ETS tables that must outlive request
+  processes, plus the janitors that sweep them:
+
+  - `ConduitMcp.Cancellation.Owner` — cancellation flags
+  - `ConduitMcp.Cancellation.InFlightOwner` — requests in flight, which gate
+    the cancellations recorded
+  - `ConduitMcp.Session.EtsStore.Owner` — sessions
+  - `ConduitMcp.Transport.SSE.Owner` — the SSE slot table (one row per live
+    stream)
+  - `ConduitMcp.Session.Janitor` (as `ConduitMcp.Session.Janitor.Default`) —
+    sweeps expired sessions; disable with
+    `config :conduit_mcp, :session_janitor, false`
+  - `ConduitMcp.Cancellation.Janitor` — sweeps stale cancellation rows and
+    in-flight rows of dead processes; disable with
+    `config :conduit_mcp, :cancellation_janitor, false`
+  - `ConduitMcp.Tasks.EtsStore.Owner` — tasks, only with the default tasks
+    store
+  - `ConduitMcp.OAuth.KeyProvider.JWKS.Owner` — the JWKS cache, only when
+    `Req` is compiled in
+
+  Every owner is a `ConduitMcp.EtsOwner` process that creates a `:public`
+  table and idles; reads and writes go straight to ETS from the calling
+  process. See `ConduitMcp.Application` for configuration details.
 
   ## Example (Using DSL - Recommended)
 
@@ -241,27 +267,41 @@ defmodule ConduitMcp.Server do
           {:ok, %{"tools" => []}}
         end
 
-        def handle_call_tool(_conn, _name, _params) do
+        # Codes match `ConduitMcp.Handler`, Endpoint mode and DSL mode, so an
+        # identical MCP request gets an identical error whichever mode the
+        # server was written in. `-32602` for an unknown tool/prompt and
+        # `-32002` for a missing resource are what the MCP specification
+        # prescribes.
+        def handle_call_tool(_conn, name, _params) do
           {:error,
-           %{"code" => ConduitMcp.Errors.method_not_found(), "message" => "Tool not found"}}
+           %{
+             "code" => ConduitMcp.Errors.invalid_params(),
+             "message" => "Unknown tool: #{ConduitMcp.Reflect.text(name)}"
+           }}
         end
 
         def handle_list_resources(_conn) do
           {:ok, %{"resources" => []}}
         end
 
-        def handle_read_resource(_conn, _uri) do
+        def handle_read_resource(_conn, uri) do
           {:error,
-           %{"code" => ConduitMcp.Errors.method_not_found(), "message" => "Resource not found"}}
+           %{
+             "code" => ConduitMcp.Errors.resource_not_found(),
+             "message" => "Resource not found: #{ConduitMcp.Reflect.text(uri)}"
+           }}
         end
 
         def handle_list_prompts(_conn) do
           {:ok, %{"prompts" => []}}
         end
 
-        def handle_get_prompt(_conn, _name, _args) do
+        def handle_get_prompt(_conn, name, _args) do
           {:error,
-           %{"code" => ConduitMcp.Errors.method_not_found(), "message" => "Prompt not found"}}
+           %{
+             "code" => ConduitMcp.Errors.invalid_params(),
+             "message" => "Unknown prompt: #{ConduitMcp.Reflect.text(name)}"
+           }}
         end
 
         defoverridable handle_list_tools: 1,

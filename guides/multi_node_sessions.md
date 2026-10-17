@@ -1,18 +1,28 @@
 # Multi-Node Session Stores
 
-By default, ConduitMCP uses ETS for session storage — fast but local to each node.
-For multi-node deployments, implement the `ConduitMcp.Session.Store` behaviour
-with a shared backend.
+Sessions are off unless the transport is given a `:session` option. With
+`session: []`, ConduitMCP stores sessions in ETS (`ConduitMcp.Session.EtsStore`)
+— fast but local to each node. For multi-node deployments, implement the
+`ConduitMcp.Session.Store` behaviour with a shared backend and pass it as
+`session: [store: MyStore]`.
 
-> **Pruning expired sessions.** ETS-backed stores accumulate entries forever
-> without a janitor — every successful `initialize` adds a row that survives
-> until the BEAM restarts. Wire `ConduitMcp.Session.Janitor` into your
-> supervision tree to prune expired sessions:
+> **Pruning expired sessions.** Every successful `initialize` adds a session
+> row. For `ConduitMcp.Session.EtsStore`, the `:conduit_mcp` application
+> already runs a `ConduitMcp.Session.Janitor` (as
+> `ConduitMcp.Session.Janitor.Default`, 30-minute TTL). Tune or disable it in
+> config:
+>
+> ```elixir
+> config :conduit_mcp, session_janitor: [ttl: :timer.hours(4)]
+> config :conduit_mcp, session_janitor: false
+> ```
+>
+> A custom ETS-backed store needs its own janitor in your supervision tree:
 >
 > ```elixir
 > children = [
 >   {ConduitMcp.Session.Janitor,
->    store: ConduitMcp.Session.EtsStore,
+>    store: MyApp.MyEtsSessionStore,
 >    ttl: :timer.minutes(30),
 >    interval: :timer.minutes(1)}
 > ]
@@ -213,4 +223,4 @@ end
 ## Alternatives
 
 - **Sticky sessions**: Configure your load balancer to route by `Mcp-Session-Id` header. ETS works fine.
-- **Disable sessions**: Set `session: false` in transport config for fully stateless mode.
+- **No sessions**: Omit `:session` (or set `session: false`) for fully stateless mode.

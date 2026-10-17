@@ -10,10 +10,42 @@ defmodule ConduitMcp.Plugs.Auth do
   - `:enabled` - Enable/disable authentication (default: `true`)
   - `:strategy` - Authentication strategy: `:bearer_token`, `:api_key`, `:custom`, or `:function`
   - `:verify` - Verification function/MFA. Signature: `(credential :: String.t()) -> {:ok, user} | {:error, reason}`
-  - `:token` - Static token for `:bearer_token` strategy (simple auth)
-  - `:api_key` - Static API key for `:api_key` strategy
+
+    > #### The returned reason must not embed the credential {: .warning}
+    >
+    > A failure reason is written to the log (clamped and stripped of control
+    > characters via `ConduitMcp.Reflect`). Telemetry deliberately reports the
+    > coarse atom `:invalid_credential` instead, because metadata is shipped
+    > verbatim to metrics backends. Return `{:error, :not_found}`, not
+    > `{:error, "no user for token #{~s(abc123)}"}`.
+  - `:token` - Static token for `:bearer_token` strategy (simple auth). Must be
+    a non-empty string: `init/1` raises otherwise, because an empty secret
+    would match an empty `Authorization: Bearer ` header.
+  - `:api_key` - Static API key for `:api_key` strategy. Must be a non-empty
+    string, for the same reason.
   - `:header` - Header name for `:api_key` strategy (default: `"x-api-key"`)
   - `:assign_as` - Key to assign authenticated user in conn.assigns (default: `:current_user`)
+  - `:principal_id` - Explicit stable identity for a static shared secret:
+    requires `:token` (`:bearer_token` strategy) or `:api_key` (`:api_key`
+    strategy). A shared static credential identifies exactly one principal;
+    without this the id is a stable digest of the credential.
+    Setting it anywhere else — `:function` / `:custom`, or a `:verify`
+    function under `:bearer_token` / `:api_key` — raises `ArgumentError` at
+    `init/1`: one fixed id would merge every user the verifier tells apart
+    into a single principal. Return the identity from `:verify` instead.
+    See `ConduitMcp.Principal` for every id format.
+
+  ## The authenticated principal
+
+  On success this plug assigns:
+
+    * `conn.assigns[:current_user]` (or `:assign_as`) — whatever your
+      `:verify` function returned. Unchanged, and shaped however you like.
+    * `conn.assigns[:mcp_principal]` — the canonical
+      `ConduitMcp.Principal`, carrying a *stable scalar* `:id`. Task
+      ownership and per-user rate limiting read this, never `:current_user`.
+
+  Read it with `ConduitMcp.Principal.get/1` / `ConduitMcp.Principal.id/1`.
 
   ## Examples
 
@@ -91,19 +123,51 @@ defmodule ConduitMcp.Plugs.Auth do
   import Plug.Conn
   require Logger
 
+  alias ConduitMcp.Principal
+
   @behaviour Plug
 
   @impl true
   def init(opts) do
+    strategy = Keyword.get(opts, :strategy, :bearer_token)
+    principal_id = Keyword.get(opts, :principal_id)
+
+    validate_secret!(:token, Keyword.get(opts, :token))
+    validate_secret!(:api_key, Keyword.get(opts, :api_key))
+
+    if principal_id != nil and not static_secret?(strategy, opts) do
+      raise ArgumentError,
+            ":principal_id requires a static secret (:token with :bearer_token, or " <>
+              ":api_key with :api_key); with strategy #{inspect(strategy)} and no such " <>
+              "secret, :verify authenticates, and one fixed id would merge every user " <>
+              "into one principal. Return the identity from :verify instead."
+    end
+
     %{
       enabled: Keyword.get(opts, :enabled, true),
-      strategy: Keyword.get(opts, :strategy, :bearer_token),
+      strategy: strategy,
       verify: Keyword.get(opts, :verify),
       token: Keyword.get(opts, :token),
       api_key: Keyword.get(opts, :api_key),
       header: Keyword.get(opts, :header, "x-api-key"),
-      assign_as: Keyword.get(opts, :assign_as, :current_user)
+      assign_as: Keyword.get(opts, :assign_as, :current_user),
+      principal_id: principal_id
     }
+  end
+
+  # Mirrors the static clauses of `do_verify/2`: only these authenticate by
+  # comparing against a configured secret. Without it, `:verify` runs.
+  defp static_secret?(:bearer_token, opts), do: Keyword.get(opts, :token) != nil
+  defp static_secret?(:api_key, opts), do: Keyword.get(opts, :api_key) != nil
+  defp static_secret?(_strategy, _opts), do: false
+
+  # `Plug.Crypto.secure_compare("", "")` is true, so an empty configured
+  # secret authenticates any request that sends an empty credential.
+  defp validate_secret!(_key, nil), do: :ok
+  defp validate_secret!(_key, secret) when is_binary(secret) and secret != "", do: :ok
+
+  defp validate_secret!(key, _secret) do
+    raise ArgumentError, "#{inspect(key)} must be a non-empty string when set"
   end
 
   @impl true
@@ -180,18 +244,24 @@ defmodule ConduitMcp.Plugs.Auth do
             %{strategy: opts.strategy, status: :ok}
           )
 
-          assign_user(conn, user, opts.assign_as)
+          conn
+          |> assign_user(user, opts.assign_as)
+          |> Principal.put(build_principal(user, credential, opts))
 
         {:error, reason} ->
           duration = System.monotonic_time() - start_time
 
+          # A coarse atom, not the verifier's reason. A `:verify` function is
+          # free to return the credential (or something derived from it) as
+          # its reason, and telemetry metadata is shipped to metrics backends
+          # and logs — see the `:verify` contract note in the moduledoc.
           :telemetry.execute(
             [:conduit_mcp, :auth, :verify],
             %{duration: duration},
-            %{strategy: opts.strategy, status: :error, reason: reason}
+            %{strategy: opts.strategy, status: :error, reason: :invalid_credential}
           )
 
-          Logger.warning("Authentication failed: #{inspect(reason)}")
+          Logger.warning("Authentication failed: #{ConduitMcp.Reflect.text(reason)}")
           unauthorized(conn, "Authentication failed")
 
         other ->
@@ -209,6 +279,33 @@ defmodule ConduitMcp.Plugs.Auth do
 
     result
   end
+
+  # The static strategies' `do_verify/2` returns the constant
+  # `%{authenticated: true}` (kept as `:current_user` for compatibility), which
+  # carries no identity: `Principal.derive_id/1` yields nil for it, so the
+  # credential digest is the id. `init/1` accepts `:principal_id` only with a
+  # configured `:token` / `:api_key`, so it only ever names a static credential.
+  defp build_principal(user, credential, opts) do
+    %{
+      id: opts.principal_id || Principal.derive_id(user) || credential_id(credential),
+      scopes: user_scopes(user),
+      strategy: opts.strategy,
+      user: user
+    }
+  end
+
+  # A shared static secret identifies exactly one principal. Digest it so the
+  # id is stable across requests and restarts without echoing the credential.
+  # The credential always comes from a request header, so it is always a
+  # binary; dialyzer proves a non-binary clause here is unreachable.
+  defp credential_id(credential) when is_binary(credential) do
+    digest = :crypto.hash(:sha256, credential) |> binary_part(0, 12)
+    "static:" <> Base.url_encode64(digest, padding: false)
+  end
+
+  defp user_scopes(%{scopes: scopes}) when is_list(scopes), do: scopes
+  defp user_scopes(%{"scopes" => scopes}) when is_list(scopes), do: scopes
+  defp user_scopes(_user), do: []
 
   defp do_verify(credential, %{strategy: :bearer_token, token: expected_token})
        when not is_nil(expected_token) do

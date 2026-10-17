@@ -8,6 +8,42 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
 
   @opts StreamableHTTP.init(server_module: TestServer)
 
+  # A *literal* `forward`, deliberately: `Plug.Router.forward/2` runs
+  # `target.init/1` at compile time and escapes the result into
+  # `@plug_forward_opts`, so a non-escapable value there breaks the build
+  # rather than a test. Since `Transport.Shared.init/2` resolves the rate-limit
+  # plugs at init time, a *local* function capture in their options - which is
+  # what `key_func` defaults to - made this router fail to compile with
+  # "cannot escape #Function<...default_key_func>". This is the documented
+  # Phoenix integration (README "Phoenix Integration"), and the trigger was the
+  # default configuration, so a consumer writing nothing hit it.
+  defmodule ForwardBackend do
+    @moduledoc false
+    def hit(_key, _scale, _limit), do: {:allow, 1}
+  end
+
+  defmodule ForwardRouter do
+    @moduledoc false
+    use Plug.Router
+
+    plug(:match)
+    plug(:dispatch)
+
+    forward("/mcp",
+      to: ConduitMcp.Transport.StreamableHTTP,
+      init_opts: [
+        server_module: ConduitMcp.TestServer,
+        allowed_origins: "*",
+        rate_limit: [backend: ForwardBackend, limit: 100, scale: 60_000],
+        message_rate_limit: [backend: ForwardBackend, limit: 100, scale: 60_000]
+      ]
+    )
+
+    match _ do
+      send_resp(conn, 404, "")
+    end
+  end
+
   describe "initialization" do
     test "requires server_module option" do
       assert_raise ArgumentError, "server_module is required", fn ->
@@ -20,14 +56,155 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
       assert opts[:server_module] == TestServer
       assert opts[:cors_origin] == "https://example.com"
     end
+
+    test "a forwarded, rate-limited mount serves requests" do
+      # The compile-time property is asserted by ForwardRouter existing at all;
+      # this proves the escaped init options are still usable at runtime.
+      body =
+        JSON.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "initialize",
+          "params" => %{"protocolVersion" => "2025-06-18", "capabilities" => %{}}
+        })
+
+      conn =
+        conn(:post, "/mcp/", body)
+        |> put_req_header("content-type", "application/json")
+        |> ForwardRouter.call(ForwardRouter.init([]))
+
+      assert conn.status == 200
+      assert JSON.decode!(conn.resp_body)["result"]["protocolVersion"]
+    end
+  end
+
+  describe "configuration validation" do
+    test "a list :cors_origin is a boot-time error, not a per-request 500" do
+      # `:allowed_origins` accepts a list and is documented two bullets above
+      # `:cors_origin`, so this is a natural mistake. put_resp_header/3 is
+      # guarded on a binary value, so without the init check it raises inside
+      # the pipeline on every request.
+      assert_raise ArgumentError, ~r/:cors_origin must be a single header value/, fn ->
+        StreamableHTTP.init(
+          server_module: TestServer,
+          cors_origin: ["https://a.example", "https://b.example"]
+        )
+      end
+    end
+
+    test "an :allowed_origins of an unsupported shape is a boot-time error" do
+      for bad <- [42, :all, %{"origin" => "https://a.example"}, ["https://a.example", 7]] do
+        assert_raise ArgumentError, ~r/:allowed_origins must be/, fn ->
+          StreamableHTTP.init(server_module: TestServer, allowed_origins: bad)
+        end
+      end
+    end
+
+    test "a list mixing in a Regex is rejected rather than silently never matching" do
+      # List entries are compared with `in`, so a Regex inside a list could
+      # never match any origin.
+      assert_raise ArgumentError, ~r/single Regex/, fn ->
+        StreamableHTTP.init(
+          server_module: TestServer,
+          allowed_origins: ["https://a.example", ~r/\Ahttps:\/\/b\.example\z/]
+        )
+      end
+    end
+
+    test "every documented :allowed_origins shape is accepted" do
+      for good <- [
+            nil,
+            "*",
+            "https://a.example",
+            [],
+            ["https://a.example"],
+            ~r/\Ahttps:\/\/a\.example\z/
+          ] do
+        assert StreamableHTTP.init(server_module: TestServer, allowed_origins: good)
+      end
+    end
+
+    test "a :session that is neither off nor a keyword list is a boot-time error" do
+      # Only a keyword list turns sessions on, so `session: true` used to mean
+      # "no sessions" - and no `require_session` - without any signal.
+      for bad <- [true, %{store: ConduitMcp.Session.EtsStore}, :ets, [:store]] do
+        assert_raise ArgumentError, ~r/session: \[\]/, fn ->
+          StreamableHTTP.init(server_module: TestServer, session: bad)
+        end
+      end
+    end
+
+    test "every documented :session shape is accepted" do
+      for good <- [nil, false, [], [store: ConduitMcp.Session.EtsStore, require_session: true]] do
+        assert StreamableHTTP.init(server_module: TestServer, session: good)
+      end
+    end
+  end
+
+  describe "sessions are opt-in" do
+    setup do
+      ConduitMcp.Session.EtsStore.ensure_table()
+      :ok
+    end
+
+    test "without :session, initialize creates no session" do
+      body =
+        JSON.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "initialize",
+          "params" => %{"protocolVersion" => "2025-06-18", "capabilities" => %{}}
+        })
+
+      before = :ets.info(:conduit_mcp_sessions, :size)
+
+      conn =
+        conn(:post, "/", body)
+        |> put_req_header("content-type", "application/json")
+        |> StreamableHTTP.call(@opts)
+
+      assert conn.status == 200
+      assert get_resp_header(conn, "mcp-session-id") == []
+      # `<=`, not `==`: the session Janitor may sweep expired rows between the
+      # two reads.
+      assert :ets.info(:conduit_mcp_sessions, :size) <= before
+    end
+
+    test "session: [] turns sessions on with the default store" do
+      opts = StreamableHTTP.init(server_module: TestServer, session: [])
+
+      conn =
+        conn(:post, "/", initialize_request_body())
+        |> put_req_header("content-type", "application/json")
+        |> StreamableHTTP.call(opts)
+
+      assert conn.status == 200
+      assert [session_id] = get_resp_header(conn, "mcp-session-id")
+      assert {:ok, _} = ConduitMcp.Session.get(session_id, ConduitMcp.Session.EtsStore)
+    end
   end
 
   describe "CORS headers" do
-    test "adds default CORS headers" do
+    test "emits no CORS headers by default" do
+      # `access-control-allow-origin: *` on every response is what let a page
+      # on another origin *read* the reply to a cross-origin POST.
       conn =
         conn(:post, "/")
         |> put_req_header("content-type", "application/json")
         |> StreamableHTTP.call(@opts)
+
+      assert get_resp_header(conn, "access-control-allow-origin") == []
+      assert get_resp_header(conn, "access-control-allow-methods") == []
+      assert get_resp_header(conn, "access-control-allow-headers") == []
+    end
+
+    test "emits the full CORS header set once cors_origin is configured" do
+      opts = StreamableHTTP.init(server_module: TestServer, cors_origin: "*")
+
+      conn =
+        conn(:post, "/")
+        |> put_req_header("content-type", "application/json")
+        |> StreamableHTTP.call(opts)
 
       assert get_resp_header(conn, "access-control-allow-origin") == ["*"]
       assert get_resp_header(conn, "access-control-allow-methods") == ["GET, POST, OPTIONS"]
@@ -58,7 +235,18 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
         |> StreamableHTTP.call(@opts)
 
       assert conn.status == 200
-      assert get_resp_header(conn, "access-control-allow-origin") == ["*"]
+      # A preflight that grants nothing: the browser will not send the real
+      # request, let alone let the page read the response.
+      assert get_resp_header(conn, "access-control-allow-origin") == []
+    end
+
+    test "OPTIONS preflight grants the configured origin" do
+      opts = StreamableHTTP.init(server_module: TestServer, cors_origin: "https://app.example")
+
+      conn = conn(:options, "/") |> StreamableHTTP.call(opts)
+
+      assert conn.status == 200
+      assert get_resp_header(conn, "access-control-allow-origin") == ["https://app.example"]
     end
   end
 
@@ -261,7 +449,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
     test "init warns when :allowed_origins is unset" do
       log = capture_log(fn -> StreamableHTTP.init(server_module: TestServer) end)
       assert log =~ "allowed_origins"
-      assert log =~ "DNS-rebinding"
+      assert log =~ "rejected with 403"
     end
 
     test "init stays quiet when :allowed_origins is set (even to \"*\")" do
@@ -270,7 +458,7 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
           StreamableHTTP.init(server_module: TestServer, allowed_origins: "*")
         end)
 
-      refute log =~ "DNS-rebinding"
+      refute log =~ "allowed_origins"
     end
   end
 
@@ -453,6 +641,71 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
 
       assert conn.status == 200
       assert get_resp_header(conn, "mcp-session-id") == []
+    end
+
+    test "initialize fails closed with 503 when the session store is at capacity" do
+      previous = Application.get_env(:conduit_mcp, :sessions_max_rows)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:conduit_mcp, :sessions_max_rows)
+          value -> Application.put_env(:conduit_mcp, :sessions_max_rows, value)
+        end
+      end)
+
+      Application.put_env(:conduit_mcp, :sessions_max_rows, 0)
+
+      conn =
+        conn(:post, "/", initialize_request_body())
+        |> put_req_header("content-type", "application/json")
+        |> StreamableHTTP.call(@session_opts)
+
+      # Handing back a 200 with no mcp-session-id would give the client a
+      # negotiated connection whose session does not exist on any follow-up
+      # request.
+      assert conn.status == 503
+      assert get_resp_header(conn, "mcp-session-id") == []
+
+      response = JSON.decode!(conn.resp_body)
+      assert response["error"]["code"] == ConduitMcp.Protocol.internal_error()
+      assert response["error"]["message"] =~ "cannot accept new sessions"
+    end
+  end
+
+  describe "RFC 9728 protected-resource metadata" do
+    @oauth_opts StreamableHTTP.init(
+                  server_module: TestServer,
+                  allowed_origins: "*",
+                  auth: [
+                    strategy: :oauth,
+                    issuer: "https://auth.example.com",
+                    audience: "https://mcp.example.com",
+                    key_provider: {ConduitMcp.OAuth.KeyProvider.Static, keys: []}
+                  ]
+                )
+
+    test "is reachable without a token, because that is how discovery works" do
+      # The metadata document is what a client fetches *after* a 401 to find
+      # the authorization server. Running the auth plug over it would make
+      # discovery require already being authenticated.
+      conn =
+        conn(:get, "/.well-known/oauth-protected-resource")
+        |> StreamableHTTP.call(@oauth_opts)
+
+      assert conn.status == 200
+      metadata = JSON.decode!(conn.resp_body)
+      assert metadata["resource"] == "https://mcp.example.com"
+    end
+
+    test "everything else still requires a token" do
+      body = JSON.encode!(%{"jsonrpc" => "2.0", "id" => 1, "method" => "ping"})
+
+      conn =
+        conn(:post, "/", body)
+        |> put_req_header("content-type", "application/json")
+        |> StreamableHTTP.call(@oauth_opts)
+
+      assert conn.status == 401
     end
   end
 

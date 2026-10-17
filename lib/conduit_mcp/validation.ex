@@ -25,6 +25,8 @@ defmodule ConduitMcp.Validation do
         type_coercion: true,                # Automatic type conversion
         log_validation_errors: false        # Log validation failures
 
+  A param can override `type_coercion` for itself with its own
+  `type_coercion: true | false` option; see `ConduitMcp.Validation.SchemaConverter`.
   """
 
   require Logger
@@ -33,8 +35,18 @@ defmodule ConduitMcp.Validation do
   @doc """
   Validates tool parameters using the compiled NimbleOptions schema.
 
-  Returns `{:ok, validated_params}` with potentially coerced types,
-  or `{:error, validation_errors}` with detailed error information.
+  Returns one of:
+
+    * `{:ok, validated_params}` — valid, with types coerced and defaults
+      applied. Also returned verbatim when the server declares no validation
+      schema, or when runtime validation is disabled.
+    * `{:error, validation_errors}` — a **list** of error maps with string
+      keys `"parameter"`, `"value"` and `"message"`, ready to place in a
+      JSON-RPC error's `data`.
+    * `{:error, :tool_not_found}` — a bare **atom**: the server has validation
+      schemas but none for this tool. Propagated rather than folded into the
+      error list so the handler can answer "Unknown tool" instead of burying it
+      in a "Parameter validation failed" payload's `data.errors`.
 
   ## Examples
 
@@ -42,25 +54,25 @@ defmodule ConduitMcp.Validation do
       {:ok, %{"name" => "Alice"}}
 
       iex> ConduitMcp.Validation.validate_tool_params(MyServer, "calc", %{"age" => "-5"})
-      {:error, [%{parameter: "age", value: -5, message: "must be greater than or equal to 0"}]}
+      {:error, [%{"parameter" => "age", "value" => -5, "message" => "must be greater than or equal to 0"}]}
+
+      iex> ConduitMcp.Validation.validate_tool_params(MyServer, "nope", %{})
+      {:error, :tool_not_found}
 
   """
+  @spec validate_tool_params(module(), String.t(), map()) ::
+          {:ok, map()} | {:error, [map()] | :tool_not_found}
   def validate_tool_params(server_module, tool_name, params) when is_map(params) do
     if validation_enabled?() do
       case get_tool_validation_schema(server_module, tool_name) do
         {:ok, schema} ->
           validate_with_schema(schema, params, tool_name)
 
+        # Propagated verbatim so the handler can answer with a single clear
+        # "Unknown tool" error instead of burying it inside a
+        # "Parameter validation failed" payload's `data.errors`.
         {:error, :tool_not_found} ->
-          error = [
-            %{
-              parameter: nil,
-              value: nil,
-              message: "Tool '#{tool_name}' not found"
-            }
-          ]
-
-          {:error, format_validation_errors(error)}
+          {:error, :tool_not_found}
 
         {:error, :no_validation_schema} ->
           # Server doesn't have validation schemas - skip validation
@@ -74,20 +86,19 @@ defmodule ConduitMcp.Validation do
 
   def validate_tool_params(_server_module, _tool_name, params) do
     {:error,
-     [
-       %{
-         parameter: nil,
-         value: params,
-         message: "Parameters must be a map"
-       }
-     ]}
+     format_validation_errors([
+       %{parameter: nil, value: params, message: "Parameters must be a map"}
+     ])}
   end
 
   @doc """
   Validates prompt arguments using the compiled NimbleOptions schema.
 
-  Similar to `validate_tool_params/3` but for prompt arguments.
+  Same return contract as `validate_tool_params/3`, with
+  `{:error, :prompt_not_found}` in place of `{:error, :tool_not_found}`.
   """
+  @spec validate_prompt_args(module(), String.t(), map()) ::
+          {:ok, map()} | {:error, [map()] | :prompt_not_found}
   def validate_prompt_args(server_module, prompt_name, args) when is_map(args) do
     if validation_enabled?() do
       case get_prompt_validation_schema(server_module, prompt_name) do
@@ -95,14 +106,7 @@ defmodule ConduitMcp.Validation do
           validate_with_schema(schema, args, prompt_name)
 
         {:error, :prompt_not_found} ->
-          {:error,
-           [
-             %{
-               parameter: nil,
-               value: nil,
-               message: "Prompt '#{prompt_name}' not found"
-             }
-           ]}
+          {:error, :prompt_not_found}
 
         {:error, :no_validation_schema} ->
           # Server doesn't have validation schemas - skip validation
@@ -115,20 +119,22 @@ defmodule ConduitMcp.Validation do
 
   def validate_prompt_args(_server_module, _prompt_name, args) do
     {:error,
-     [
-       %{
-         parameter: nil,
-         value: args,
-         message: "Arguments must be a map"
-       }
-     ]}
+     format_validation_errors([
+       %{parameter: nil, value: args, message: "Arguments must be a map"}
+     ])}
   end
 
   @doc """
   Formats validation errors into a standardized format for JSON-RPC responses.
 
-  Takes NimbleOptions validation errors and converts them to a format
-  suitable for MCP error responses.
+  Converts atom-keyed error maps to the string-keyed form used in MCP error
+  responses. The error lists `validate_tool_params/3` and
+  `validate_prompt_args/3` return are already in that form, and formatting
+  them again returns them unchanged.
+
+  Also accepts the bare `:tool_not_found` / `:prompt_not_found` atoms those
+  functions can return, so a caller matching `{:error, errs}` and formatting
+  `errs` cannot raise `FunctionClauseError` on a name typo.
 
   ## Examples
 
@@ -136,9 +142,20 @@ defmodule ConduitMcp.Validation do
       iex> ConduitMcp.Validation.format_validation_errors(errors)
       [%{"parameter" => "age", "value" => -5, "message" => "must be >= 0"}]
 
+      iex> ConduitMcp.Validation.format_validation_errors(:tool_not_found)
+      [%{"parameter" => nil, "value" => nil, "message" => "Unknown tool"}]
+
   """
+  @spec format_validation_errors([map()] | :tool_not_found | :prompt_not_found) :: [map()]
   def format_validation_errors(errors) when is_list(errors) do
     Enum.map(errors, &format_single_error/1)
+  end
+
+  def format_validation_errors(:tool_not_found), do: [not_found_error("Unknown tool")]
+  def format_validation_errors(:prompt_not_found), do: [not_found_error("Unknown prompt")]
+
+  defp not_found_error(message) do
+    %{"parameter" => nil, "value" => nil, "message" => message}
   end
 
   # Private functions
@@ -203,11 +220,7 @@ defmodule ConduitMcp.Validation do
     # clean schema has already had those markers stripped, so NimbleOptions does
     # not check them either. They failed *open*.
     coerced_params =
-      if Keyword.get(config, :type_coercion, true) do
-        apply_type_coercion(atom_params, full_schema)
-      else
-        atom_params
-      end
+      apply_type_coercion(atom_params, full_schema, Keyword.get(config, :type_coercion, true))
 
     # Handle custom validations that NimbleOptions doesn't support directly
     case validate_custom_constraints(coerced_params, full_schema) do
@@ -406,7 +419,8 @@ defmodule ConduitMcp.Validation do
     # does not intern stays a binary, which makes `Map.to_list/1` a non-keyword
     # list and raises out of `NimbleOptions.validate/2` — so the same mistake
     # surfaced as a validation error or an internal error depending on whether
-    # the atom happened to exist. Same atom-table luck as RC3, one level up.
+    # the atom happened to exist. `normalize_params/2` removes that atom-table
+    # dependence for nested keys; this removes it one level up.
     errors =
       unknown_key_errors(nil, params, schema, false) ++
         collect_schema_errors(params, schema, nil)
@@ -633,7 +647,10 @@ defmodule ConduitMcp.Validation do
     end
   end
 
-  defp apply_type_coercion(params, schema) do
+  # `enabled` is the global `:type_coercion` setting, overridden per param by
+  # its own `type_coercion:` option. An object param's setting is inherited by
+  # its fields unless a field sets its own.
+  defp apply_type_coercion(params, schema, enabled) do
     # Build a map for O(1) lookup instead of O(n) Enum.find per param
     schema_map = Map.new(schema)
 
@@ -643,7 +660,8 @@ defmodule ConduitMcp.Validation do
           {param_name, value}
 
         param_opts ->
-          {param_name, coerce_param(value, param_opts)}
+          {param_name,
+           coerce_param(value, param_opts, Keyword.get(param_opts, :type_coercion, enabled))}
       end
     end)
   end
@@ -651,16 +669,19 @@ defmodule ConduitMcp.Validation do
   # A declared object's fields are validated for type, so they have to be
   # coerced for type too — otherwise `%{"age" => "30"}` is accepted at the top
   # level and the identical `%{"bag" => %{"age" => "30"}}` is rejected.
-  defp coerce_param(value, param_opts) when is_map(value) do
+  defp coerce_param(value, param_opts, enabled) when is_map(value) do
     case Keyword.get(param_opts, :keys) do
-      nil -> coerce_value(value, Keyword.get(param_opts, :type))
-      nested_schema -> apply_type_coercion(value, nested_schema)
+      nil -> coerce_value(value, Keyword.get(param_opts, :type), enabled)
+      nested_schema -> apply_type_coercion(value, nested_schema, enabled)
     end
   end
 
-  defp coerce_param(value, param_opts) do
-    coerce_value(value, Keyword.get(param_opts, :type))
+  defp coerce_param(value, param_opts, enabled) do
+    coerce_value(value, Keyword.get(param_opts, :type), enabled)
   end
+
+  defp coerce_value(value, _type, false), do: value
+  defp coerce_value(value, type, true), do: coerce_value(value, type)
 
   defp coerce_value(value, :integer) when is_binary(value) do
     case Integer.parse(value) do

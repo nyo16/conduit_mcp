@@ -150,6 +150,22 @@ defmodule ConduitMcp.Plugs.RateLimitTest do
       assert String.to_integer(retry_after) >= 1
     end
 
+    defmodule FixedDenyBackend do
+      @moduledoc false
+      # Denies with the wait the calling test put in its process dictionary.
+      def hit(_key, _scale, _limit), do: {:deny, Process.get(:deny_ms)}
+    end
+
+    test "Retry-After rounds the backend's wait up to whole seconds, at least 1" do
+      opts = RateLimit.init(backend: FixedDenyBackend, key_func: fn _conn -> "k" end)
+
+      for {ms, expected} <- [{19, "1"}, {1_000, "1"}, {1_001, "2"}, {1_500, "2"}, {60_000, "60"}] do
+        Process.put(:deny_ms, ms)
+        result = RateLimit.call(conn(:post, "/"), opts)
+        assert get_resp_header(result, "retry-after") == [expected], "wait #{ms} ms"
+      end
+    end
+
     test "emits telemetry on deny" do
       key = "test-telemetry-deny-#{System.unique_integer([:positive])}"
 
@@ -196,6 +212,61 @@ defmodule ConduitMcp.Plugs.RateLimitTest do
       # User 2 is not affected
       result2 = RateLimit.call(conn(:post, "/"), opts_user2)
       refute result2.halted
+    end
+  end
+
+  describe "default key function (no :key_func passed)" do
+    # Every other test in this file passes an explicit :key_func, so the
+    # out-of-the-box behaviour of a DoS control was never exercised.
+    defp ip_conn(remote_ip), do: Map.put(conn(:post, "/"), :remote_ip, remote_ip)
+
+    test "distinct IPv4 addresses get distinct buckets" do
+      opts = RateLimit.init(backend: @backend, limit: 1, scale: 60_000)
+      octet = rem(System.unique_integer([:positive]), 200)
+
+      refute RateLimit.call(ip_conn({198, 51, 100, octet}), opts).halted
+      assert RateLimit.call(ip_conn({198, 51, 100, octet}), opts).halted
+
+      # A different address is unaffected by the exhausted bucket.
+      refute RateLimit.call(ip_conn({198, 51, 100, octet + 1}), opts).halted
+    end
+
+    test "IPv6 addresses in one /64 share a bucket" do
+      # A host is typically allocated a whole /64, so per-address keys would let
+      # one client rotate its interface identifier to get a fresh bucket.
+      opts = RateLimit.init(backend: @backend, limit: 1, scale: 60_000)
+      subnet = rem(System.unique_integer([:positive]), 60_000)
+
+      refute RateLimit.call(ip_conn({0x2001, 0xDB8, 0, subnet, 0, 0, 0, 1}), opts).halted
+      assert RateLimit.call(ip_conn({0x2001, 0xDB8, 0, subnet, 0xABCD, 1, 2, 3}), opts).halted
+
+      # A different /64 is unaffected by the exhausted bucket.
+      refute RateLimit.call(ip_conn({0x2001, 0xDB8, 1, subnet, 0, 0, 0, 1}), opts).halted
+    end
+
+    defmodule DenyingBackend do
+      @moduledoc false
+      # Records the key it was asked about and always denies. The shared
+      # TestRateLimiter would put every malformed-IP request in one global
+      # bucket, so the test could only pass once per VM.
+      def hit(key, _scale, _limit) do
+        send(self(), {:hit, key})
+        {:deny, 1_000}
+      end
+    end
+
+    test "a malformed remote_ip returns a response instead of killing the request" do
+      # `:inet.ntoa/1` returns {:error, :einval} here; piping that into
+      # to_string/1 used to raise Protocol.UndefinedError.
+      opts = RateLimit.init(backend: DenyingBackend, limit: 1, scale: 60_000)
+
+      for remote_ip <- [{1, 2, 3}, nil] do
+        conn = RateLimit.call(ip_conn(remote_ip), opts)
+
+        assert conn.halted
+        assert conn.status == 429
+        assert_received {:hit, "unknown"}
+      end
     end
   end
 end

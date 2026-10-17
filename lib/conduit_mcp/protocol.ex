@@ -101,41 +101,23 @@ defmodule ConduitMcp.Protocol do
   defdelegate method_not_found, to: ConduitMcp.Errors
   defdelegate invalid_params, to: ConduitMcp.Errors
   defdelegate internal_error, to: ConduitMcp.Errors
+  # The moduledoc above advertised `server_error/0` while this block omitted
+  # it, so `ConduitMcp.Protocol.server_error()` raised UndefinedFunctionError.
+  defdelegate server_error, to: ConduitMcp.Errors
   defdelegate resource_not_found, to: ConduitMcp.Errors
   defdelegate task_not_ready, to: ConduitMcp.Errors
   defdelegate request_cancelled, to: ConduitMcp.Errors
 
   @doc """
-  Core MCP methods as defined in the specification.
+  Every MCP method the library routes, mapped to its internal name.
+
+  Derived from `ConduitMcp.Handler`'s routing table rather than being a second
+  hand-maintained copy: the previous list was missing six routed methods
+  (`resources/templates/list`, all four `tasks/*`, and
+  `notifications/cancelled`).
   """
-  def methods do
-    %{
-      # Lifecycle
-      "initialize" => :initialize,
-      "notifications/initialized" => :initialized,
-      "ping" => :ping,
-
-      # Tools
-      "tools/list" => :list_tools,
-      "tools/call" => :call_tool,
-
-      # Resources
-      "resources/list" => :list_resources,
-      "resources/read" => :read_resource,
-      "resources/subscribe" => :subscribe_resource,
-      "resources/unsubscribe" => :unsubscribe_resource,
-
-      # Prompts
-      "prompts/list" => :list_prompts,
-      "prompts/get" => :get_prompt,
-
-      # Completion
-      "completion/complete" => :complete,
-
-      # Logging
-      "logging/setLevel" => :set_log_level
-    }
-  end
+  @spec methods() :: %{optional(String.t()) => atom()}
+  defdelegate methods, to: ConduitMcp.Handler
 
   @doc """
   Validates if a message is a valid JSON-RPC 2.0 request.

@@ -24,16 +24,24 @@ defmodule ConduitMcp.Session.Janitor do
 
   ## Options
 
-  - `:store` (required) — module implementing `ConduitMcp.Session.Store`
+  - `:store` (required) - module implementing `ConduitMcp.Session.Store`
     that defines a `cleanup/1` callback.
-  - `:ttl` — maximum session age in milliseconds (default: 30 minutes).
+  - `:ttl` - maximum session age in milliseconds (default: 30 minutes).
     Sessions whose `created_at` exceeds this age are evicted.
-  - `:interval` — interval between cleanup runs in milliseconds
+  - `:interval` - interval between cleanup runs in milliseconds
     (default: 1 minute).
-  - `:name` — registered process name (default: module name).
+  - `:name` - registered process name (default: module name).
+  - `:telemetry_event` - event emitted after each run (default
+    `[:conduit_mcp, :session, :cleanup]`), with measurements
+    `%{removed: count}` and metadata `%{store: store}`.
+  - `:noun` - what the swept rows are called in the debug log
+    (default `"expired sessions"`).
 
-  Emits `[:conduit_mcp, :session, :cleanup]` telemetry on each run with
-  metadata `%{store: store, removed: count}`.
+  The last two exist because `ConduitMcp.Application` reuses this janitor for
+  the cancellation table. Without them a consumer's
+  `[:conduit_mcp, :session, :cleanup]` handler would receive cancellation
+  evictions as session evictions once a minute, and the same count would be
+  published under two event names - one of them wrong.
   """
 
   use GenServer
@@ -42,6 +50,8 @@ defmodule ConduitMcp.Session.Janitor do
 
   @default_ttl :timer.minutes(30)
   @default_interval :timer.minutes(1)
+  @default_event [:conduit_mcp, :session, :cleanup]
+  @default_noun "expired sessions"
 
   def start_link(opts) do
     name = Keyword.get(opts, :name, __MODULE__)
@@ -51,10 +61,14 @@ defmodule ConduitMcp.Session.Janitor do
   @impl true
   def init(opts) do
     store = Keyword.fetch!(opts, :store)
-    ttl = Keyword.get(opts, :ttl, @default_ttl)
-    interval = Keyword.get(opts, :interval, @default_interval)
 
-    unless function_exported?(store, :cleanup, 1) do
+    # `function_exported?/3` is false for a module that is merely not loaded
+    # yet, which under interactive code loading (dev, test, `mix run`, any
+    # release not built with `:embedded`) is the normal state at boot. Without
+    # the `ensure_loaded?` the janitor would warn spuriously and then skip the
+    # sweep on every tick for the life of the node, leaving the table it was
+    # added to bound growing unbounded.
+    unless cleanup_exported?(store) do
       Logger.warning(
         "ConduitMcp.Session.Janitor: store #{inspect(store)} does not implement " <>
           "cleanup/1; janitor will idle. Remove this child from your supervision " <>
@@ -62,31 +76,39 @@ defmodule ConduitMcp.Session.Janitor do
       )
     end
 
-    schedule_cleanup(interval)
-    {:ok, %{store: store, ttl: ttl, interval: interval}}
+    state = %{
+      store: store,
+      ttl: Keyword.get(opts, :ttl, @default_ttl),
+      interval: Keyword.get(opts, :interval, @default_interval),
+      event: Keyword.get(opts, :telemetry_event, @default_event),
+      noun: Keyword.get(opts, :noun, @default_noun)
+    }
+
+    schedule_cleanup(state.interval)
+    {:ok, state}
   end
 
   @impl true
-  def handle_info(:cleanup, %{store: store, ttl: ttl, interval: interval} = state) do
-    if function_exported?(store, :cleanup, 1) do
+  def handle_info(:cleanup, state) do
+    %{store: store, ttl: ttl, event: event, noun: noun} = state
+
+    if cleanup_exported?(store) do
       removed = store.cleanup(ttl)
       count = if is_integer(removed), do: removed, else: 0
 
-      :telemetry.execute(
-        [:conduit_mcp, :session, :cleanup],
-        %{removed: count},
-        %{store: store}
-      )
+      :telemetry.execute(event, %{removed: count}, %{store: store})
 
       if count > 0 do
-        Logger.debug("session janitor removed #{count} expired sessions",
-          store: inspect(store)
-        )
+        Logger.debug("session janitor removed #{count} #{noun}", store: inspect(store))
       end
     end
 
-    schedule_cleanup(interval)
+    schedule_cleanup(state.interval)
     {:noreply, state}
+  end
+
+  defp cleanup_exported?(store) do
+    Code.ensure_loaded?(store) and function_exported?(store, :cleanup, 1)
   end
 
   defp schedule_cleanup(interval) do
