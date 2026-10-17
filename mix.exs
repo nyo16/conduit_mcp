@@ -170,7 +170,12 @@ defmodule ConduitMcp.MixProject do
         "guides/protocol_eras.md",
         "guides/mrtr.md",
         "guides/subscriptions.md",
-        "guides/tasks_extension.md"
+        "guides/tasks_extension.md",
+        "guides/client.md",
+        "guides/client_permissions_and_hooks.md",
+        "guides/client_hub.md",
+        "guides/client_llm_adapters.md",
+        "guides/client_security.md"
       ],
       groups_for_extras: [
         Changelog: ["CHANGELOG.md"],
@@ -192,6 +197,13 @@ defmodule ConduitMcp.MixProject do
           "guides/mrtr.md",
           "guides/subscriptions.md",
           "guides/tasks_extension.md"
+        ],
+        Client: [
+          "guides/client.md",
+          "guides/client_permissions_and_hooks.md",
+          "guides/client_hub.md",
+          "guides/client_llm_adapters.md",
+          "guides/client_security.md"
         ]
       ],
       groups_for_modules: [

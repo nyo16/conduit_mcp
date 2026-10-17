@@ -77,8 +77,8 @@ defmodule ConduitMcp.Client do
   fetch every page (capped: 100 pages, 10 000 items, a repeated or
   over-1 KiB cursor fails with `kind: :pagination_cycle`) and keep the
   result in the client's `ConduitMcp.Client.Cache`, which serves it again
-  while the server's `ttlMs` hint says it is fresh. `cached_tools/1` and
-  `tool/2` read the cache without asking the server.
+  while the server's `ttlMs` hint says it is fresh. `cached_tools/2` and
+  `tool/3` read the cache without asking the server.
 
   Every listed tool goes through intake: a tool whose name is outside the
   spec charset (`[A-Za-z0-9_.-]`, 1-128 characters), whose definition is
