@@ -278,7 +278,8 @@ defmodule ConduitMcp.Client.Transport.Stdio do
       max_message_bytes: state.opts[:max_message_bytes],
       max_junk_lines: state.opts[:max_junk_lines],
       stdin_grace: state.opts[:stdin_grace],
-      term_grace: state.opts[:term_grace]
+      term_grace: state.opts[:term_grace],
+      logger_metadata: ConduitMcp.Client.Telemetry.inherited_logger_metadata()
     }
 
     {:ok, pid} = PortOwner.start_link(spec)

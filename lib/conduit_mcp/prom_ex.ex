@@ -749,6 +749,48 @@ if Code.ensure_loaded?(PromEx) do
             measurement: fn _measurements -> 1 end
           ),
           counter(
+            metric_prefix ++ [:client, :input_request, :start, :total],
+            event_name: [:conduit_mcp, :client, :input_request, :start],
+            description: "Server-to-client input requests the MCP client started answering",
+            measurement: fn _measurements -> 1 end,
+            tags: [:method],
+            tag_values: &extract_client_tags/1
+          ),
+          counter(
+            metric_prefix ++ [:client, :input_request, :total],
+            event_name: [:conduit_mcp, :client, :input_request, :stop],
+            description: "Server-to-client input requests the MCP client answered",
+            measurement: fn _measurements -> 1 end,
+            tags: [:method, :status],
+            tag_values: &extract_client_tags/1
+          ),
+          distribution(
+            metric_prefix ++ [:client, :input_request, :duration, duration_unit],
+            event_name: [:conduit_mcp, :client, :input_request, :stop],
+            description: "MCP client input request (handler) duration distribution",
+            measurement: :duration,
+            unit: {:native, duration_unit},
+            tags: [:method],
+            tag_values: &extract_client_tags/1,
+            reporter_options: [
+              buckets: [10, 50, 100, 250, 500, 1_000, 5_000, 30_000, 60_000, 300_000]
+            ]
+          ),
+          counter(
+            metric_prefix ++ [:client, :input_request, :exception, :total],
+            event_name: [:conduit_mcp, :client, :input_request, :exception],
+            description: "MCP client input request handlers that raised",
+            measurement: fn _measurements -> 1 end,
+            tags: [:method],
+            tag_values: &extract_client_tags/1
+          ),
+          last_value(
+            metric_prefix ++ [:client, :transport, :mailbox, :message_queue_len],
+            event_name: [:conduit_mcp, :client, :transport, :mailbox],
+            description: "MCP client connection mailbox length when over its threshold",
+            measurement: :message_queue_len
+          ),
+          counter(
             metric_prefix ++ [:client, :connection, :transition, :total],
             event_name: [:conduit_mcp, :client, :connection, :transition],
             description: "MCP client connection state changes",

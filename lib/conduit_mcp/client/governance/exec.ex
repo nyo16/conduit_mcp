@@ -16,14 +16,18 @@ defmodule ConduitMcp.Client.Governance.Exec do
 
   @type failure :: :raise | :exit | :timeout
 
-  @doc "Calls `fun` with `args` in a supervised task, waiting at most `timeout` ms."
-  @spec run(pid(), function() | {module(), atom()}, [term()], timeout()) ::
+  @doc """
+  Calls `fun` with `args` in a supervised task, waiting at most `timeout`
+  ms. The task gets `logger_metadata` (the client's, never the caller's).
+  """
+  @spec run(pid(), function() | {module(), atom()}, [term()], timeout(), keyword()) ::
           {:ok, term()} | {:failed, failure()}
-  def run(task_sup, fun, args, timeout) do
+  def run(task_sup, fun, args, timeout, logger_metadata) do
     caller = self()
 
     task =
       Task.Supervisor.async_nolink(task_sup, fn ->
+        Logger.metadata(logger_metadata)
         guard(caller)
         call(fun, args)
       end)

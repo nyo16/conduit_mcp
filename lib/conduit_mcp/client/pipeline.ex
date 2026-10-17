@@ -476,7 +476,15 @@ defmodule ConduitMcp.Client.Pipeline do
         {:error, Error.new(:denied, :no_approver, decision)}
 
       true ->
-        case Exec.run(s.view.task_sup, s.settings.on_ask, [s.call, s.ctx], s.settings.ask_timeout) do
+        metadata = Telemetry.logger_metadata(s.env.telemetry)
+
+        case Exec.run(
+               s.view.task_sup,
+               s.settings.on_ask,
+               [s.call, s.ctx],
+               s.settings.ask_timeout,
+               metadata
+             ) do
           {:ok, {:allow, :once}} ->
             decision(s, decision, :once)
             {:ok, s}

@@ -24,6 +24,7 @@ defmodule ConduitMcp.Client.Connection.ServerRequests do
   alias ConduitMcp.Client.Connection.Data
   alias ConduitMcp.Client.Connection.Requests
   alias ConduitMcp.Client.Input
+  alias ConduitMcp.Client.Telemetry
   alias ConduitMcp.Protocol
   alias ConduitMcp.Reflect
 
@@ -69,6 +70,7 @@ defmodule ConduitMcp.Client.Connection.ServerRequests do
       Input.env(data.input, %{
         client: data.config.name,
         server_id: data.config.server_id,
+        transport: data.kind,
         era: data.era || :legacy,
         assigns: (related && Requests.assigns(data, related)) || data.input.assigns,
         related_request_id: related,
@@ -76,7 +78,13 @@ defmodule ConduitMcp.Client.Connection.ServerRequests do
         origin: data.config.elicitation[:origin] || data.origin
       })
 
-    task = Task.Supervisor.async_nolink(data.task_sup, Input, :answer, [method, params, env])
+    metadata = Telemetry.inherited_logger_metadata()
+
+    task =
+      Task.Supervisor.async_nolink(data.task_sup, fn ->
+        Logger.metadata(metadata)
+        Input.answer(method, params, env)
+      end)
 
     entry = %{ref: task.ref, pid: task.pid, related: related}
     data = %{data | server_requests: Map.put(data.server_requests, id, entry)}

@@ -44,6 +44,7 @@ defmodule ConduitMcp.Client.ConfigTest do
                context: false,
                tools: false,
                allow_idle: false,
+               max_tool_iterations: 5,
                rejection_code: -1
              }
 

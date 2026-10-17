@@ -89,7 +89,8 @@ defmodule ConduitMcp.Client.Connection do
   250 ms are delivered as one trailing notification, so a flood reaches
   subscribers at most twice per window. Each delivered `list_changed`
   marks the matching `ConduitMcp.Client.Cache` list stale and, if it was
-  ever fetched, refreshes it (at most two refreshes per burst).
+  ever fetched, refreshes it: at most two refreshes per burst, and at most
+  one per second per list under a sustained flood.
 
   ## Change notifications and resource subscriptions
 
@@ -198,10 +199,17 @@ defmodule ConduitMcp.Client.Connection do
   @impl :gen_statem
   def init(%Config{} = config) do
     Process.flag(:trap_exit, true)
-    Logger.metadata(mcp_client: ConduitMcp.Reflect.text(config.name, 64))
+    {transport, opts} = config.transport
+
+    # Inherited by every process the connection and its transport spawn;
+    # `Data.publish/2` keeps `mcp_era` current.
+    Logger.metadata(
+      Telemetry.logger_metadata(
+        Telemetry.base(config.name, config.server_id, transport.kind(), nil)
+      )
+    )
 
     {:ok, task_sup, _value} = Registry.lookup({:task_sup, config.name})
-    {transport, opts} = config.transport
 
     case transport.init(opts, %{owner: self(), task_sup: task_sup, key: config.name}) do
       {:ok, tstate} ->
@@ -257,6 +265,13 @@ defmodule ConduitMcp.Client.Connection do
     end
   end
 
+  # A `list_changed` refetch held back by the once-a-second cap (HB-4).
+  def handle_event(:info, {:"$mcp_refetch", kind}, :ready, data),
+    do: {:keep_state, Refresh.deferred(kind, data)}
+
+  def handle_event(:info, {:"$mcp_refetch", kind}, _state, data),
+    do: {:keep_state, Refresh.drop_deferred(kind, data)}
+
   def handle_event(:info, message, state, data), do: transport_info(message, state, data)
 
   def handle_event({:timeout, {:req, id}}, id, _state, data),
@@ -298,6 +313,8 @@ defmodule ConduitMcp.Client.Connection do
   defp transport_info(message, _state, data) do
     case data.transport.handle_info(message, data.tstate) do
       {:ok, events, tstate} ->
+        if Telemetry.mailbox_due?(), do: Telemetry.mailbox(Data.telemetry(data))
+
         {:keep_state, %{data | tstate: tstate},
          Enum.map(events, &{:next_event, :internal, {:transport, &1}})}
 

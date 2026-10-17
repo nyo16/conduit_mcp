@@ -646,7 +646,10 @@ defmodule ConduitMcp.Client.Hooks do
   defp invoke(hook, args, env) do
     start = System.monotonic_time()
 
-    case Exec.run(env.task_sup, hook.fun, args, hook.timeout || env.hook_timeout) do
+    timeout = hook.timeout || env.hook_timeout
+    metadata = Telemetry.logger_metadata(env.telemetry)
+
+    case Exec.run(env.task_sup, hook.fun, args, timeout, metadata) do
       {:ok, value} -> {:ok, value, start}
       {:failed, reason} -> {:failed, reason, start}
     end

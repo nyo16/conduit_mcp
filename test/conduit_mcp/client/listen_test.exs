@@ -73,6 +73,31 @@ defmodule ConduitMcp.Client.ListenTest do
       assert {_id, %{"toolsListChanged" => true} = filter} = expect_listen(conn)
       assert map_size(filter) == 1
     end
+
+    test "no fifth listen opens while four are open (HT-9)" do
+      {name, conn} = start_modern()
+      assert ConduitMcp.Client.Connection.Listen.max_listens() == 4
+
+      # Make-before-break keeps at most two listens in normal operation;
+      # four lingering ones (a server that never ends the replaced streams)
+      # are put in place directly.
+      lingering =
+        Map.new(1_001..1_004, fn id ->
+          {id, %{filter: %{"x" => true}, status: :closing, acked: %{}}}
+        end)
+
+      :sys.replace_state(conn, fn {state, data} ->
+        {state, %{data | listen: %{data.listen | listens: lingering}}}
+      end)
+
+      :ok = Client.subscribe_notifications(name)
+      _ = state(conn)
+
+      refute_receive {:fake_transport, ^conn,
+                      {:request, %{"method" => "subscriptions/listen"}, _}}
+
+      assert map_size(state(conn).listen.listens) == 4
+    end
   end
 
   describe "acknowledgment and routing" do

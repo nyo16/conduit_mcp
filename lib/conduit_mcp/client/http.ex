@@ -75,6 +75,10 @@ if Code.ensure_loaded?(Finch) do
     name is never turned into an atom itself.
     """
     @spec pool_name(term()) :: atom()
+    # sobelow_skip ["DOS.StringToAtom"]
+    # The atom is a fixed prefix plus 24 hex characters of a SHA-256 of the
+    # client's operator-chosen name: one atom per distinct client, never
+    # derived from server or request input (per-user clients pass `finch:`).
     def pool_name(key) do
       hash =
         :sha256

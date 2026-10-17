@@ -365,6 +365,73 @@ defmodule ConduitMcp.Client.HandlerRuntimeTest do
       assert_no_leaks(name, conn)
     end
 
+    test "a sampling loop past 5 tool rounds is refused before the handler (SC-2)",
+         %{name: name} do
+      conn = start(name, protocol: :legacy, sampling: [rejection_code: -7])
+      ready_legacy(name, conn)
+      call = pending_call(name, conn)
+      {_task, call_id} = call
+
+      # One tool round: the model asked for a tool, the server ran it.
+      round = fn n ->
+        [
+          %{
+            "role" => "assistant",
+            "content" => [%{"type" => "tool_use", "id" => "u#{n}", "name" => "t", "input" => %{}}]
+          },
+          %{
+            "role" => "user",
+            "content" => %{"type" => "tool_result", "toolUseId" => "u#{n}", "content" => []}
+          }
+        ]
+      end
+
+      five = Enum.flat_map(1..5, round)
+      server_request(conn, 1, "sampling/createMessage", sampling(%{"messages" => five}), call_id)
+      assert %{"result" => _} = expect_response(conn, 1)
+      assert_received {:sampling, _, _, _}
+
+      six = five ++ round.(6)
+      server_request(conn, 2, "sampling/createMessage", sampling(%{"messages" => six}), call_id)
+      assert %{"error" => %{"code" => -7, "message" => message}} = expect_response(conn, 2)
+      assert message =~ "tool"
+      refute_received {:sampling, _, _, _}
+
+      finish_call(conn, call)
+      assert_no_leaks(name, conn)
+    end
+
+    test "sampling: [max_tool_iterations: n] moves the cap (SC-2)", %{name: name} do
+      conn = start(name, protocol: :legacy, sampling: [max_tool_iterations: 1])
+      ready_legacy(name, conn)
+      call = pending_call(name, conn)
+      {_task, call_id} = call
+
+      use_and_result = [
+        %{
+          "role" => "assistant",
+          "content" => %{"type" => "tool_use", "id" => "u", "name" => "t"}
+        },
+        %{"role" => "user", "content" => %{"type" => "tool_result", "toolUseId" => "u"}}
+      ]
+
+      messages = use_and_result ++ use_and_result
+
+      server_request(
+        conn,
+        1,
+        "sampling/createMessage",
+        sampling(%{"messages" => messages}),
+        call_id
+      )
+
+      assert %{"error" => %{"code" => -1}} = expect_response(conn, 1)
+      refute_received {:sampling, _, _, _}
+
+      finish_call(conn, call)
+      assert_no_leaks(name, conn)
+    end
+
     test "beyond max_server_requests the server gets busy", %{name: name} do
       conn = start(name, protocol: :legacy, max_server_requests: 1)
       ready_legacy(name, conn)

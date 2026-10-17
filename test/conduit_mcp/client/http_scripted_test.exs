@@ -568,6 +568,27 @@ defmodule ConduitMcp.Client.HTTPScriptedTest do
              Client.call_tool(name, "t", %{})
   end
 
+  test "HT-1: an application/zip body is never unpacked, even when it holds a valid answer" do
+    url =
+      ScriptedServer.start(
+        modern(fn conn, %{"method" => "tools/call"} = request ->
+          answer = JSON.encode!(text_result(request, "unpacked"))
+
+          {:ok, {_name, zip}} =
+            :zip.create(~c"answer.zip", [{~c"answer.json", answer}], [:memory])
+
+          conn
+          |> Plug.Conn.put_resp_content_type("application/zip")
+          |> Plug.Conn.send_resp(200, zip)
+        end)
+      )
+
+    name = ready(url, protocol: :modern)
+
+    assert {:error, %Error{kind: :transport, reason: {:unexpected_status, 200}}} =
+             Client.call_tool(name, "t", %{})
+  end
+
   test "HT-2: a JSON body over 8 MiB fails with :message_too_large" do
     big = :binary.copy("x", 9 * 1024 * 1024)
 
@@ -623,6 +644,32 @@ defmodule ConduitMcp.Client.HTTPScriptedTest do
     assert {:error, %Error{kind: :timeout}} = Client.call_tool(name, "t", %{}, timeout: 1_000)
     elapsed = System.monotonic_time(:millisecond) - started
     assert elapsed >= 1_000 and elapsed < 1_600
+    assert_receive {:closed, _stream}, 2_000
+  end
+
+  test "HT-3: a legacy call past its deadline is cancelled with notifications/cancelled" do
+    test = self()
+
+    url =
+      ScriptedServer.start(
+        legacy(fn conn, %{"method" => "tools/call"} ->
+          conn =
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.send_chunked(200)
+
+          drip_until_closed(conn, test, " ")
+        end)
+      )
+
+    name = ready(url, protocol: :legacy)
+    assert {:error, %Error{kind: :timeout}} = Client.call_tool(name, "t", %{}, timeout: 500)
+    assert_receive {:scripted, "tools/call", _headers, %{"id" => id}}
+
+    assert_receive {:scripted, "notifications/cancelled", _headers,
+                    %{"params" => %{"requestId" => ^id, "reason" => "timeout"}}},
+                   2_000
+
     assert_receive {:closed, _stream}, 2_000
   end
 
