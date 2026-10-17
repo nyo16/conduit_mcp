@@ -10,18 +10,25 @@ defmodule ConduitMcp.Client.ToolCall do
 
   `meta` is user `_meta` for the request; reserved keys are added (and win)
   when the request is encoded, not here.
+
+  `call_id` is the LLM provider's id for the call (Anthropic `tool_use.id`,
+  OpenAI `call_id`, Gemini `functionCall.id`), set by the
+  `ConduitMcp.Client.Adapters.*` modules so a result can be routed back to
+  the model. It is never sent to the server; it is kept out of `meta`
+  because `meta` is forwarded as the request's `_meta`.
   """
 
   alias ConduitMcp.Client.Canonical
 
   @enforce_keys [:server_id, :name, :args, :args_digest]
-  defstruct [:server_id, :name, :args, :args_digest, meta: %{}]
+  defstruct [:server_id, :name, :args, :args_digest, call_id: nil, meta: %{}]
 
   @type t :: %__MODULE__{
           server_id: String.t(),
           name: String.t(),
           args: map(),
           meta: map(),
+          call_id: String.t() | nil,
           args_digest: String.t()
         }
 
@@ -34,6 +41,7 @@ defmodule ConduitMcp.Client.ToolCall do
   ## Options
 
     * `:meta` - user `_meta` for the request (default `%{}`).
+    * `:call_id` - the LLM provider's call id (default `nil`).
 
   ## Example
 
@@ -50,6 +58,7 @@ defmodule ConduitMcp.Client.ToolCall do
       name: name,
       args: args,
       meta: Keyword.get(opts, :meta, %{}),
+      call_id: Keyword.get(opts, :call_id),
       args_digest: Canonical.sha256(args)
     }
   end
