@@ -222,7 +222,7 @@ defmodule ConduitMcp.EndpointIntegrationTest do
       conn = json_rpc_request("resources/read", %{"uri" => "nope://missing"})
       response = parse_response(conn)
 
-      assert response["error"]["code"] == ConduitMcp.Errors.resource_not_found()
+      assert response["error"]["code"] == ConduitMcp.Protocol.Legacy.resource_not_found()
       assert response["error"]["message"] == "Resource not found: nope://missing"
     end
 

@@ -48,12 +48,11 @@ defmodule ConduitMcp.Client.Negotiation do
   @modern_version "2026-07-28"
   @client_versions [@modern_version, "2025-11-25", "2025-06-18"]
 
-  # Mirror the modern error codes `ConduitMcp.Errors` defines for the server
-  # (header_mismatch/0, missing_required_client_capability/0,
-  # unsupported_protocol_version/0).
-  @header_mismatch -32_020
-  @missing_client_capability -32_021
-  @unsupported_protocol_version -32_022
+  # The modern error codes the server side defines; read at compile time so
+  # they can be matched in function heads.
+  @header_mismatch ConduitMcp.Errors.header_mismatch()
+  @missing_client_capability ConduitMcp.Errors.missing_required_client_capability()
+  @unsupported_protocol_version ConduitMcp.Errors.unsupported_protocol_version()
   @modern_error_codes [
     @header_mismatch,
     @missing_client_capability,

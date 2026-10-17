@@ -478,7 +478,7 @@ defmodule ConduitMcp.DSLTest do
       # Test with URI that doesn't match any template
       {:error, error} = DSLTestServer.handle_read_resource(conn, "unknown://resource")
 
-      assert error["code"] == ConduitMcp.Errors.resource_not_found()
+      assert error["code"] == ConduitMcp.Protocol.Legacy.resource_not_found()
       assert error["message"] =~ "Resource not found"
     end
 

@@ -29,8 +29,11 @@ defmodule ConduitMcp.Endpoint do
 
   ## Options
 
-  - `:name` — Server name for the MCP `initialize` response
-  - `:version` — Server version for the MCP `initialize` response
+  - `:name` — Server name reported by `initialize` and `server/discover`
+  - `:version` — Server version reported by `initialize` and `server/discover`
+  - `:instructions` — Natural-language guidance for clients, returned by
+    `initialize` and `server/discover` (a transport's `:instructions` option
+    takes precedence)
   - `:rate_limit` — HTTP rate limiting config (same format as transport opts)
   - `:message_rate_limit` — Message-level rate limiting config
   - `:auth` — Authentication config (same format as transport opts)
@@ -46,7 +49,8 @@ defmodule ConduitMcp.Endpoint do
      - `handle_list_resources/1`, `handle_read_resource/2`
      - `handle_list_prompts/1`, `handle_get_prompt/3`
   4. Generates validation schema lookups for the existing validation pipeline
-  5. Generates `__endpoint_config__/0` for transport auto-extraction
+  5. Generates `__endpoint_config__/0` for transport auto-extraction (and
+     `__instructions__/0` when `:instructions` is given)
   6. Generates `__capabilities__/0` for selective capability advertisement
 
   Because the Endpoint implements `ConduitMcp.Server`, it works with the
@@ -119,7 +123,15 @@ defmodule ConduitMcp.Endpoint do
     capabilities = build_capabilities(tools, resources, prompts)
 
     endpoint_config =
-      Keyword.take(opts, [:name, :version, :rate_limit, :message_rate_limit, :auth])
+      Keyword.take(opts, [:name, :version, :instructions, :rate_limit, :message_rate_limit, :auth])
+
+    instructions_clause =
+      if Keyword.has_key?(opts, :instructions) do
+        quote do
+          @doc false
+          def __instructions__, do: unquote(Keyword.fetch!(opts, :instructions))
+        end
+      end
 
     templated_uris = collect_templated_uris(resources)
 
@@ -137,6 +149,7 @@ defmodule ConduitMcp.Endpoint do
       scope_clauses: scope_clauses,
       key_conversion: key_conversion,
       endpoint_config: endpoint_config,
+      instructions_clause: instructions_clause,
       capabilities: capabilities
     })
   end
@@ -187,7 +200,7 @@ defmodule ConduitMcp.Endpoint do
         def handle_read_resource(_conn, uri) do
           {:error,
            %{
-             "code" => ConduitMcp.Errors.resource_not_found(),
+             "code" => ConduitMcp.Protocol.Legacy.resource_not_found(),
              "message" => "Resource not found: #{ConduitMcp.Reflect.text(uri)}"
            }}
         end
@@ -231,6 +244,8 @@ defmodule ConduitMcp.Endpoint do
       def __endpoint_config__ do
         unquote(parts.endpoint_config)
       end
+
+      unquote(parts.instructions_clause)
 
       # --- Capabilities ---
 
@@ -390,7 +405,7 @@ defmodule ConduitMcp.Endpoint do
               nil ->
                 {:error,
                  %{
-                   "code" => ConduitMcp.Errors.resource_not_found(),
+                   "code" => ConduitMcp.Protocol.Legacy.resource_not_found(),
                    "message" => "Resource not found: #{ConduitMcp.Reflect.text(uri)}"
                  }}
             end
@@ -402,7 +417,7 @@ defmodule ConduitMcp.Endpoint do
           def handle_read_resource(_conn, uri) do
             {:error,
              %{
-               "code" => ConduitMcp.Errors.resource_not_found(),
+               "code" => ConduitMcp.Protocol.Legacy.resource_not_found(),
                "message" => "Resource not found: #{ConduitMcp.Reflect.text(uri)}"
              }}
           end

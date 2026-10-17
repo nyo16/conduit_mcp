@@ -678,7 +678,7 @@ defmodule ConduitMcp.EndpointTest do
       for mod <- [StaticOnlyEndpoint, TemplatedEndpoint] do
         assert {:error, error} = mod.handle_read_resource(%Plug.Conn{}, hostile)
 
-        assert error["code"] == ConduitMcp.Errors.resource_not_found()
+        assert error["code"] == ConduitMcp.Protocol.Legacy.resource_not_found()
         assert String.length(error["message"]) <= 260, "#{inspect(mod)} did not clamp"
         refute error["message"] =~ "\x00", "#{inspect(mod)} reflected a NUL"
         refute error["message"] =~ "\u202E", "#{inspect(mod)} reflected a bidi override"

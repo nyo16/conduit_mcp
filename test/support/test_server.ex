@@ -88,7 +88,10 @@ defmodule ConduitMcp.TestServer do
 
   def handle_read_resource(_conn, _uri) do
     {:error,
-     %{"code" => ConduitMcp.Errors.resource_not_found(), "message" => "Resource not found"}}
+     %{
+       "code" => ConduitMcp.Protocol.Legacy.resource_not_found(),
+       "message" => "Resource not found"
+     }}
   end
 
   @impl true

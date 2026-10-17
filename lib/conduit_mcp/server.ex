@@ -250,17 +250,46 @@ defmodule ConduitMcp.Server do
     handle_unsubscribe_resource: 2
   ]
 
+  @doc """
+  Declares the module a `ConduitMcp.Server`.
+
+  Options:
+
+    * `:dsl` — `true` (default) enables the `ConduitMcp.DSL` macros; `false`
+      is manual mode, with default callbacks you override.
+    * `:instructions` — natural-language guidance for clients about this
+      server, returned as `instructions` by both the legacy `initialize`
+      result and the modern `server/discover` result. Generates
+      `__instructions__/0`. A transport's own `:instructions` option takes
+      precedence.
+
+  ## Example
+
+      use ConduitMcp.Server, instructions: "Use search before fetch."
+  """
   defmacro __using__(opts) do
     use_dsl = Keyword.get(opts, :dsl, true)
+
+    instructions =
+      if Keyword.has_key?(opts, :instructions) do
+        quote do
+          @doc false
+          def __instructions__, do: unquote(Keyword.fetch!(opts, :instructions))
+        end
+      end
 
     if use_dsl do
       quote do
         @behaviour ConduitMcp.Server
         use ConduitMcp.DSL
+
+        unquote(instructions)
       end
     else
       quote do
         @behaviour ConduitMcp.Server
+
+        unquote(instructions)
 
         # Default implementations for manual mode
         def handle_list_tools(_conn) do
@@ -269,9 +298,10 @@ defmodule ConduitMcp.Server do
 
         # Codes match `ConduitMcp.Handler`, Endpoint mode and DSL mode, so an
         # identical MCP request gets an identical error whichever mode the
-        # server was written in. `-32602` for an unknown tool/prompt and
-        # `-32002` for a missing resource are what the MCP specification
-        # prescribes.
+        # server was written in. `-32602` for an unknown tool/prompt and the
+        # legacy `-32002` for a missing resource are what the MCP specification
+        # prescribes; `ConduitMcp.Protocol.Modern` turns the latter into
+        # `-32602` for modern clients.
         def handle_call_tool(_conn, name, _params) do
           {:error,
            %{
@@ -287,7 +317,7 @@ defmodule ConduitMcp.Server do
         def handle_read_resource(_conn, uri) do
           {:error,
            %{
-             "code" => ConduitMcp.Errors.resource_not_found(),
+             "code" => ConduitMcp.Protocol.Legacy.resource_not_found(),
              "message" => "Resource not found: #{ConduitMcp.Reflect.text(uri)}"
            }}
         end

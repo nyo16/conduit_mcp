@@ -1382,7 +1382,7 @@ defmodule ConduitMcp.DSL do
         def handle_read_resource(_conn, uri) do
           {:error,
            %{
-             "code" => ConduitMcp.Errors.resource_not_found(),
+             "code" => ConduitMcp.Protocol.Legacy.resource_not_found(),
              "message" => "Resource not found: #{ConduitMcp.Reflect.text(uri)}"
            }}
         end
@@ -1697,7 +1697,7 @@ defmodule ConduitMcp.DSL do
       quote do
         {:error,
          %{
-           "code" => ConduitMcp.Errors.resource_not_found(),
+           "code" => ConduitMcp.Protocol.Legacy.resource_not_found(),
            "message" => "Resource not found: #{ConduitMcp.Reflect.text(uri)}"
          }}
       end

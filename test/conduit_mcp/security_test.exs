@@ -280,7 +280,7 @@ defmodule ConduitMcp.SecurityTest do
 
       response = Handler.handle_request(request, ConduitMcp.TestServer)
 
-      assert response["error"]["code"] == ConduitMcp.Errors.resource_not_found()
+      assert response["error"]["code"] == ConduitMcp.Errors.invalid_params()
       assert String.length(response["error"]["message"]) <= 300
       refute response["error"]["message"] =~ "\x00"
     end

@@ -38,6 +38,9 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   - `:server_name` — advertised server name in the `initialize` response (falls
     back to the module's `__endpoint_config__/0` if defined)
   - `:server_version` — advertised server version (same fallback behavior)
+  - `:instructions` — instructions returned by `initialize` and
+    `server/discover`; overrides the server module's own (`use
+    ConduitMcp.Server, instructions:` or the Endpoint's `:instructions`)
   - `:auth` — authentication plug configuration. See `ConduitMcp.Plugs.Auth`
     and `ConduitMcp.Plugs.OAuth`. Resolved once, in `init/1`.
   - `:rate_limit` — HTTP-level rate limit configuration. See `ConduitMcp.Plugs.RateLimit`.
@@ -314,7 +317,15 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     session_id = Session.generate_id()
     protocol_version = get_in(response_map, ["result", "protocolVersion"])
 
-    case Session.create(session_id, %{"protocol_version" => protocol_version}, store) do
+    # The principal is recorded so a modern request that also presents this
+    # session id (a "mixed" request) can be checked against it: see
+    # `ConduitMcp.Era`. `nil` when the transport has no auth.
+    metadata = %{
+      "protocol_version" => protocol_version,
+      "principal" => ConduitMcp.Principal.id(conn)
+    }
+
+    case Session.create(session_id, metadata, store) do
       :ok ->
         {:ok, put_resp_header(conn, "mcp-session-id", session_id)}
 
