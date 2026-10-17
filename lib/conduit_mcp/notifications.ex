@@ -78,6 +78,30 @@ defmodule ConduitMcp.Notifications do
     Protocol.notification("notifications/prompts/list_changed")
   end
 
+  @doc """
+  Builds a `notifications/subscriptions/acknowledged` notification: the first
+  message on a `subscriptions/listen` stream, carrying the filter subset the
+  server honours (`ConduitMcp.Subscriptions.Filter`). `2026-07-28` only.
+  """
+  @spec subscriptions_acknowledged_notification(map()) :: map()
+  def subscriptions_acknowledged_notification(notifications) when is_map(notifications) do
+    Protocol.notification("notifications/subscriptions/acknowledged", %{
+      "notifications" => notifications
+    })
+  end
+
+  @doc """
+  Builds a `notifications/cancelled` notification for `request_id`.
+
+  A `2026-07-28` server sends it for one purpose only: to end the
+  `subscriptions/listen` stream that `request_id` opened.
+  """
+  @spec cancelled_notification(String.t() | integer(), String.t() | nil) :: map()
+  def cancelled_notification(request_id, reason \\ nil) do
+    params = maybe_put(%{"requestId" => request_id}, "reason", reason)
+    Protocol.notification("notifications/cancelled", params)
+  end
+
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 end

@@ -83,7 +83,7 @@ defmodule ConduitMcp.DiscoverTest do
       result = Discover.result(EndpointWithInstructions, %Plug.Conn{})
 
       assert result["supportedVersions"] == ["2026-07-28", "2025-11-25", "2025-06-18"]
-      assert result["capabilities"] == EndpointWithInstructions.__capabilities__()
+      assert result["capabilities"] == %{"tools" => %{"listChanged" => true}}
       assert result["instructions"] == "Endpoint guidance."
     end
 
@@ -91,14 +91,21 @@ defmodule ConduitMcp.DiscoverTest do
       refute Map.has_key?(Discover.result(NoInstructions, %Plug.Conn{}), "instructions")
     end
 
-    # The modern era has no resources/subscribe, so advertising it would
-    # invite a call that answers -32601.
-    test "does not advertise legacy resource subscription" do
+    # Modern resource subscription is `subscriptions/listen`'s
+    # `resourceSubscriptions`, which every server answers - whether or not
+    # it implements the legacy `resources/subscribe` callback.
+    test "advertises listen-backed change notifications, regardless of legacy callbacks" do
       legacy = ConduitMcp.Capabilities.build(SubscribingServer)
       modern = Discover.result(SubscribingServer, %Plug.Conn{})["capabilities"]
+      no_callback = Discover.result(NoInstructions, %Plug.Conn{})["capabilities"]
 
-      assert legacy["resources"]["subscribe"] == true
-      refute Map.has_key?(modern["resources"], "subscribe")
+      assert legacy["resources"] == %{"listChanged" => false, "subscribe" => true}
+
+      for caps <- [modern, no_callback] do
+        assert caps["resources"] == %{"listChanged" => true, "subscribe" => true}
+        assert caps["tools"] == %{"listChanged" => true}
+        assert caps["prompts"] == %{"listChanged" => true}
+      end
     end
   end
 

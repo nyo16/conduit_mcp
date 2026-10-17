@@ -155,6 +155,18 @@ if Code.ensure_loaded?(PromEx) do
       them
       - Tags: `method`
 
+    ### Subscription Metrics
+
+    - `{prefix}_subscription_start_total` - Counter of `subscriptions/listen`
+      streams opened
+    - `{prefix}_subscription_stop_total` - Counter of streams ended
+      - Tags: `reason` (`client_closed`, `max_lifetime`, `token_expired`,
+        `idle_timeout`)
+    - `{prefix}_subscription_duration_milliseconds` - Distribution of how long
+      streams stayed open
+      - Tags: `reason`
+      - Buckets: [1 000, 10 000, 60 000, 300 000, 900 000, 1 800 000, 3 600 000]
+
     ## PromQL Examples
 
     ### Request Rate by Method
@@ -235,8 +247,9 @@ if Code.ensure_loaded?(PromEx) do
     - ✅ LOW: `prompt_name` (user-defined but typically limited)
     - ❌ HIGH: `uri` is NOT included (unbounded)
     - ❌ HIGH: `server_module` is NOT included (not useful)
-    - ❌ HIGH: the rate limit `key`, and cancellation `request_id`, `scope` and
-      `reason`, are NOT included (unbounded or client-supplied)
+    - ❌ HIGH: the rate limit `key`, cancellation `request_id`, `scope` and
+      `reason`, and subscription `filters`, are NOT included (unbounded,
+      client-supplied, or a list)
 
     All string values are normalized to prevent cardinality explosion.
     """
@@ -259,7 +272,8 @@ if Code.ensure_loaded?(PromEx) do
         auth_metrics(metric_prefix, duration_unit),
         cancellation_metrics(metric_prefix),
         cleanup_metrics(metric_prefix),
-        mrtr_metrics(metric_prefix)
+        mrtr_metrics(metric_prefix),
+        subscription_metrics(metric_prefix)
       ]
     end
 
@@ -573,9 +587,49 @@ if Code.ensure_loaded?(PromEx) do
       )
     end
 
+    # Subscription metrics from [:conduit_mcp, :subscription, :start] and
+    # [:conduit_mcp, :subscription, :stop]. `reason` is a closed set of
+    # atoms; `filters` is a list, so it is not a tag. Durations are those of
+    # long-lived streams, hence the coarse buckets and fixed unit.
+    defp subscription_metrics(metric_prefix) do
+      Event.build(
+        :conduit_mcp_subscription_metrics,
+        [
+          counter(
+            metric_prefix ++ [:subscription, :start, :total],
+            event_name: [:conduit_mcp, :subscription, :start],
+            description: "Total number of MCP subscriptions/listen streams opened",
+            measurement: fn _measurements -> 1 end
+          ),
+          counter(
+            metric_prefix ++ [:subscription, :stop, :total],
+            event_name: [:conduit_mcp, :subscription, :stop],
+            description: "Total number of MCP subscriptions/listen streams ended",
+            measurement: fn _measurements -> 1 end,
+            tags: [:reason],
+            tag_values: &extract_reason_tag/1
+          ),
+          distribution(
+            metric_prefix ++ [:subscription, :duration, :milliseconds],
+            event_name: [:conduit_mcp, :subscription, :stop],
+            description: "How long MCP subscriptions/listen streams stayed open",
+            measurement: :duration,
+            unit: {:native, :millisecond},
+            tags: [:reason],
+            tag_values: &extract_reason_tag/1,
+            reporter_options: [
+              buckets: [1_000, 10_000, 60_000, 300_000, 900_000, 1_800_000, 3_600_000]
+            ]
+          )
+        ]
+      )
+    end
+
     # Tag extraction functions
 
     defp extract_status_tag(%{status: status}), do: %{status: status}
+
+    defp extract_reason_tag(%{reason: reason}), do: %{reason: reason}
 
     defp extract_store_tag(%{store: store}), do: %{store: normalize_string(store)}
 

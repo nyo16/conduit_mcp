@@ -133,6 +133,9 @@ defmodule ConduitMcp.ConformanceMatrixTest do
         })
     }
 
+  defp params_for("subscriptions/listen", _ctx),
+    do: %{"notifications" => %{"toolsListChanged" => true}}
+
   defp params_for("notifications/initialized", _ctx), do: %{}
   defp params_for("notifications/cancelled", _ctx), do: %{"requestId" => "not-in-flight"}
 
@@ -241,6 +244,11 @@ defmodule ConduitMcp.ConformanceMatrixTest do
     cond do
       notification?(method) ->
         assert reply == :noreply, "#{method} (modern): expected :noreply, got #{inspect(reply)}"
+
+      # Answered only as a stream (see ConduitMcp.Subscriptions).
+      method == "subscriptions/listen" ->
+        assert {:stream, %ConduitMcp.StreamSpec{kind: :listen, request_id: 1} = spec} = reply
+        assert spec.subscription.ack == %{"toolsListChanged" => true}
 
       Map.has_key?(Handler.methods(:modern), method) ->
         assert {:reply, %{"result" => result} = response} = reply,

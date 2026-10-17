@@ -24,7 +24,9 @@ defmodule ConduitMcp.Handler do
       `io.modelcontextprotocol/clientCapabilities`, or the method is
       `server/discover`. Routed methods: `server/discover`, `tools/list`,
       `tools/call`, `resources/list`, `resources/templates/list`,
-      `resources/read`, `prompts/list`, `prompts/get`, `completion/complete`.
+      `resources/read`, `prompts/list`, `prompts/get`, `completion/complete`
+      and `subscriptions/listen` (a long-lived stream; see
+      `ConduitMcp.Subscriptions`).
       Results carry `resultType`, `serverInfo` `_meta` and (on cacheable
       results) `ttlMs`/`cacheScope`; see `ConduitMcp.Protocol.Modern`.
     * **Legacy** (`2025-11-25`, `2025-06-18`) — everything else. Routed
@@ -63,7 +65,10 @@ defmodule ConduitMcp.Handler do
 
   - `[:conduit_mcp, :request, :stop]` — every request, with
     `%{duration: <native>}` and metadata `%{method, server_module, status,
-    era, protocol_version, traceparent, tracestate, baggage}`.
+    era, protocol_version, traceparent, tracestate, baggage}` — except a
+    `subscriptions/listen` that opened a stream, which is measured by
+    `[:conduit_mcp, :subscription, :start | :stop]` instead (emitted by the
+    transport): its duration is the stream's lifetime, not a latency.
   - `[:conduit_mcp, :tool, :execute]` — per `tools/call`.
   - `[:conduit_mcp, :resource, :read]` — per `resources/read`.
   - `[:conduit_mcp, :prompt, :get]` — per `prompts/get`.
@@ -119,6 +124,7 @@ defmodule ConduitMcp.Handler do
   alias ConduitMcp.Handler.Legacy
   alias ConduitMcp.Handler.Modern
   alias ConduitMcp.Protocol
+  alias ConduitMcp.StreamSpec
 
   @typedoc """
   The era-neutral outcome of a method: a result map, an input-required
@@ -145,7 +151,9 @@ defmodule ConduitMcp.Handler do
     * `{:stream, spec}` — a `ConduitMcp.StreamSpec`: a response the
       transport may send as a Server-Sent Events stream, relaying the
       notifications the work emits ahead of it. Returned for a modern
-      `tools/call` whose `_meta` carries a `progressToken` or a `logLevel`.
+      `tools/call` whose `_meta` carries a `progressToken` or a `logLevel`
+      (kind `:response`), and for a modern `subscriptions/listen` whose
+      filter parsed (kind `:listen`).
     * `:noreply` — a notification: nothing to send.
   """
   @type reply :: {:reply, map()} | {:stream, ConduitMcp.StreamSpec.t()} | :noreply
@@ -212,9 +220,13 @@ defmodule ConduitMcp.Handler do
   handled or ignored, or for a JSON-RPC response: the server sends no
   requests of its own, so a response answers nothing and is dropped.
   `ConduitMcp.Transport.Shared.dispatch_post/2` answers `:ok` with
-  `202 Accepted` and no body. A `{:stream, spec}` dispatch is run to
-  completion in the calling process (`ConduitMcp.StreamSpec.run/1`): its
-  notifications are dropped and its final response is returned.
+  `202 Accepted` and no body. A `{:stream, spec}` dispatch of kind
+  `:response` is run to completion in the calling process
+  (`ConduitMcp.StreamSpec.run/1`): its notifications are dropped and its
+  final response is returned. One of kind `:listen` — a modern
+  `subscriptions/listen` — is answered `-32601`: a long-lived notification
+  stream needs a transport that can hold it open, which a map return
+  cannot.
 
   A notification has no id to correlate, so JSON-RPC says a failed one is
   dropped. Legacy `notifications/cancelled` is the exception: in these cases
@@ -244,16 +256,30 @@ defmodule ConduitMcp.Handler do
   # callers pass an adapter-built conn; the default exists for direct calls.
   @spec handle_request(map(), module(), Plug.Conn.t() | map()) :: map() | :ok
   def handle_request(request, server_module, conn \\ %Plug.Conn{}) do
-    request
-    |> dispatch(server_module, conn)
-    |> to_map(request)
+    case dispatch(request, server_module, conn) do
+      {:stream, %StreamSpec{kind: :listen} = spec} -> reject_listen(request, server_module, spec)
+      reply -> to_map(reply, request)
+    end
+  end
+
+  defp reject_listen(request, server_module, spec) do
+    ctx = Ctx.from_conn(spec.conn) || %Ctx{era: :modern, conn: spec.conn}
+
+    ConduitMcp.Handler.Pipeline.instrument(request, server_module, ctx, fn ->
+      Protocol.Modern.to_response(
+        spec.request_id,
+        spec.method,
+        {:error, ConduitMcp.Errors.method_not_found(),
+         "Method not found: subscriptions/listen requires a streaming transport", nil}
+      )
+    end)
   end
 
   @doc false
   @spec to_map(reply(), map()) :: map() | :ok
   def to_map({:reply, response}, _request), do: response
   def to_map(:noreply, _request), do: :ok
-  def to_map({:stream, spec}, _request), do: ConduitMcp.StreamSpec.run(spec)
+  def to_map({:stream, spec}, _request), do: StreamSpec.run(spec)
 
   @doc """
   Every method this handler routes, in either era, mapped to its internal
