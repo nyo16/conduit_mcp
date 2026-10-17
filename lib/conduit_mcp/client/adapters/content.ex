@@ -26,6 +26,21 @@ defmodule ConduitMcp.Client.Adapters.Content do
           {:text, String.t()}
           | {:media, media_kind(), mime :: String.t(), base64 :: String.t(), source :: String.t()}
 
+  @typedoc "One parsed provider tool call: a call to run, or the error answer for a rejected one."
+  @type parsed :: {:call, ConduitMcp.Client.ToolCall.t()} | {:rejected, map()}
+
+  @doc "Splits parsed calls (in order) into `{calls, rejected}`, each keeping its order."
+  @spec split_calls([parsed()]) :: {[ConduitMcp.Client.ToolCall.t()], [map()]}
+  def split_calls(parsed) do
+    {calls, rejected} =
+      Enum.reduce(parsed, {[], []}, fn
+        {:call, call}, {calls, rejected} -> {[call | calls], rejected}
+        {:rejected, answer}, {calls, rejected} -> {calls, [answer | rejected]}
+      end)
+
+    {Enum.reverse(calls), Enum.reverse(rejected)}
+  end
+
   @doc "Maximum description size in bytes after sanitizing."
   @spec max_description_bytes() :: pos_integer()
   def max_description_bytes, do: @max_description_bytes

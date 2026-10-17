@@ -236,6 +236,72 @@ defmodule ConduitMcp.Client.Telemetry do
     )
   end
 
+  # --- hub and adapters (metadata keyed by the hub or the source, not a client) ---
+
+  @doc "A hub server's client exited; the hub retries in `delay_ms`."
+  @spec hub_server_failed(term(), String.t(), pos_integer(), term(), non_neg_integer()) :: :ok
+  def hub_server_failed(hub, server_id, attempt, reason, delay_ms) do
+    :telemetry.execute(
+      [:conduit_mcp, :client, :hub, :server_failed],
+      %{count: 1, delay: delay_ms},
+      %{hub: hub, server_id: server_id, attempt: attempt, reason: reason_tag(reason)}
+    )
+  end
+
+  @doc "A hub server's client was started again after `attempt` failures."
+  @spec hub_server_restarted(term(), String.t(), pos_integer()) :: :ok
+  def hub_server_restarted(hub, server_id, attempt) do
+    :telemetry.execute(
+      [:conduit_mcp, :client, :hub, :server_restarted],
+      %{count: 1},
+      %{hub: hub, server_id: server_id, attempt: attempt}
+    )
+  end
+
+  @doc """
+  Tools of a hub mangled to one exposed name and were all left out.
+  `colliders` are `{server_id, tool_name}`; tool names are sanitized here.
+  """
+  @spec hub_collision(term(), String.t(), [{String.t(), String.t()}]) :: :ok
+  def hub_collision(hub, exposed_name, colliders) do
+    :telemetry.execute(
+      [:conduit_mcp, :client, :hub, :collision],
+      %{count: length(colliders)},
+      %{
+        hub: hub,
+        exposed_name: exposed_name,
+        colliders: for({server_id, tool} <- colliders, do: {server_id, sanitize(tool)})
+      }
+    )
+  end
+
+  @doc """
+  An OpenAI tool could not be converted to strict mode and was sent with
+  `"strict": false`. `client` is the hub's or client's name; `reason` is
+  the limit hit, or `:unsupported_keyword`.
+  """
+  @spec strict_fallback(term(), :chat | :responses, String.t(), term()) :: :ok
+  def strict_fallback(client, api, exposed_name, error) do
+    reason =
+      case error do
+        {:unsupported, _path, limit} when is_atom(limit) -> limit
+        _keyword -> :unsupported_keyword
+      end
+
+    :telemetry.execute(
+      [:conduit_mcp, :client, :adapter, :strict_fallback],
+      %{count: 1},
+      %{client: client, provider: :openai, api: api, tool_name: exposed_name, reason: reason}
+    )
+  end
+
+  @doc "A tool name with every character outside `[A-Za-z0-9_-]` replaced by `_`, at most 128 bytes."
+  @spec sanitize(String.t()) :: String.t()
+  def sanitize(name), do: name |> ConduitMcp.Client.Naming.sanitize() |> binary_part_max(128)
+
+  defp binary_part_max(text, max) when byte_size(text) <= max, do: text
+  defp binary_part_max(text, max), do: binary_part(text, 0, max)
+
   @doc """
   A closed-set atom for a state-change reason: atoms pass through, a tagged
   tuple gives its tag, an `Error` its reason atom (else its kind).

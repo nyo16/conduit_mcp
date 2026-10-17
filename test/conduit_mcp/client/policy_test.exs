@@ -542,6 +542,33 @@ defmodule ConduitMcp.Client.PolicyTest do
     end
   end
 
+  describe "tainted/1 and allow_all/0 (HB-3, PO-2)" do
+    test "matches when another server's output is in the turn, minus :ignore" do
+      rule = {:all, ["mail/send", Policy.tainted(ignore: ["docs"])]}
+      ctx = fn taint -> Map.put(@approver, :taint, MapSet.new(taint)) end
+
+      assert decision([deny: [rule], allow: ["*/*"]], "mail", "send", %{}, ctx.(["web"])) == :deny
+
+      assert decision([deny: [rule], allow: ["*/*"]], "mail", "send", %{}, ctx.(["mail"])) ==
+               :allow
+
+      assert decision([deny: [rule], allow: ["*/*"]], "mail", "send", %{}, ctx.(["docs"])) ==
+               :allow
+
+      assert decision([deny: [rule], allow: ["*/*"]], "mail", "send", %{}, @approver) == :allow
+      assert decision([deny: [rule], allow: ["*/*"]], "web", "send", %{}, ctx.(["web"])) == :allow
+
+      assert_raise ArgumentError, fn -> Policy.tainted(ignore: "docs") end
+    end
+
+    test "allow_all/0 allows new and changed tools alike" do
+      tool = tool("any", "thing")
+      call = ToolCall.new("any", "thing", %{})
+
+      assert %Decision{decision: :allow} = Policy.evaluate(Policy.allow_all(), call, tool, %{})
+    end
+  end
+
   defp target do
     member_of([
       {"gh", "delete_repo"},

@@ -45,6 +45,10 @@ defmodule ConduitMcp.Client.Policy do
     * `{:rule, id, rule}` - any rule above with an explicit `rule_id` (an
       atom or a string); otherwise the id is `{list, index}`.
 
+  Function rules get the pipeline `ctx`, including `ctx.server_id` (where
+  the call goes) and `ctx.taint` (the servers whose output is in the
+  model's context, HB-3); `tainted/1` builds the common taint rule.
+
   With `:resources` / `:prompts` in `:scope`, these also apply:
 
     * `"resource:server/uri"` (glob on the URI; `*` may span `/`),
@@ -441,6 +445,48 @@ defmodule ConduitMcp.Client.Policy do
     do: fingerprint
 
   defp current_fingerprint(%Tool{} = tool), do: Fingerprint.compute(tool)
+
+  @doc """
+  A policy that allows every tool call: `allow: ["*/*"]` with
+  `allow_new_tools: true` and `pin_tools: false`. `ConduitMcp.Client.Hub`
+  accepts `policy: :allow_all` for it; it is never a default (PO-2).
+  """
+  @spec allow_all() :: t()
+  def allow_all, do: compile(allow: ["*/*"], allow_new_tools: true, pin_tools: false)
+
+  @doc """
+  A function rule matching a call made while another server's output is in
+  the model's context (HB-3): the call's `:taint` set (`ctx.taint`, see
+  `ConduitMcp.Client.Pipeline`) holds a server id other than the called
+  tool's own server and not in `:ignore`.
+
+      ask: [{:all, [{:annotation, :open_world, true}, Policy.tainted(ignore: ["docs"])]}],
+      deny: [{:all, ["mail/send", Policy.tainted()]}]
+
+  A call without a `:taint` option is never tainted. Use it in deny and ask
+  lists; in the allow list it would only widen access for tainted calls.
+
+  ## Options
+
+    * `:ignore` - server ids whose output does not count (default `[]`).
+  """
+  @spec tainted(keyword()) :: (Tool.t(), map() -> boolean())
+  def tainted(opts \\ []) do
+    ignore =
+      case Keyword.validate!(opts, ignore: [])[:ignore] do
+        ids when is_list(ids) ->
+          MapSet.new(ids)
+
+        other ->
+          raise ArgumentError, ":ignore must be a list of server ids, got: #{inspect(other)}"
+      end
+
+    fn %Tool{server_id: target}, ctx ->
+      ctx
+      |> Map.get(:taint, MapSet.new())
+      |> Enum.any?(&(&1 != target and not MapSet.member?(ignore, &1)))
+    end
+  end
 
   @doc """
   Compiles `policy` (unless already compiled) and stores it under `name` in

@@ -17,6 +17,17 @@ defmodule ConduitMcp.Client.Registry do
       and the request functions read both without messaging the
       connection.
 
+  A `ConduitMcp.Client.Hub` registers under its `:name` too:
+
+    * `{:hub, name}` - the hub supervisor. Its value (`%{table: tid,
+      config: %ConduitMcp.Client.Hub.Config{}}`) is written once in its
+      `init/1`.
+    * `{:hub_task_sup, name}`, `{:hub_servers, name}` (the
+      `DynamicSupervisor` of server clients), `{:hub_manager, name}`.
+
+  Each hub server is an ordinary client named `{:hub_server, hub, server_id}`,
+  so its keys are `{:client, {:hub_server, hub, server_id}}` and so on.
+
   The registry holds no processes of its own. Nothing outside the client
   should write to it.
   """

@@ -496,7 +496,9 @@ defmodule ConduitMcp.Telemetry do
   **Metadata:** the common keys, plus `:tool_name` (String.t | nil - the
   name with every character outside `[A-Za-z0-9_-]` replaced by `_`;
   server-supplied, never a metric tag) and `:reason` (:invalid_name |
-  :invalid_definition | :duplicate_name | :invalid_x_mcp_header).
+  :invalid_definition | :duplicate_name | :invalid_x_mcp_header, or
+  :collision when a `ConduitMcp.Client.Hub` or `ConduitMcp.Client.Adapters`
+  toolset left the tool out because its exposed name collided).
 
   #### `[:conduit_mcp, :client, :tool, :definition_changed]`
 
@@ -554,6 +556,60 @@ defmodule ConduitMcp.Telemetry do
 
   **Metadata:** as for `hook.stop`, with `:reason` (:raise | :exit |
   :timeout | :bad_return) instead of `:status`.
+
+  ### Hub and Adapter Events
+
+  Emitted by `ConduitMcp.Client.Hub` and `ConduitMcp.Client.Adapters`. The
+  hub events carry `:hub` (the hub's `:name`) instead of the client keys
+  above; `adapter.strict_fallback` carries `:client` (the hub's or client's
+  name).
+
+  #### `[:conduit_mcp, :client, :hub, :server_failed]`
+
+  A hub server's client exited (it crashed, or its supervisor gave up).
+  Emitted in the hub's manager process, which starts it again after a
+  jittered backoff.
+
+  **Measurements:** `:count` (always `1`) and `:delay` (milliseconds until
+  the restart).
+
+  **Metadata:** `:hub`, `:server_id` (String.t), `:attempt` (integer -
+  consecutive failures) and `:reason` (atom - a closed-set tag of the exit
+  reason, `:other` when it is not an atom or tagged tuple).
+
+  #### `[:conduit_mcp, :client, :hub, :server_restarted]`
+
+  The hub started a failed server's client again.
+
+  **Measurements:** `:count` (always `1`).
+
+  **Metadata:** `:hub`, `:server_id` and `:attempt`.
+
+  #### `[:conduit_mcp, :client, :hub, :collision]`
+
+  Two or more tools mangled to the same exposed name, so none of them is
+  offered (HB-1). Emitted in the caller that built the toolset, once per
+  distinct tool list (each tool also gets a `tool.rejected` with reason
+  `:collision`).
+
+  **Measurements:** `:count` (the number of colliding tools).
+
+  **Metadata:** `:hub`, `:exposed_name` (String.t) and `:colliders`
+  (`[{server_id, tool_name}]`, tool names sanitized; never a metric tag).
+
+  #### `[:conduit_mcp, :client, :adapter, :strict_fallback]`
+
+  `ConduitMcp.Client.Adapters.tools/3` sent an OpenAI tool with
+  `"strict": false` because its schema cannot be converted to strict mode
+  (`strict: :auto`).
+
+  **Measurements:** `:count` (always `1`).
+
+  **Metadata:** `:client`, `:provider` (`:openai`), `:api` (:chat |
+  :responses), `:tool_name` (the exposed name; never a metric tag) and
+  `:reason` (:unsupported_keyword, or the strict-mode limit exceeded:
+  :max_properties | :max_depth | :max_chars | :max_enum_values |
+  :max_enum_chars).
 
   ## Common Use Cases
 
@@ -822,7 +878,11 @@ defmodule ConduitMcp.Telemetry do
         [:conduit_mcp, :client, :tool, :definition_changed],
         [:conduit_mcp, :client, :policy, :decision],
         [:conduit_mcp, :client, :hook, :stop],
-        [:conduit_mcp, :client, :hook, :exception]
+        [:conduit_mcp, :client, :hook, :exception],
+        [:conduit_mcp, :client, :hub, :server_failed],
+        [:conduit_mcp, :client, :hub, :server_restarted],
+        [:conduit_mcp, :client, :hub, :collision],
+        [:conduit_mcp, :client, :adapter, :strict_fallback]
       ]
   """
   @spec events() :: [[:conduit_mcp, ...]]
@@ -860,7 +920,11 @@ defmodule ConduitMcp.Telemetry do
       [:conduit_mcp, :client, :tool, :definition_changed],
       [:conduit_mcp, :client, :policy, :decision],
       [:conduit_mcp, :client, :hook, :stop],
-      [:conduit_mcp, :client, :hook, :exception]
+      [:conduit_mcp, :client, :hook, :exception],
+      [:conduit_mcp, :client, :hub, :server_failed],
+      [:conduit_mcp, :client, :hub, :server_restarted],
+      [:conduit_mcp, :client, :hub, :collision],
+      [:conduit_mcp, :client, :adapter, :strict_fallback]
     ]
   end
 
@@ -1193,6 +1257,53 @@ defmodule ConduitMcp.Telemetry do
 
     Logger.warning(
       "MCP client hook failed: client=#{client_text(metadata)} hook=#{ConduitMcp.Reflect.text(metadata.hook_id, 64)} kind=#{metadata.kind} reason=#{metadata.reason} duration=#{duration_ms(measurements)}ms"
+    )
+  end
+
+  defp handle_event(
+         [:conduit_mcp, :client, :hub, :server_failed],
+         measurements,
+         metadata,
+         _config
+       ) do
+    require Logger
+
+    Logger.warning(
+      "MCP hub server failed: hub=#{ConduitMcp.Reflect.text(metadata.hub, 64)} server=#{metadata.server_id} reason=#{metadata.reason} attempt=#{metadata.attempt} retry_in=#{measurements.delay}ms"
+    )
+  end
+
+  defp handle_event(
+         [:conduit_mcp, :client, :hub, :server_restarted],
+         _measurements,
+         metadata,
+         _config
+       ) do
+    require Logger
+
+    Logger.info(
+      "MCP hub server restarted: hub=#{ConduitMcp.Reflect.text(metadata.hub, 64)} server=#{metadata.server_id} attempt=#{metadata.attempt}"
+    )
+  end
+
+  defp handle_event([:conduit_mcp, :client, :hub, :collision], measurements, metadata, _config) do
+    require Logger
+
+    Logger.debug(
+      "MCP hub tool name collision: hub=#{ConduitMcp.Reflect.text(metadata.hub, 64)} exposed=#{metadata.exposed_name} count=#{measurements.count}"
+    )
+  end
+
+  defp handle_event(
+         [:conduit_mcp, :client, :adapter, :strict_fallback],
+         _measurements,
+         metadata,
+         _config
+       ) do
+    require Logger
+
+    Logger.debug(
+      "MCP adapter strict-mode fallback: client=#{client_text(metadata)} api=#{metadata.api} tool=#{ConduitMcp.Reflect.text(metadata.tool_name)} reason=#{metadata.reason}"
     )
   end
 

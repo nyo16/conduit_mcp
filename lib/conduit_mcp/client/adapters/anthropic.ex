@@ -10,7 +10,8 @@ defmodule ConduitMcp.Client.Adapters.Anthropic do
 
       # ... the response stops with "tool_use" ...
       {calls, rejected} = Anthropic.tool_calls(response, toolset)
-      # run each %ToolCall{} through the client pipeline, then:
+      # run each %ToolCall{} through the client pipeline (or let
+      # ConduitMcp.Client.Adapters.execute_tool_calls/4 do all of this), then:
       results = Enum.map(outcomes, fn {call, outcome} -> Anthropic.tool_result(call.call_id, outcome) end)
       # next user turn: %{"role" => "user", "content" => rejected ++ results ++ other_blocks}
 
@@ -98,23 +99,24 @@ defmodule ConduitMcp.Client.Adapters.Anthropic do
   second list, to put in the next user turn. Other block types are ignored.
   """
   @spec tool_calls(map() | [map()], ToolSet.t()) :: {[ToolCall.t()], [map()]}
-  def tool_calls(%{"content" => blocks}, %ToolSet{} = toolset) when is_list(blocks),
-    do: tool_calls(blocks, toolset)
+  def tool_calls(response, %ToolSet{} = toolset),
+    do: response |> __tool_calls__(toolset) |> Content.split_calls()
 
-  def tool_calls(blocks, %ToolSet{} = toolset) when is_list(blocks) do
-    {calls, rejected} =
-      Enum.reduce(blocks, {[], []}, fn
-        %{"type" => "tool_use"} = block, {calls, rejected} ->
-          case to_call(block, toolset) do
-            {:ok, call} -> {[call | calls], rejected}
-            {:error, text} -> {calls, [error_block(block["id"], text) | rejected]}
-          end
+  @doc false
+  # `tool_calls/2` in the model's order, one `{:call, %ToolCall{}}` or
+  # `{:rejected, block}` per `tool_use` block, for
+  # `ConduitMcp.Client.Adapters.execute_tool_calls/4`.
+  @spec __tool_calls__(map() | [map()], ToolSet.t()) :: [Content.parsed()]
+  def __tool_calls__(%{"content" => blocks}, %ToolSet{} = toolset) when is_list(blocks),
+    do: __tool_calls__(blocks, toolset)
 
-        _other, acc ->
-          acc
-      end)
-
-    {Enum.reverse(calls), Enum.reverse(rejected)}
+  def __tool_calls__(blocks, %ToolSet{} = toolset) when is_list(blocks) do
+    for %{"type" => "tool_use"} = block <- blocks do
+      case to_call(block, toolset) do
+        {:ok, call} -> {:call, call}
+        {:error, text} -> {:rejected, error_block(block["id"], text)}
+      end
+    end
   end
 
   defp to_call(%{"name" => name} = block, toolset) do
