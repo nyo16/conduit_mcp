@@ -161,11 +161,14 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
   @doc """
   Builds a resource schema from DSL definition.
 
-  Used for `resources/list` (static URIs only).
+  Used for `resources/list` (static URIs only). `name` — required by the MCP
+  `Resource` schema in every revision — is the URI, since the DSL has no
+  separate resource name.
   """
   def build_resource_schema(%{uri: uri, description: description, mime_type: mime_type}) do
     schema = %{
-      "uri" => uri
+      "uri" => uri,
+      "name" => uri
     }
 
     schema = if description, do: Map.put(schema, "description", description), else: schema
@@ -178,14 +181,15 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
   Builds a resource-template schema from a templated DSL definition.
 
   Used for `resources/templates/list` (URIs with `{param}` placeholders).
-  Emits `uriTemplate` instead of `uri` per MCP spec.
+  Emits `uriTemplate` instead of `uri` per MCP spec, and the template as the
+  required `name`.
   """
   def build_resource_template_schema(%{
         uri: uri,
         description: description,
         mime_type: mime_type
       }) do
-    schema = %{"uriTemplate" => uri}
+    schema = %{"uriTemplate" => uri, "name" => uri}
     schema = if description, do: Map.put(schema, "description", description), else: schema
     if mime_type, do: Map.put(schema, "mimeType", mime_type), else: schema
   end

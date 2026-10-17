@@ -171,6 +171,7 @@ defmodule ConduitMcp.Transport.Shared do
 
     validate_cors_origin!(Keyword.get(opts, :cors_origin))
     validate_allowed_origins!(Keyword.get(opts, :allowed_origins))
+    validate_instructions!(Keyword.get(opts, :instructions))
     warn_if_origins_unset(opts, transport)
 
     endpoint_config = endpoint_config(server_module)
@@ -241,6 +242,13 @@ defmodule ConduitMcp.Transport.Shared do
   defp raise_allowed_origins!(origins) do
     raise ArgumentError,
           ":allowed_origins must be #{@allowed_origins_shapes}; got #{inspect(origins)}"
+  end
+
+  defp validate_instructions!(nil), do: :ok
+  defp validate_instructions!(instructions) when is_binary(instructions), do: :ok
+
+  defp validate_instructions!(instructions) do
+    raise ArgumentError, ":instructions must be a string or nil; got #{inspect(instructions)}"
   end
 
   @doc """
@@ -323,7 +331,12 @@ defmodule ConduitMcp.Transport.Shared do
       rate_limit_plug: Keyword.get(opts, :rate_limit_plug),
       message_rate_limit_plug: Keyword.get(opts, :message_rate_limit_plug),
       server_name: Keyword.get(opts, :server_name) || Keyword.get(endpoint_config, :name),
-      server_version: Keyword.get(opts, :server_version) || Keyword.get(endpoint_config, :version)
+      server_version:
+        Keyword.get(opts, :server_version) || Keyword.get(endpoint_config, :version),
+      # Only the transport's own option: the server module's instructions
+      # (`__instructions__/0`) are the fallback, read by
+      # `ConduitMcp.Discover.instructions/2`.
+      instructions: Keyword.get(opts, :instructions)
     }
 
     Map.merge(shared, transport.__transport_private__(opts))

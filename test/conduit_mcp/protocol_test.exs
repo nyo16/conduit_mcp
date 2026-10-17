@@ -10,11 +10,10 @@ defmodule ConduitMcp.ProtocolTest do
   end
 
   describe "supported_versions/0" do
-    test "returns list of supported protocol versions" do
-      versions = Protocol.supported_versions()
-      assert is_list(versions)
-      assert "2025-11-25" in versions
-      assert "2025-06-18" in versions
+    test "lists the modern and both legacy versions, newest first" do
+      assert Protocol.supported_versions() == ["2026-07-28", "2025-11-25", "2025-06-18"]
+      assert Protocol.modern_versions() == ["2026-07-28"]
+      assert Protocol.legacy_versions() == ["2025-11-25", "2025-06-18"]
     end
   end
 
@@ -27,6 +26,12 @@ defmodule ConduitMcp.ProtocolTest do
     test "returns nil for unsupported version" do
       assert Protocol.negotiate_version("1999-01-01") == nil
       assert Protocol.negotiate_version("unknown") == nil
+    end
+
+    # `initialize` is legacy-only: a modern client sends its version per
+    # request, so initialize must not settle on it.
+    test "never negotiates a modern version" do
+      assert Protocol.negotiate_version("2026-07-28") == nil
     end
   end
 
@@ -51,8 +56,11 @@ defmodule ConduitMcp.ProtocolTest do
       assert Protocol.internal_error() == -32603
     end
 
-    test "resource_not_found returns -32002" do
-      assert Protocol.resource_not_found() == -32002
+    test "resource-not-found is era-specific, not an Errors constant" do
+      refute function_exported?(ConduitMcp.Errors, :resource_not_found, 0)
+      refute function_exported?(Protocol, :resource_not_found, 0)
+      assert Protocol.Legacy.resource_not_found() == -32002
+      assert Protocol.Modern.resource_not_found() == -32602
     end
 
     test "server_error returns -32000" do

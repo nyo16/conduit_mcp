@@ -244,7 +244,7 @@ defmodule ConduitMcp.HandlerTest do
 
       assert response["jsonrpc"] == "2.0"
       assert response["id"] == 9
-      assert response["error"]["code"] == ConduitMcp.Errors.resource_not_found()
+      assert response["error"]["code"] == ConduitMcp.Protocol.Legacy.resource_not_found()
       assert response["error"]["message"] == "Resource not found"
     end
 

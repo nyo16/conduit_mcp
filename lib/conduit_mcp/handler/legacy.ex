@@ -11,6 +11,8 @@ defmodule ConduitMcp.Handler.Legacy do
 
   alias ConduitMcp.Cancellation
   alias ConduitMcp.Capabilities
+  alias ConduitMcp.Ctx
+  alias ConduitMcp.Discover
   alias ConduitMcp.Errors
   alias ConduitMcp.Handler
   alias ConduitMcp.Handler.Common
@@ -23,10 +25,11 @@ defmodule ConduitMcp.Handler.Legacy do
   alias ConduitMcp.Protocol
   alias ConduitMcp.ServerMeta
 
-  # The one routing table. `ConduitMcp.Protocol.methods/0` publishes exactly
-  # this map, so the documented method list and the dispatcher cannot drift:
-  # they are the same data. Previously `Protocol.methods/0` was a second,
-  # hand-maintained copy that did not know about six routed methods.
+  # The legacy era's one routing table. `ConduitMcp.Protocol.methods/0`
+  # publishes this map merged with the modern table, so the documented method
+  # list and the dispatchers cannot drift: they are the same data. Previously
+  # `Protocol.methods/0` was a second, hand-maintained copy that did not know
+  # about six routed methods.
   @request_methods %{
     # Lifecycle
     "initialize" => :initialize,
@@ -72,11 +75,13 @@ defmodule ConduitMcp.Handler.Legacy do
   def methods, do: Map.merge(@request_methods, @notification_methods)
 
   @doc """
-  Handles a decoded JSON-RPC message; see `ConduitMcp.Handler.handle_request/3`.
+  Handles a legacy-era message; see `ConduitMcp.Handler.handle_request/3`.
   """
-  @spec handle_request(map(), module(), Plug.Conn.t() | map()) :: map() | :ok
-  def handle_request(request, server_module, conn) do
-    Pipeline.instrument(request, server_module, fn ->
+  @spec handle_request(map(), module(), Ctx.t()) :: map() | :ok
+  def handle_request(request, server_module, %Ctx{era: :legacy} = ctx) do
+    conn = Ctx.put(ctx.conn, ctx)
+
+    Pipeline.instrument(request, server_module, ctx, fn ->
       cond do
         Protocol.valid_request?(request) ->
           handle_method(request, server_module, conn)
@@ -296,31 +301,25 @@ defmodule ConduitMcp.Handler.Legacy do
     if is_nil(negotiated_version) do
       Logger.warning(
         "Client requested unsupported protocol version: #{safe_version}. " <>
-          "Supported: #{inspect(Protocol.supported_versions())}"
+          "Supported: #{inspect(Protocol.legacy_versions())}"
       )
 
       {:error, Errors.invalid_request(),
        "Unsupported protocol version: #{safe_version}. " <>
-         "Supported versions: #{Enum.join(Protocol.supported_versions(), ", ")}", nil}
+         "Supported versions: #{Enum.join(Protocol.legacy_versions(), ", ")}", nil}
     else
-      server_name =
-        Map.get(conn.private, :server_name) || "conduit-mcp"
+      result = %{
+        "protocolVersion" => negotiated_version,
+        "serverInfo" => Ctx.server_info(conn),
+        "capabilities" => Capabilities.build(server_module)
+      }
 
-      server_version =
-        Map.get(conn.private, :server_version) ||
-          Application.spec(:conduit_mcp, :vsn) |> to_string()
-
-      {:ok,
-       %{
-         "protocolVersion" => negotiated_version,
-         "serverInfo" => %{
-           "name" => server_name,
-           "version" => server_version
-         },
-         "capabilities" => Capabilities.build(server_module)
-       }}
+      {:ok, put_instructions(result, Discover.instructions(server_module, conn))}
     end
   end
+
+  defp put_instructions(result, nil), do: result
+  defp put_instructions(result, instructions), do: Map.put(result, "instructions", instructions)
 
   defp set_log_level(params, server_module, conn) do
     level = Map.get(params, "level")

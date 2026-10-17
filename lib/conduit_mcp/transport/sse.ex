@@ -39,6 +39,9 @@ defmodule ConduitMcp.Transport.SSE do
     "content-type, authorization"; only emitted when `:cors_origin` is set)
   - `:auth` - Authentication plug configuration (optional). Supports every
     strategy `ConduitMcp.Plugs.Auth` does, plus `:oauth`.
+  - `:instructions` - instructions returned by `initialize` and
+    `server/discover`; overrides the server module's own (`use
+    ConduitMcp.Server, instructions:` or the Endpoint's `:instructions`)
   - `:base_url` - Public base URL advertised in the SSE `endpoint` event
     (e.g. `"https://mcp.example.com"`). Defaults to deriving it from the
     request's `Host` header (sanitized). Set this when running behind a proxy.

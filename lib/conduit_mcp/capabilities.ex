@@ -14,13 +14,21 @@ defmodule ConduitMcp.Capabilities do
     * `completions: %{}` — `handle_complete/3`.
     * `logging: %{}` — `handle_set_log_level/2`.
 
-  Used for the `initialize` reply.
+  Used for both the legacy `initialize` reply and the modern
+  `server/discover` result (`ConduitMcp.Discover`), so the two eras
+  advertise the same set, with one exception: `resources.subscribe` is
+  legacy-only, because the modern era has no `resources/subscribe` method.
   """
 
   alias ConduitMcp.ServerMeta
 
   @doc """
   Returns the capabilities map advertised for `server_module`.
+
+  Options:
+
+    * `:era` — `:legacy` (default) or `:modern`. Modern omits
+      `resources.subscribe`.
 
   ## Examples
 
@@ -31,11 +39,11 @@ defmodule ConduitMcp.Capabilities do
       #     "prompts" => %{"listChanged" => false}
       #   }
   """
-  @spec build(module()) :: map()
-  def build(server_module) do
+  @spec build(module(), keyword()) :: map()
+  def build(server_module, opts \\ []) do
     server_module
     |> base()
-    |> maybe_put_subscribe(server_module)
+    |> maybe_put_subscribe(server_module, Keyword.get(opts, :era, :legacy))
     |> maybe_put_completions(server_module)
     |> maybe_put_logging(server_module)
   end
@@ -52,7 +60,9 @@ defmodule ConduitMcp.Capabilities do
     end
   end
 
-  defp maybe_put_subscribe(caps, server_module) do
+  defp maybe_put_subscribe(caps, _server_module, :modern), do: caps
+
+  defp maybe_put_subscribe(caps, server_module, :legacy) do
     if ServerMeta.has?(server_module, :subscribe) and Map.has_key?(caps, "resources") do
       Map.update!(caps, "resources", &Map.put(&1, "subscribe", true))
     else

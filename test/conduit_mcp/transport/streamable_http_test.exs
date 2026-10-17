@@ -556,6 +556,55 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
       assert response["error"]["message"] =~ "Session not found"
     end
 
+    # R12 / SV-8: a modern request ignores the session it presents, but must
+    # not be able to present one bound to somebody else.
+    test "a session records its principal, and a mixed request from another principal is refused" do
+      verify = fn
+        "alice-token" -> {:ok, %{id: "alice"}}
+        "mallory-token" -> {:ok, %{id: "mallory"}}
+        _ -> {:error, "invalid"}
+      end
+
+      opts =
+        StreamableHTTP.init(
+          server_module: TestServer,
+          session: [store: ConduitMcp.Session.EtsStore],
+          auth: [strategy: :function, verify: verify]
+        )
+
+      post = fn body, token, session_id ->
+        conn(:post, "/", JSON.encode!(body))
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> then(&if(session_id, do: put_req_header(&1, "mcp-session-id", session_id), else: &1))
+        |> StreamableHTTP.call(opts)
+      end
+
+      init_conn = post.(JSON.decode!(initialize_request_body()), "alice-token", nil)
+      [session_id] = get_resp_header(init_conn, "mcp-session-id")
+
+      assert {:ok, %{"principal" => "alice"}} =
+               ConduitMcp.Session.get(session_id, ConduitMcp.Session.EtsStore)
+
+      mixed = %{
+        "jsonrpc" => "2.0",
+        "id" => 2,
+        "method" => "tools/list",
+        "params" => %{
+          "_meta" => %{
+            "io.modelcontextprotocol/protocolVersion" => "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities" => %{}
+          }
+        }
+      }
+
+      refused = JSON.decode!(post.(mixed, "mallory-token", session_id).resp_body)
+      assert refused["error"]["code"] == ConduitMcp.Errors.invalid_request()
+
+      allowed = JSON.decode!(post.(mixed, "alice-token", session_id).resp_body)
+      assert allowed["result"]["resultType"] == "complete"
+    end
+
     test "require_session: true rejects non-initialize POST without session header" do
       opts =
         StreamableHTTP.init(

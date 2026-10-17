@@ -114,8 +114,10 @@ defmodule ConduitMcp.Handler.LegacyTasks do
 
   defp missing_task_id, do: {:error, Errors.invalid_params(), "Missing taskId", nil}
 
+  # MCP 2025-11-25 (tasks): an invalid or nonexistent taskId is -32602. It was
+  # -32002, the *resource*-not-found code, which a client cannot tell apart
+  # from a missing resource.
   defp task_not_found(task_id) do
-    {:error, Errors.resource_not_found(), "Task not found: #{ConduitMcp.Reflect.text(task_id)}",
-     nil}
+    {:error, Errors.invalid_params(), "Task not found: #{ConduitMcp.Reflect.text(task_id)}", nil}
   end
 end

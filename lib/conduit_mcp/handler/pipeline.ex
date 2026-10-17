@@ -5,7 +5,7 @@ defmodule ConduitMcp.Handler.Pipeline do
   # function taking a continuation, so an era-specific handler composes them
   # around its own routing:
   #
-  #     instrument(request, server_module, fn ->
+  #     instrument(request, server_module, ctx, fn ->
   #       in_flight(conn, id, fn conn ->
   #         guard(method, id, fn -> route(...) end)
   #       end)
@@ -22,9 +22,14 @@ defmodule ConduitMcp.Handler.Pipeline do
   Wraps everything, notifications included. `fun` returns the transport-level
   reply: a response map, or `:ok` for a notification; any map with an
   `"error"` member counts as `status: :error`.
+
+  The metadata copies individual, already-validated fields of `ctx` (`era`,
+  `protocol_version` and the trace-context keys) — never the `Ctx` itself,
+  which carries the conn and the principal.
   """
-  @spec instrument(map(), module(), (-> reply)) :: reply when reply: map() | :ok
-  def instrument(request, server_module, fun) do
+  @spec instrument(map(), module(), ConduitMcp.Ctx.t(), (-> reply)) :: reply
+        when reply: map() | :ok
+  def instrument(request, server_module, ctx, fun) do
     start_time = System.monotonic_time()
 
     result = fun.()
@@ -37,7 +42,12 @@ defmodule ConduitMcp.Handler.Pipeline do
       %{
         method: telemetry_text(Map.get(request, "method")),
         server_module: server_module,
-        status: if(match?(%{"error" => _}, result), do: :error, else: :ok)
+        status: if(match?(%{"error" => _}, result), do: :error, else: :ok),
+        era: ctx.era,
+        protocol_version: ctx.version,
+        traceparent: ctx.traceparent,
+        tracestate: ctx.tracestate,
+        baggage: ctx.baggage
       }
     )
 

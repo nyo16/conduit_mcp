@@ -49,6 +49,7 @@ defmodule ConduitMcp.ServerMeta do
       validation_schema_prompt:
         function_exported?(server_module, :__validation_schema_for_prompt__, 1),
       capabilities: function_exported?(server_module, :__capabilities__, 0),
+      instructions: function_exported?(server_module, :__instructions__, 0),
       complete: function_exported?(server_module, :handle_complete, 3),
       set_log_level: function_exported?(server_module, :handle_set_log_level, 2),
       subscribe: function_exported?(server_module, :handle_subscribe_resource, 2),

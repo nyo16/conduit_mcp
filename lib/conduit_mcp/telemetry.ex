@@ -28,6 +28,15 @@ defmodule ConduitMcp.Telemetry do
       request's `"method"` is missing or not a string
     * `:server_module` (module) - The MCP server module handling the request
     * `:status` (:ok | :error) - Whether the request succeeded or failed
+    * `:era` (:modern | :legacy) - The request's protocol era (see
+      `ConduitMcp.Era`)
+    * `:protocol_version` (String.t | nil) - The modern request's `_meta`
+      protocol version, or the legacy session's negotiated version; `nil`
+      when neither is known
+    * `:traceparent`, `:tracestate`, `:baggage` (String.t | nil) - W3C trace
+      context from the request's `_meta`, already validated (`traceparent`
+      well-formed, `tracestate`/`baggage` at most 512 bytes of printable
+      ASCII); `nil` when absent or invalid
 
   **Example:**
 
