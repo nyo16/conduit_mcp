@@ -61,13 +61,20 @@ defmodule ConduitMcp.OptionalDeps do
   when it was not compiled in.
   """
   @spec oauth_plug!() :: module()
-  def oauth_plug! do
-    if Code.ensure_loaded?(@oauth_plug) do
-      @oauth_plug
+  def oauth_plug!, do: oauth_plug!(@oauth_plug)
+
+  @doc false
+  # The check behind `oauth_plug!/0`. Taking the module keeps its return
+  # type `module()` rather than one literal atom, so a caller compiles
+  # without an "undefined function" warning in builds without `:joken`.
+  @spec oauth_plug!(module()) :: module()
+  def oauth_plug!(module) when is_atom(module) do
+    if Code.ensure_loaded?(module) do
+      module
     else
       raise OptionalDependencyError,
         feature: "The :oauth auth strategy",
-        module: @oauth_plug,
+        module: module,
         deps: @joken_deps
     end
   end
@@ -113,13 +120,20 @@ defmodule ConduitMcp.OptionalDeps do
   `auth: {:oauth, ...}` starts.
   """
   @spec oauth_client!() :: module()
-  def oauth_client! do
-    if Code.ensure_loaded?(@oauth_session) do
-      @oauth_session
+  def oauth_client!, do: oauth_client!(@oauth_session)
+
+  @doc false
+  # The check behind `oauth_client!/0`. Taking the module keeps its return
+  # type `module()` rather than one literal atom, so callers compile
+  # without an "undefined function" warning in builds without `:finch`.
+  @spec oauth_client!(module()) :: module()
+  def oauth_client!(module) when is_atom(module) do
+    if Code.ensure_loaded?(module) do
+      module
     else
       raise OptionalDependencyError,
         feature: "The MCP client's OAuth support (auth: {:oauth, ...})",
-        module: @oauth_session,
+        module: module,
         deps: @finch_deps
     end
   end
@@ -131,13 +145,20 @@ defmodule ConduitMcp.OptionalDeps do
   configuration with a `:private_key` is validated.
   """
   @spec client_assertion!() :: module()
-  def client_assertion! do
-    if Code.ensure_loaded?(@client_assertion) do
-      @client_assertion
+  def client_assertion!, do: client_assertion!(@client_assertion)
+
+  @doc false
+  # The check behind `client_assertion!/0`. Taking the module keeps its
+  # return type `module()` rather than one literal atom, so callers compile
+  # without an "undefined function" warning in builds without `:jose`.
+  @spec client_assertion!(module()) :: module()
+  def client_assertion!(module) when is_atom(module) do
+    if Code.ensure_loaded?(module) do
+      module
     else
       raise OptionalDependencyError,
         feature: "OAuth private_key_jwt client authentication (the :private_key option)",
-        module: @client_assertion,
+        module: module,
         deps: [{:jose, "~> 1.11"}]
     end
   end

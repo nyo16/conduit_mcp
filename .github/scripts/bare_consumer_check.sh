@@ -67,6 +67,58 @@ defmodule BareConsumer.Server do
 end
 EOF
 
+# An MCP server on stdio for the client check: newline-delimited JSON-RPC in,
+# one JSON line per reply out, through ConduitMcp.Handler.dispatch/3 (which
+# serves both eras). check.exs starts it with `elixir -pa <every ebin>`.
+cat > "$WORKDIR/stdio_server.exs" <<'EOF'
+:ok = :logger.remove_handler(:default)
+{:ok, _apps} = Application.ensure_all_started(:conduit_mcp)
+:ok = :io.setopts(:standard_io, binary: true)
+
+conn = %Plug.Conn{
+  remote_ip: {127, 0, 0, 1},
+  private: %{server_module: BareConsumer.Server, server_name: nil, server_version: nil, instructions: nil}
+}
+
+write = fn message -> IO.binwrite(:stdio, [JSON.encode!(message), ?\n]) end
+
+# Nothing is ever published here: acknowledge a modern listen and stay silent.
+ack = fn %ConduitMcp.StreamSpec{request_id: id, subscription: filter} ->
+  ack = ConduitMcp.Notifications.subscriptions_acknowledged_notification(filter.ack)
+  params = Map.get(ack, "params") || %{}
+  meta = Map.put(Map.get(params, "_meta") || %{}, "io.modelcontextprotocol/subscriptionId", id)
+  write.(Map.put(ack, "params", Map.put(params, "_meta", meta)))
+end
+
+loop = fn loop ->
+  case IO.binread(:stdio, :line) do
+    :eof ->
+      System.halt(0)
+
+    {:error, _reason} ->
+      System.halt(1)
+
+    line ->
+      case String.trim_trailing(line) do
+        "" ->
+          :ok
+
+        json ->
+          case ConduitMcp.Handler.dispatch(JSON.decode!(json), BareConsumer.Server, conn) do
+            {:reply, response} -> write.(response)
+            {:stream, %ConduitMcp.StreamSpec{kind: :listen} = spec} -> ack.(spec)
+            {:stream, spec} -> write.(ConduitMcp.StreamSpec.run(spec))
+            :noreply -> :ok
+          end
+      end
+
+      loop.(loop)
+  end
+end
+
+loop.(loop)
+EOF
+
 cat > "$WORKDIR/check.exs" <<'EOF'
 defmodule BareCheck do
   @moduledoc false
@@ -128,6 +180,8 @@ defmodule BareCheck do
     http_client_raises!()
     oauth_client_raises!()
     serves_without_optional_deps!()
+    in_process_client_works!()
+    stdio_client_works!()
 
     IO.puts("\nbare-consumer check: OK")
   end
@@ -260,6 +314,15 @@ ConduitMcp.OptionalDependencyError:\n#{Exception.message(e)}")
 
         IO.puts("  ok  Streamable HTTP client transport without :finch rejected at start")
     end
+
+    try do
+      ConduitMcp.OptionalDeps.finch!()
+      die("OptionalDeps.finch!/0 returned without :finch")
+    rescue
+      e in ConduitMcp.OptionalDependencyError ->
+        assert!(Exception.message(e) =~ ":finch", "finch!/0 must name :finch")
+        IO.puts("  ok  ConduitMcp.Client.HTTP without :finch names :finch")
+    end
   end
 
   # auth: {:oauth, ...} without :finch must refuse to start, naming :finch,
@@ -320,6 +383,54 @@ ConduitMcp.OptionalDependencyError:\n#{Exception.message(e)}")
     IO.puts("  ok  transport serves requests with no optional deps installed")
   end
 
+  # The client needs no optional dep for the InProcess and stdio transports.
+  defp in_process_client_works!() do
+    {:ok, sup} =
+      ConduitMcp.Client.start_link(
+        name: :bare_in_process,
+        transport: {ConduitMcp.Client.Transport.InProcess, server: BareConsumer.Server}
+      )
+
+    client_round_trip!(:bare_in_process, "InProcess")
+    Supervisor.stop(sup)
+  end
+
+  defp stdio_client_works!() do
+    elixir = Path.expand("../../bin/elixir", to_string(:code.lib_dir(:elixir)))
+    ebins = Path.wildcard(Path.join(Mix.Project.build_path(), "lib/*/ebin"))
+    erts_bin = Path.join(to_string(:code.root_dir()), "bin")
+
+    {:ok, sup} =
+      ConduitMcp.Client.start_link(
+        name: :bare_stdio,
+        transport:
+          {ConduitMcp.Client.Transport.Stdio,
+           command: if(File.regular?(elixir), do: elixir, else: "elixir"),
+           args: Enum.flat_map(ebins, &["-pa", &1]) ++ [Path.expand("stdio_server.exs")],
+           env: %{"PATH" => erts_bin <> ":" <> System.get_env("PATH", "")}}
+      )
+
+    client_round_trip!(:bare_stdio, "stdio")
+    Supervisor.stop(sup)
+  end
+
+  defp client_round_trip!(client, label) do
+    case ConduitMcp.Client.await_ready(client, 30_000) do
+      :ok -> :ok
+      {:error, error} -> die("#{label} client not ready: #{Exception.message(error)}")
+    end
+
+    {:ok, tools} = ConduitMcp.Client.list_all_tools(client)
+    assert!(Enum.map(tools, & &1.name) == ["ping"], "#{label} client tools: #{inspect(tools)}")
+
+    {:ok, result} = ConduitMcp.Client.call_tool(client, "ping")
+    text = Enum.map_join(result.content, "", &(&1["text"] || ""))
+    assert!(not result.is_error and text == "pong", "#{label} ping returned #{inspect(result)}")
+
+    {:ok, era} = ConduitMcp.Client.era(client)
+    IO.puts("  ok  #{label} client works without optional deps (#{era} era)")
+  end
+
   # --- tiny assertion kit (no ExUnit in a bare mix run) -----------------
 
   defp assert!(true, _message), do: :ok
@@ -339,5 +450,17 @@ EOF
 
 cd "$WORKDIR"
 mix deps.get
+
+# `--warnings-as-errors` covers only the consumer's own code, so check the
+# library's compile output here: a call into a module that is absent without
+# its optional dep (where the compiler types the module as a literal) warns
+# in every consumer that lacks that dep.
+mix deps.compile 2>&1 | tee deps_compile.log
+if grep -q 'lib/conduit_mcp/' deps_compile.log; then
+  echo "FAIL: conduit_mcp compiled with warnings in a consumer without optional deps" >&2
+  exit 1
+fi
+echo "  ok  conduit_mcp compiles without warnings in a bare consumer"
+
 mix compile --warnings-as-errors
 mix run check.exs

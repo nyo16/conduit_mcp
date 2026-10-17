@@ -680,10 +680,14 @@ defmodule ConduitMcp.Transport.Shared do
   # challenge is defined for its tokens. Every other strategy keeps the
   # JSON-RPC error at 200. The error is recognised by
   # `ConduitMcp.Handler.Common.insufficient_scope/1`, by code and `data`.
+  #
+  # `OptionalDeps.oauth_plug!/1` returns the module untyped: called on the
+  # literal, a build without `:joken` (where this never runs) would warn
+  # that `forbidden/4` is undefined.
   defp insufficient_scope_challenge(conn, response_map) do
     with {mod, plug_opts} <- oauth_plug(conn),
          {:ok, scopes} <- Common.insufficient_scope(response_map) do
-      {:sent, mod.forbidden(conn, plug_opts, scopes, response_map)}
+      {:sent, OptionalDeps.oauth_plug!(mod).forbidden(conn, plug_opts, scopes, response_map)}
     else
       _ -> :continue
     end

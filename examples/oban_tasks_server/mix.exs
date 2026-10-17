@@ -25,7 +25,7 @@ defmodule Examples.ObanTasksServer.MixProject do
   defp deps do
     [
       {:conduit_mcp, path: "../.."},
-      {:bandit, "~> 1.9"},
+      {:bandit, "~> 1.13"},
       # Pinned to the 2.22.x line: Rescuer.rescue_executing/0 issues raw SQL
       # against Oban's internal oban_jobs table (columns/state strings), which
       # are not a public API and can change in a minor bump. Re-verify the raw
@@ -33,7 +33,7 @@ defmodule Examples.ObanTasksServer.MixProject do
       {:oban, "~> 2.22.0"},
       {:ecto_sql, "~> 3.13"},
       {:ecto_sqlite3, "~> 0.20"},
-      {:req, "~> 0.5", only: [:dev, :test]}
+      {:req, "~> 0.6.1 or ~> 0.7", only: [:dev, :test]}
     ]
   end
 end

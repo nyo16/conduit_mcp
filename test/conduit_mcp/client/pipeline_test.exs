@@ -264,7 +264,11 @@ defmodule ConduitMcp.Client.PipelineTest do
           {"halts", quote(do: fn _c, _x -> {:deny, :stop, :halt} end), :ask_halt}
         ] do
       test "that #{label} denies the call (#{inspect(reason)})" do
-        name = start(policy: [ask: ["*"]], on_ask: unquote(fun), ask_timeout: 20)
+        # Only the sleeping approver should hit the timeout; the others get
+        # room to crash (a raise is reported before the call sees it), which
+        # 20 ms does not always give on a loaded runner.
+        ask_timeout = unquote(if reason == {:ask_failed, :timeout}, do: 20, else: 5_000)
+        name = start(policy: [ask: ["*"]], on_ask: unquote(fun), ask_timeout: ask_timeout)
 
         assert {:error, %Error{kind: :denied, reason: unquote(reason)}} =
                  Client.call_tool(name, "read_file", %{"path" => "/a"})
