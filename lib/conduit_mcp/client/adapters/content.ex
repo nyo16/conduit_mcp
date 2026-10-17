@@ -39,19 +39,30 @@ defmodule ConduitMcp.Client.Adapters.Content do
 
   def description(text) when is_binary(text) do
     text
-    |> String.replace_invalid()
-    |> String.replace(@invisible, "")
+    |> strip_invisible()
     |> cap(@max_description_bytes)
   end
 
-  defp cap(text, max) when byte_size(text) <= max, do: text
+  @doc """
+  Replaces invalid UTF-8 and removes invisible and direction-changing
+  characters (PI-1, PI-2).
+  """
+  @spec strip_invisible(String.t()) :: String.t()
+  def strip_invisible(text) when is_binary(text),
+    do: text |> String.replace_invalid() |> String.replace(@invisible, "")
 
-  defp cap(text, max) do
+  @doc "Caps `text` at `max` bytes on a character boundary, marking a cut with `…`."
+  @spec cap(String.t(), pos_integer()) :: String.t()
+  def cap(text, max) when byte_size(text) <= max, do: text
+
+  def cap(text, max) do
     keep = max - byte_size(@ellipsis)
     trim_to_valid(binary_part(text, 0, keep)) <> @ellipsis
   end
 
-  defp trim_to_valid(bin) do
+  @doc "The longest prefix of `bin` that is valid UTF-8 (cutting at most 3 bytes)."
+  @spec trim_to_valid(binary()) :: binary()
+  def trim_to_valid(bin) do
     if String.valid?(bin), do: bin, else: trim_to_valid(binary_part(bin, 0, byte_size(bin) - 1))
   end
 
@@ -173,8 +184,7 @@ defmodule ConduitMcp.Client.Adapters.Content do
   @doc "Error text for a tool name the model invented (HB-2)."
   @spec unknown_tool_text(term()) :: String.t()
   def unknown_tool_text(name) when is_binary(name) do
-    shown =
-      name |> String.replace_invalid() |> String.replace(@invisible, "") |> String.slice(0, 128)
+    shown = name |> strip_invisible() |> String.slice(0, 128)
 
     "Error: unknown tool #{inspect(shown)}. Only the tools listed in this request can be called."
   end

@@ -392,11 +392,12 @@ defmodule ConduitMcp.Telemetry do
     * `:era` (:modern | :legacy | nil) - the negotiated era; `nil` before
       the first handshake
 
-  The `request` and `tool_call` spans are emitted **in the calling
-  process**, so tracing bridges nest them under the caller's span, and
-  `tool.rejected` in the process that fetched the tool list (a caller, or
-  a cache refresh task). The other client events are emitted inside the
-  client's connection process: their handlers must be fast.
+  The `request` and `tool_call` spans, `policy.decision` and the `hook`
+  events are emitted **in the calling process**, so tracing bridges nest
+  them under the caller's span, and `tool.rejected` in the process that
+  fetched the tool list (a caller, or a cache refresh task). The other
+  client events are emitted inside the client's connection process: their
+  handlers must be fast.
 
   #### `[:conduit_mcp, :client, :request, :start | :stop | :exception]`
 
@@ -506,6 +507,53 @@ defmodule ConduitMcp.Telemetry do
 
   **Metadata:** the common keys, plus `:tool_name` (String.t, sanitized;
   server-supplied, never a metric tag).
+
+  #### `[:conduit_mcp, :client, :policy, :decision]`
+
+  `ConduitMcp.Client.Pipeline` decided a governed tool call, resource read
+  or prompt get (`ConduitMcp.Client.Policy`), after any approval.
+
+  **Measurements:** `:count` (always `1`).
+
+  **Metadata:** the common keys, plus:
+
+    * `:target` (:tool | :resource | :prompt)
+    * `:tool_name` (String.t, sanitized; tools only; never a metric tag)
+    * `:decision` (:allow | :ask | :deny) - the policy's decision
+    * `:source` (:deny | :ask | :allow | :pin | :default)
+    * `:reason` (atom) - a `ConduitMcp.Client.Policy.Decision` reason, or
+      `:no_policy` when a `{:named, name}` policy is not stored
+    * `:rule_id` (term) - the deciding rule's id, `nil` for the pin and the
+      default (operator-chosen, so not a metric tag)
+    * `:approval` (:grant | :once | :always | :denied | :halted | :failed |
+      nil) - how an `:ask` was settled: a live grant, the approver's
+      answer, or `:failed` (a raise, exit, timeout or bad return); `nil`
+      when the decision was not `:ask`
+    * `:principal` (term) - the call's `:principal`, only when given
+
+  #### `[:conduit_mcp, :client, :hook, :stop]`
+
+  A `ConduitMcp.Client.Hooks` hook returned within its contract.
+
+  **Measurements:** `:duration` (native units) and `:monotonic_time`.
+
+  **Metadata:** the common keys, plus `:hook_id` (the hook's `:id`),
+  `:kind` (the hook event: :pre_tool_call | :post_tool_call |
+  :tool_call_failed | :on_tools_listed | :on_resource_read |
+  :on_prompt_get), `:status` (:cont | :rewrite | :deny | :halt | :recover)
+  and, for tool hooks, `:tool_name` (sanitized).
+
+  #### `[:conduit_mcp, :client, :hook, :exception]`
+
+  A hook raised, threw, exited, timed out or returned outside its contract;
+  the call failed closed, the result was withheld, or (with
+  `on_error: :ignore`) the hook was skipped. What the hook raised is never
+  included.
+
+  **Measurements:** as for `hook.stop`.
+
+  **Metadata:** as for `hook.stop`, with `:reason` (:raise | :exit |
+  :timeout | :bad_return) instead of `:status`.
 
   ## Common Use Cases
 
@@ -771,7 +819,10 @@ defmodule ConduitMcp.Telemetry do
         [:conduit_mcp, :client, :cache, :refresh, :start],
         [:conduit_mcp, :client, :cache, :refresh, :stop],
         [:conduit_mcp, :client, :tool, :rejected],
-        [:conduit_mcp, :client, :tool, :definition_changed]
+        [:conduit_mcp, :client, :tool, :definition_changed],
+        [:conduit_mcp, :client, :policy, :decision],
+        [:conduit_mcp, :client, :hook, :stop],
+        [:conduit_mcp, :client, :hook, :exception]
       ]
   """
   @spec events() :: [[:conduit_mcp, ...]]
@@ -806,7 +857,10 @@ defmodule ConduitMcp.Telemetry do
       [:conduit_mcp, :client, :cache, :refresh, :start],
       [:conduit_mcp, :client, :cache, :refresh, :stop],
       [:conduit_mcp, :client, :tool, :rejected],
-      [:conduit_mcp, :client, :tool, :definition_changed]
+      [:conduit_mcp, :client, :tool, :definition_changed],
+      [:conduit_mcp, :client, :policy, :decision],
+      [:conduit_mcp, :client, :hook, :stop],
+      [:conduit_mcp, :client, :hook, :exception]
     ]
   end
 
@@ -1115,6 +1169,30 @@ defmodule ConduitMcp.Telemetry do
 
     Logger.info(
       "MCP client tool definition changed: client=#{client_text(metadata)} tool=#{ConduitMcp.Reflect.text(metadata.tool_name)}"
+    )
+  end
+
+  defp handle_event([:conduit_mcp, :client, :policy, :decision], _measurements, metadata, _config) do
+    require Logger
+
+    Logger.debug(
+      "MCP client policy decision: client=#{client_text(metadata)} target=#{metadata.target} tool=#{ConduitMcp.Reflect.text(Map.get(metadata, :tool_name))} decision=#{metadata.decision} source=#{metadata.source} reason=#{metadata.reason} rule_id=#{ConduitMcp.Reflect.text(metadata.rule_id, 64)} approval=#{metadata.approval}"
+    )
+  end
+
+  defp handle_event([:conduit_mcp, :client, :hook, :stop], measurements, metadata, _config) do
+    require Logger
+
+    Logger.debug(
+      "MCP client hook: client=#{client_text(metadata)} hook=#{ConduitMcp.Reflect.text(metadata.hook_id, 64)} kind=#{metadata.kind} status=#{metadata.status} duration=#{duration_ms(measurements)}ms"
+    )
+  end
+
+  defp handle_event([:conduit_mcp, :client, :hook, :exception], measurements, metadata, _config) do
+    require Logger
+
+    Logger.warning(
+      "MCP client hook failed: client=#{client_text(metadata)} hook=#{ConduitMcp.Reflect.text(metadata.hook_id, 64)} kind=#{metadata.kind} reason=#{metadata.reason} duration=#{duration_ms(measurements)}ms"
     )
   end
 

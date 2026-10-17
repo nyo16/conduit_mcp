@@ -84,7 +84,15 @@ defmodule ConduitMcp.Client.ConfigTest do
           {[sampling: [max_tokens: 0]], ":max_tokens"},
           {[handler_timeout: [elicitation: :forever]], ":elicitation"},
           {[elicitation: [origin: 1]], ":origin"},
-          {[surprise: true], ":surprise"}
+          {[surprise: true], ":surprise"},
+          {[policy: [deny: :all]], "policy :deny"},
+          {[policy: "allow everything"], ":policy"},
+          {[on_ask: &Kernel.length/1], ":on_ask"},
+          {[hooks: [pre_tool_call: [{:all, &Kernel.length/1}]]], ":hooks"},
+          {[tools: [include: "*"]], ":tools"},
+          {[validate: [arguments: :yes]], ":arguments"},
+          {[approved_fingerprints: %{read: "x"}], ":approved_fingerprints"},
+          {[hook_timeout: 0], ":hook_timeout"}
         ] do
       @opts opts
       @key key
@@ -98,6 +106,42 @@ defmodule ConduitMcp.Client.ConfigTest do
     test "a missing name or transport" do
       assert_raise ArgumentError, ~r/:name/, fn -> Config.new!(transport: @transport) end
       assert_raise ArgumentError, ~r/:transport/, fn -> Config.new!(name: :x) end
+    end
+
+    test "a custom validator must implement ConduitMcp.Client.SchemaValidator" do
+      assert_raise ArgumentError, ~r/:validator ConduitMcp.TestServer does not implement/, fn ->
+        new!(validate: [arguments: true, validator: ConduitMcp.TestServer])
+      end
+
+      # Not checked when nothing is validated.
+      assert %{validate: nil} = new!(validate: [validator: ConduitMcp.TestServer]).governance
+    end
+
+    test "governance options are compiled when validated" do
+      config =
+        new!(
+          policy: [allow: ["*"]],
+          tools: [exclude: ["x"]],
+          hooks: [pre_tool_call: [{:all, fn _call, _ctx -> :cont end}]],
+          validate: [structured_content: true]
+        )
+
+      governance = config.governance
+      assert governance.enabled?
+      assert %ConduitMcp.Client.Policy{} = governance.policy
+      assert %ConduitMcp.Client.ToolFilter{} = governance.filter
+      assert [_hook] = governance.hooks.pre_tool_call
+
+      assert governance.validate == %{
+               arguments: false,
+               structured_content: true,
+               validator: ConduitMcp.Client.SchemaValidator.JSV
+             }
+
+      plain = new!([]).governance
+      refute plain.enabled?
+      assert %ConduitMcp.Client.Hooks{pre_tool_call: []} = plain.hooks
+      assert plain.validate == nil
     end
 
     test "child_spec/1 validates, so a typo fails when the tree is built" do
@@ -114,7 +158,9 @@ defmodule ConduitMcp.Client.ConfigTest do
                   request_timeout max_total_timeout max_in_flight max_queued backoff
                   max_reconnects on_give_up stable_after health_check_interval assigns
                   handler_timeout max_server_requests input_rate_limit sampling
-                  elicitation roots max_cache_ttl) do
+                  elicitation roots max_cache_ttl policy on_ask ask_timeout grant_ttl
+                  approved_fingerprints hooks hook_timeout tools validate trusted
+                  max_result_bytes_for_llm include_instructions clock) do
       assert doc =~ "`:#{key}`", key
     end
   end

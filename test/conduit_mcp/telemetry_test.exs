@@ -420,6 +420,36 @@ defmodule ConduitMcp.TelemetryTest do
           %{count: 1},
           Map.put(client, :tool_name, "echo")
         )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :policy, :decision],
+          %{count: 1},
+          Map.merge(client, %{
+            target: :tool,
+            tool_name: "echo",
+            decision: :deny,
+            source: :deny,
+            reason: :deny_rule,
+            rule_id: {:deny, 0},
+            approval: nil
+          })
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :hook, :stop],
+          Map.delete(span, :rounds),
+          Map.merge(client, %{hook_id: :audit, kind: :pre_tool_call, status: :cont})
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :hook, :exception],
+          Map.delete(span, :rounds),
+          Map.merge(client, %{
+            hook_id: {:post_tool_call, 0},
+            kind: :post_tool_call,
+            reason: :raise
+          })
+        )
       end)
 
       for event <- ConduitMcp.Telemetry.events() do

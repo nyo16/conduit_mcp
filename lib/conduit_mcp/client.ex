@@ -21,10 +21,11 @@ defmodule ConduitMcp.Client do
   every function below addresses the client. The application starts no
   clients itself; it only runs the registry they register in.
 
-  Each client is a supervisor (`:one_for_all`) of a `Task.Supervisor` and a
-  `ConduitMcp.Client.Connection`. Use `await_ready/2` when you need the
-  handshake done before going on; requests made earlier simply wait for it
-  (within their own timeout).
+  Each client is a supervisor (`:one_for_all`) of a `Task.Supervisor`, the
+  owner of its governance table (grants, the approval baseline, built
+  schemas; see "Governance") and a `ConduitMcp.Client.Connection`. Use
+  `await_ready/2` when you need the handshake done before going on;
+  requests made earlier simply wait for it (within their own timeout).
 
   ## Calling
 
@@ -93,6 +94,18 @@ defmodule ConduitMcp.Client do
   call); see `ConduitMcp.Client.Task`, `get_task/3`, `await_task/3` and
   `cancel_task/3`.
 
+  ## Governance
+
+  A plain client sends what it is asked to. Configure any of `:policy`
+  (`ConduitMcp.Client.Policy`, with an `:on_ask` approver and
+  `ConduitMcp.Client.Grants`), `:hooks` (`ConduitMcp.Client.Hooks`),
+  `:tools` (a `ConduitMcp.Client.ToolFilter`) or `:validate`
+  (`ConduitMcp.Client.SchemaValidator`) and every `call_tool/4` runs
+  through `ConduitMcp.Client.Pipeline`, in the caller: hidden tools vanish
+  from listings, pre-hooks and validation run before policy decides on the
+  final arguments, and post-hooks see the result. Hooks and approvers run
+  in tasks under the client's `Task.Supervisor`, never in the connection.
+
   ## Notifications
 
   `subscribe_notifications/2` sends server notifications to a process as
@@ -102,12 +115,15 @@ defmodule ConduitMcp.Client do
 
   use Supervisor
 
+  alias ConduitMcp.Client.Adapters.Content
   alias ConduitMcp.Client.Cache
   alias ConduitMcp.Client.Cache.Fetch
   alias ConduitMcp.Client.Config
   alias ConduitMcp.Client.Connection
   alias ConduitMcp.Client.Error
+  alias ConduitMcp.Client.Governance
   alias ConduitMcp.Client.Input
+  alias ConduitMcp.Client.Pipeline
   alias ConduitMcp.Client.Prompt
   alias ConduitMcp.Client.Registry
   alias ConduitMcp.Client.Request
@@ -201,6 +217,7 @@ defmodule ConduitMcp.Client do
   def init(%Config{} = config) do
     children = [
       {Task.Supervisor, name: Registry.via({:task_sup, config.name})},
+      {Governance.Owner, config},
       {Connection, config}
     ]
 
@@ -249,6 +266,39 @@ defmodule ConduitMcp.Client do
 
         server ->
           {:ok, Map.merge(server, %{era: view.era, version: view.version})}
+      end
+    end
+  end
+
+  @doc """
+  The server's `instructions` as they may be put in a model's context
+  (PI-1): `{:ok, nil}` unless the client was started with
+  `include_instructions: true` (they arrive with the handshake and are
+  written by the server, so they are kept out of system prompts by default).
+  When included they are capped at 4 KiB with invisible and
+  direction-changing characters removed, and, unless the client is
+  `trusted: true`, prefixed with a line naming the server they came from.
+  `server_info/1` still returns them raw.
+
+      {:ok, nil} = ConduitMcp.Client.instructions_for_llm(:docs)
+  """
+  @spec instructions_for_llm(client()) :: {:ok, String.t() | nil} | {:error, Error.t()}
+  def instructions_for_llm(client) do
+    with {:ok, %{settings: settings}} <- Governance.lookup(client),
+         {:ok, info} <- server_info(client) do
+      case info.instructions do
+        text when is_binary(text) and settings.include_instructions ->
+          text = text |> Content.strip_invisible() |> Content.cap(4_096)
+
+          if settings.trusted,
+            do: {:ok, text},
+            else:
+              {:ok,
+               "Instructions from MCP server #{inspect(settings.server_id)} " <>
+                 "(server-supplied, not from the user):\n" <> text}
+
+        _excluded ->
+          {:ok, nil}
       end
     end
   end
@@ -307,11 +357,23 @@ defmodule ConduitMcp.Client do
   `:cursor` for the next one. Tools that fail intake are left out (see
   "Listing and the cache" above); the page is never cached.
 
+  On a governed client (see `call_tool/4`) the page holds only the tools
+  the `:tools` filter shows (function patterns see `:assigns` and
+  `:principal`), with a usable schema when `:validate` is on, after the
+  `:on_tools_listed` hooks (`ConduitMcp.Client.Hooks`); the same applies to
+  `list_all_tools/2`, `cached_tools/2` and `tool/3`.
+
       {:ok, %{tools: [%ConduitMcp.Client.Tool{name: "echo"} | _], next_cursor: nil}} =
         ConduitMcp.Client.list_tools(:docs)
   """
   @spec list_tools(client(), keyword()) :: {:ok, page(:tools, Tool.t())} | {:error, Error.t()}
-  def list_tools(client, opts \\ []), do: list_page(client, :tools, :tools, opts)
+  def list_tools(client, opts \\ []) do
+    {principal, opts} = Keyword.pop(opts, :principal)
+
+    with {:ok, %{tools: tools} = page} <- list_page(client, :tools, :tools, opts),
+         {:ok, tools} <- present_tools(client, tools, opts, principal, false),
+         do: {:ok, %{page | tools: tools}}
+  end
 
   @doc """
   Lists every tool, following `nextCursor`, through the client's
@@ -325,6 +387,7 @@ defmodule ConduitMcp.Client do
       client's `:request_timeout`). A refresh the caller stopped waiting for
       still completes and fills the cache.
     * `:refresh` - `true` to ignore a fresh cached list (default `false`).
+    * `:assigns`, `:principal` - for a governed client's filter and hooks.
 
   Pagination is capped (100 pages, 10 000 items, a repeated or over-1 KiB
   cursor): over a cap the result is `{:error, %Error{kind:
@@ -333,21 +396,28 @@ defmodule ConduitMcp.Client do
       {:ok, [%ConduitMcp.Client.Tool{} | _]} = ConduitMcp.Client.list_all_tools(:docs)
   """
   @spec list_all_tools(client(), keyword()) :: {:ok, [Tool.t()]} | {:error, Error.t()}
-  def list_all_tools(client, opts \\ []), do: list_all(client, :tools, opts)
+  def list_all_tools(client, opts \\ []) do
+    {governance, opts} = Keyword.split(opts, [:assigns, :principal])
+
+    with {:ok, tools} <- list_all(client, :tools, opts),
+         do: present_tools(client, tools, governance, governance[:principal], true)
+  end
 
   @doc """
   The tools of the last `list_all_tools/2` (or `list_changed` refresh) as
   cached, fresh or not, without asking the server.
   `{:error, %Error{kind: :not_found, reason: :not_cached}}` before the first
-  listing.
+  listing. Takes `:assigns` and `:principal` (see `list_tools/2`).
 
       {:ok, tools} = ConduitMcp.Client.cached_tools(:docs)
   """
-  @spec cached_tools(client()) :: {:ok, [Tool.t()]} | {:error, Error.t()}
-  def cached_tools(client) do
+  @spec cached_tools(client(), keyword()) :: {:ok, [Tool.t()]} | {:error, Error.t()}
+  def cached_tools(client, opts \\ []) do
+    opts = Keyword.validate!(opts, [:assigns, :principal])
+
     with {:ok, _pid, view} <- Request.lookup(client) do
       case Cache.list(view.cache, :tools) do
-        {:ok, entry} -> {:ok, entry.items}
+        {:ok, entry} -> present_tools(client, entry.items, opts, opts[:principal], true)
         :miss -> {:error, Error.new(:not_found, :not_cached)}
         {:error, _} = error -> error
       end
@@ -357,19 +427,36 @@ defmodule ConduitMcp.Client do
   @doc """
   The cached definition of tool `name` (one cache row; the server is not
   asked). `{:error, %Error{kind: :not_found}}` when the last listing did not
-  include it, or nothing was listed yet.
+  include it, or nothing was listed yet, or (on a governed client) the tool
+  is hidden. Takes `:assigns` and `:principal` (see `list_tools/2`).
 
       {:ok, %ConduitMcp.Client.Tool{name: "echo"}} = ConduitMcp.Client.tool(:docs, "echo")
   """
-  @spec tool(client(), String.t()) :: {:ok, Tool.t()} | {:error, Error.t()}
-  def tool(client, name) when is_binary(name) do
+  @spec tool(client(), String.t(), keyword()) :: {:ok, Tool.t()} | {:error, Error.t()}
+  def tool(client, name, opts \\ []) when is_binary(name) do
+    opts = Keyword.validate!(opts, [:assigns, :principal])
+
     with {:ok, _pid, view} <- Request.lookup(client) do
       case Cache.lookup(view.cache, :tools, name) do
-        {:ok, tool} -> {:ok, tool}
-        :miss -> {:error, Error.new(:not_found, :unknown_tool)}
-        {:error, _} = error -> error
+        {:ok, tool} ->
+          if Pipeline.present_tool?(client, view, tool, opts),
+            do: {:ok, tool},
+            else: {:error, Error.new(:not_found, :unknown_tool)}
+
+        :miss ->
+          {:error, Error.new(:not_found, :unknown_tool)}
+
+        {:error, _} = error ->
+          error
       end
     end
+  end
+
+  defp present_tools(client, tools, opts, principal, full?) do
+    opts = [assigns: Keyword.get(opts, :assigns), principal: principal]
+
+    with {:ok, _pid, view} <- Request.lookup(client),
+         do: Pipeline.present_tools(client, view, tools, opts, full?)
   end
 
   @doc """
@@ -400,10 +487,37 @@ defmodule ConduitMcp.Client do
 
       {:ok, %ConduitMcp.Client.ToolResult{content: [%{"text" => "hi"}]}} =
         ConduitMcp.Client.call_tool(:docs, "echo", %{"message" => "hi"})
+
+  ## Governance
+
+  When the client is configured with `:policy`, `:hooks`, `:tools` or
+  `:validate`, or the call passes `:shape`, the call runs through
+  `ConduitMcp.Client.Pipeline` (selection, pre-hooks, validation, policy
+  and approval, post-hooks); otherwise it is sent as given. Pipeline
+  options:
+
+    * `:principal` - who the call is made for (in `ctx`, and the key of
+      "always allow" grants). Ignored by a plain client.
+    * `:shape` - `:llm` to shape the result for a model.
+
+  A governed call may also fail with `kind: :not_found` (hidden or unknown
+  tool), `:denied` (policy, approver or hook) or `:hook` (a pre-hook
+  failed).
   """
   @spec call_tool(client(), String.t(), map(), keyword()) ::
           {:ok, ToolResult.t() | ClientTask.t()} | {:error, Error.t()}
   def call_tool(client, name, args \\ %{}, opts \\ []) when is_binary(name) and is_map(args) do
+    if Keyword.has_key?(opts, :shape) or governed?(client) do
+      Pipeline.run(client, {name, args}, opts)
+    else
+      plain_call(client, name, args, Keyword.delete(opts, :principal))
+    end
+  end
+
+  defp governed?(client),
+    do: match?({:ok, %{settings: %{enabled?: true}}}, Governance.lookup(client))
+
+  defp plain_call(client, name, args, opts) do
     {mode, opts} = Keyword.pop(opts, :task)
     {ttl, opts} = Keyword.pop(opts, :task_ttl)
 
@@ -415,13 +529,33 @@ defmodule ConduitMcp.Client do
       base = Telemetry.base(client, view.server_id, view.transport, view.era)
 
       Telemetry.tool_call_span(base, name, fn ->
-        params = %{"name" => name, "arguments" => args}
-
-        if view.era == :modern,
-          do: modern_call(client, view, params, mode, opts),
-          else: legacy_call(client, view, params, {mode, ttl}, opts)
+        __send_tool_call__(
+          client,
+          view,
+          %{"name" => name, "arguments" => args},
+          {mode, ttl},
+          opts
+        )
       end)
     end
+  end
+
+  @doc false
+  # The negotiated caller view for a call (`ConduitMcp.Client.Pipeline`).
+  @spec __view__(client(), :return | :await | nil, keyword()) ::
+          {:ok, map()} | {:error, Error.t()}
+  def __view__(client, mode, opts), do: negotiated_view(client, mode, opts)
+
+  @doc false
+  # Sends a `tools/call` with `params` (and its MRTR rounds, or the task it
+  # becomes) and returns `{result, rounds}`; `ConduitMcp.Client.Pipeline`
+  # step 9. `opts` are request options plus `:meta`.
+  @spec __send_tool_call__(client(), map(), map(), {atom() | nil, term()}, keyword()) ::
+          {{:ok, ToolResult.t() | ClientTask.t()} | {:error, Error.t()}, non_neg_integer()}
+  def __send_tool_call__(client, view, params, {mode, ttl}, opts) do
+    if view.era == :modern,
+      do: modern_call(client, view, params, mode, opts),
+      else: legacy_call(client, view, params, {mode, ttl}, opts)
   end
 
   # The era decides how a call becomes a task, so a task call waits for the
@@ -578,12 +712,20 @@ defmodule ConduitMcp.Client do
   Reads the resource at `uri`; returns the server's string-keyed
   `ReadResourceResult` (`"contents"`).
 
+  On a governed client the `:on_resource_read` hooks run first, then the
+  policy's resource rules when its `:scope` includes `:resources` (an ask
+  rule denies: reads have no approver); `:principal` is passed to them.
+
       {:ok, %{"contents" => [%{"text" => _} | _]}} =
         ConduitMcp.Client.read_resource(:docs, "test://resource1")
   """
   @spec read_resource(client(), String.t(), keyword()) :: {:ok, map()} | {:error, Error.t()}
   def read_resource(client, uri, opts \\ []) when is_binary(uri) do
+    {principal, opts} = Keyword.pop(opts, :principal)
+    governance = [assigns: Keyword.get(opts, :assigns), principal: principal]
+
     with {:ok, _pid, view} <- Request.lookup(client),
+         :ok <- Pipeline.authorize_resource(client, view, uri, governance),
          {:ok, result, _rounds} <- mrtr(client, "resources/read", %{"uri" => uri}, view, opts),
          do: {:ok, result}
   end
@@ -613,14 +755,21 @@ defmodule ConduitMcp.Client do
   `to_string/1`, other non-strings as JSON. `nil` values are dropped.
   Returns the server's string-keyed `GetPromptResult` (`"messages"`).
 
+  On a governed client the `:on_prompt_get` hooks (which may rewrite
+  `args`) and the policy's prompt rules run first, as for
+  `read_resource/3`.
+
       {:ok, %{"messages" => [_ | _]}} =
         ConduitMcp.Client.get_prompt(:docs, "greeting", %{name: "Ada"})
   """
   @spec get_prompt(client(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, Error.t()}
   def get_prompt(client, name, args \\ %{}, opts \\ []) when is_binary(name) and is_map(args) do
-    params = %{"name" => name, "arguments" => stringify_args(args)}
+    {principal, opts} = Keyword.pop(opts, :principal)
+    governance = [assigns: Keyword.get(opts, :assigns), principal: principal]
 
     with {:ok, _pid, view} <- Request.lookup(client),
+         {:ok, args} <- Pipeline.authorize_prompt(client, view, name, args, governance),
+         params = %{"name" => name, "arguments" => stringify_args(args)},
          {:ok, result, _rounds} <- mrtr(client, "prompts/get", params, view, opts),
          do: {:ok, result}
   end
@@ -740,6 +889,11 @@ defmodule ConduitMcp.Client do
       {:ok, %{page_key => page.items, :next_cursor => page.next_cursor}}
     end
   end
+
+  @doc false
+  # The raw cached listing (no governance), for `ConduitMcp.Client.Pipeline`.
+  @spec __list_all__(client(), Cache.kind(), keyword()) :: {:ok, [term()]} | {:error, Error.t()}
+  def __list_all__(client, kind, opts), do: list_all(client, kind, opts)
 
   defp list_all(client, kind, opts) do
     opts = Keyword.validate!(opts, [:timeout, refresh: false])

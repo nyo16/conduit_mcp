@@ -2,12 +2,13 @@ defmodule ConduitMcp.OptionalDeps do
   @moduledoc """
   Runtime availability checks for ConduitMCP's conditionally compiled modules.
 
-  `ConduitMcp.Plugs.OAuth` and `ConduitMcp.OAuth.KeyProvider.JWKS` only exist
-  when their optional dependency was present when `:conduit_mcp` was compiled.
-  Every code path that can reach one of them crosses a plug's `init/1`, so
-  availability is validated there — once, at boot or compile time — rather
-  than degrading into a per-request failure that is indistinguishable from a
-  configuration mistake.
+  `ConduitMcp.Plugs.OAuth`, `ConduitMcp.OAuth.KeyProvider.JWKS` and
+  `ConduitMcp.Client.SchemaValidator.JSV` only exist when their optional
+  dependency was present when `:conduit_mcp` was compiled. Every code path
+  that can reach one of them crosses an `init/1` (a plug's, or a client's
+  option validation), so availability is validated there — once, at boot or
+  compile time — rather than degrading into a per-request failure that is
+  indistinguishable from a configuration mistake.
 
   See `ConduitMcp.OptionalDependencyError` for why adding the dependency to
   `mix.exs` is not sufficient on its own.
@@ -17,9 +18,11 @@ defmodule ConduitMcp.OptionalDeps do
 
   @oauth_plug ConduitMcp.Plugs.OAuth
   @jwks_provider ConduitMcp.OAuth.KeyProvider.JWKS
+  @jsv_validator ConduitMcp.Client.SchemaValidator.JSV
 
   @joken_deps [{:joken, "~> 2.6"}, {:jose, "~> 1.11"}]
   @req_deps [{:req, "~> 0.6.1 or ~> 0.7"}]
+  @jsv_deps [{:jsv, "~> 0.26"}]
 
   @doc """
   Returns the OAuth plug module, raising `ConduitMcp.OptionalDependencyError`
@@ -42,6 +45,33 @@ defmodule ConduitMcp.OptionalDeps do
   """
   @spec oauth_available?() :: boolean()
   def oauth_available?, do: Code.ensure_loaded?(@oauth_plug)
+
+  @doc """
+  Returns the JSV schema validator module
+  (`ConduitMcp.Client.SchemaValidator.JSV`), raising
+  `ConduitMcp.OptionalDependencyError` when it was not compiled in.
+
+  `ConduitMcp.Client` calls it when its options are validated, if `:validate`
+  asks for argument or `structuredContent` validation with the default
+  validator; it is never called per request.
+  """
+  @spec jsv!() :: module()
+  def jsv! do
+    if Code.ensure_loaded?(@jsv_validator) do
+      @jsv_validator
+    else
+      raise OptionalDependencyError,
+        feature: "Client JSON Schema validation (the :validate option)",
+        module: @jsv_validator,
+        deps: @jsv_deps
+    end
+  end
+
+  @doc """
+  Returns `true` when the JSV schema validator is usable in this build.
+  """
+  @spec jsv_available?() :: boolean()
+  def jsv_available?, do: Code.ensure_loaded?(@jsv_validator)
 
   @doc """
   Validates that a configured `:key_provider` module exists and implements

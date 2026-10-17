@@ -13,8 +13,9 @@ if Code.ensure_loaded?(PromEx) do
         assert length(metrics) == 12
       end
 
-      # Tool names and notification methods come from the server, and client
-      # names may be per tenant: none may become a label.
+      # Tool names, rule ids and notification methods come from the server or
+      # the operator, and client names may be per tenant: none may become a
+      # label.
       test "client metrics are tagged with closed sets only" do
         group =
           Enum.find(
@@ -22,11 +23,36 @@ if Code.ensure_loaded?(PromEx) do
             &(&1.group_name == :conduit_mcp_client_metrics)
           )
 
+        closed =
+          [:method, :status, :error_kind, :is_error, :to, :reason, :kind] ++
+            [:target, :decision, :source, :approval]
+
         for metric <- group.metrics do
-          assert metric.tags -- [:method, :status, :error_kind, :is_error, :to, :reason, :kind] ==
-                   [],
-                 inspect(metric.name)
+          assert metric.tags -- closed == [], inspect(metric.name)
         end
+
+        policy =
+          Enum.find(
+            group.metrics,
+            &(&1.event_name == [:conduit_mcp, :client, :policy, :decision])
+          )
+
+        assert policy.tag_values.(%{
+                 target: :tool,
+                 tool_name: "x",
+                 rule_id: "r",
+                 principal: "u",
+                 decision: :ask,
+                 source: :ask,
+                 reason: :ask_rule,
+                 approval: :once
+               }) == %{
+                 target: "tool",
+                 decision: "ask",
+                 source: "ask",
+                 reason: "ask_rule",
+                 approval: "once"
+               }
       end
 
       # The plugin used to skip rate limiting, cancellation and the janitors,
