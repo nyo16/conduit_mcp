@@ -152,7 +152,8 @@ defmodule ConduitMcp.Client.Connection.Data do
       max_total_timeout: config.max_total_timeout,
       client_capabilities: config.capabilities.modern,
       cache: data.cache,
-      input: data.input
+      input: data.input,
+      capture_payloads: config.capture_payloads || false
     }
   end
 

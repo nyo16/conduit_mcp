@@ -61,6 +61,13 @@ defmodule ConduitMcp.Client.Hub.Config do
               doc: "The client's `:max_result_bytes_for_llm`."
             ],
             clock: [type: {:or, [{:fun, 0}, nil]}, doc: "The client's `:clock` (tests)."],
+            telemetry: [
+              type: {:custom, ConduitMcp.Client.Config, :validate_telemetry, []},
+              doc: """
+              The client's `:telemetry` (payload capture) for every server; a
+              server's own `:telemetry` replaces it.
+              """
+            ],
             prefix: [
               type: :string,
               default: "",
@@ -136,7 +143,8 @@ defmodule ConduitMcp.Client.Hub.Config do
     :tools,
     :validate,
     :max_result_bytes_for_llm,
-    :clock
+    :clock,
+    :telemetry
   ]
 
   @enforce_keys [:name, :servers, :governance, :prefix, :restart_backoff]

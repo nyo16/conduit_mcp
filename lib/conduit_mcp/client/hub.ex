@@ -46,8 +46,9 @@ defmodule ConduitMcp.Client.Hub do
 
   The hub's governance options (`:policy`, `:on_ask`, `:ask_timeout`,
   `:grant_ttl`, `:hooks`, `:hook_timeout`, `:tools`, `:validate`,
-  `:max_result_bytes_for_llm`, `:clock`) apply to every server; the same
-  key in a server's `client_opts` overrides them for that server, except:
+  `:max_result_bytes_for_llm`, `:clock`) and `:telemetry` apply to every
+  server; the same key in a server's `client_opts` overrides them for that
+  server, except:
 
     * `:hooks` - the hub's hooks of an event run before the server's (both
       must be keyword lists);

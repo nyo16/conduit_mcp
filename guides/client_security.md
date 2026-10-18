@@ -217,9 +217,22 @@ Elsewhere:
 
 - `ConduitMcp.Client.Error` messages render only the kind and a truncated
   reason; `data` (which may hold server content) is never rendered.
-- Client telemetry metadata comes from a fixed allowlist: no arguments,
-  results, `_meta`, tokens or raw error data. Tool names and methods are
-  sanitized, and are server-supplied, so never use them as metric tags.
+- Client telemetry metadata comes from a fixed allowlist: no `_meta`,
+  tokens or raw error data, and no arguments or results by default. Tool
+  names and methods are sanitized, and are server-supplied, so never use
+  them as metric tags.
+- **Payload capture is opt-in (TL-2).** `telemetry: [capture_payloads:
+  [redact: fun, max_bytes: n]]` adds `:arguments` to the `tool_call` span's
+  `:start` and `:result` to its `:stop`. Redaction is mandatory
+  (`capture_payloads: true` raises when the client starts); `fun` runs in
+  the calling process before any handler sees the value. A value whose JSON
+  is over `:max_bytes` (default 4 096) becomes `{:truncated, byte_size}`,
+  never a partial value; a `redact` that raises, or returns something that
+  cannot be JSON-encoded, gives `:redaction_failed`, never the raw value. A
+  `ConduitMcp.Client.Secret` left in place refuses to encode, so it gives
+  `:redaction_failed` too. No hash or digest of the arguments is offered:
+  low-entropy arguments are brute-forceable from one. With the default
+  `false` neither key is present.
 - **Finch's own telemetry is not the client's.** The `[:finch, ...]`
   events carry the request in their metadata, its headers included: the
   clear-text `Authorization` and `Mcp-Session-Id`. Never log or export

@@ -47,9 +47,9 @@ defmodule ConduitMcp.Telemetry do
                  {[:conduit_mcp, :client, :request, :exception], span_stop,
                   client ++ [:method, :kind], []},
                  {[:conduit_mcp, :client, :tool_call, :start], span_start, client ++ [:tool_name],
-                  []},
+                  [:arguments]},
                  {[:conduit_mcp, :client, :tool_call, :stop], span_stop ++ [:rounds],
-                  client ++ [:tool_name, :status, :error_kind, :is_error], []},
+                  client ++ [:tool_name, :status, :error_kind, :is_error], [:result]},
                  {[:conduit_mcp, :client, :tool_call, :exception], span_stop,
                   client ++ [:tool_name, :kind], []},
                  {[:conduit_mcp, :client, :input_request, :start], span_start,
@@ -524,8 +524,9 @@ defmodule ConduitMcp.Telemetry do
   ### Client Events
 
   Emitted by `ConduitMcp.Client`. Metadata comes from a fixed allowlist and
-  never carries tool arguments, results, `_meta`, tokens or raw error data.
-  Every client event's metadata has:
+  never carries `_meta`, tokens or raw error data, nor tool arguments or
+  results unless the host opts in to payload capture (below). Every client
+  event's metadata has:
 
     * `:client` (term) - the client's `:name`
     * `:server_id` (String.t) - the client's `:server_id`
@@ -563,7 +564,35 @@ defmodule ConduitMcp.Telemetry do
 
   **Metadata:** the common keys, plus `:tool_name` (String.t, sanitized).
   `:stop` adds `:status`, `:error_kind` and `:is_error` (boolean, or `nil`
-  when no result came back).
+  when no result came back). With payload capture on, `:start` adds
+  `:arguments` and `:stop` adds `:result`; with it off (the default)
+  neither key is present.
+
+  ##### Payload capture
+
+  Off by default (TL-2). A client started with `telemetry:
+  [capture_payloads: [redact: &MyApp.redact/1, max_bytes: 4_096]]` adds
+  `:arguments` to `:start` and `:result` to `:stop`. `:redact` is required
+  (`capture_payloads: true` is rejected when the client starts) and runs in
+  the calling process, before any handler sees the value:
+
+    * `:arguments` - `redact.(args)`, where `args` are the arguments the
+      caller passed to `ConduitMcp.Client.call_tool/4` (on a governed
+      client, before pre-hooks: the span opens before governance runs);
+    * `:result` - `redact.(map)`, where `map` is the returned
+      `ConduitMcp.Client.ToolResult` as `%{"content" => ..., "isError" =>
+      ..., "structuredContent" => ...}` (no `_meta`; after post-hooks and
+      shaping on a governed client), or `nil` when the call returned an
+      error or a task.
+
+  Each value is what `redact` returned when it JSON-encodes within
+  `:max_bytes` (default 4 096); `{:truncated, byte_size}` when it is larger
+  (never a partial value); `:redaction_failed` when `redact` raises, throws
+  or exits, or returns something that cannot be JSON-encoded. A
+  `ConduitMcp.Client.Secret` refuses to encode, so one left in place by
+  `redact` yields `:redaction_failed`, never the secret. No hash or digest
+  of a payload is ever emitted: low-entropy arguments are brute-forceable
+  from one.
 
   #### `[:conduit_mcp, :client, :connection, :transition]`
 

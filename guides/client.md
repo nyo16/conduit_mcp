@@ -761,13 +761,34 @@ needs more than the inherited allowlist. ConduitMCP's own suite does this in
 
 Every client event's metadata has `:client`, `:server_id`, `:transport`
 (`:stdio`, `:http`, `:in_process`) and `:era`. Metadata comes from a fixed
-allowlist and never carries arguments, results, `_meta`, tokens or raw error
-data.
+allowlist and never carries `_meta`, tokens or raw error data, nor
+arguments or results unless you opt in to payload capture:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `telemetry: [capture_payloads: ...]` | `false` | `false`: the `tool_call` span has no `:arguments` or `:result` key. `[redact: fun, max_bytes: n]`: `:start` adds `:arguments` and `:stop` adds `:result`, each passed through `fun` (required; `true` alone raises at start) in the calling process. `:max_bytes` (default 4 096) caps the JSON size |
+
+```elixir
+{ConduitMcp.Client,
+ name: :docs,
+ transport: transport,
+ telemetry: [capture_payloads: [redact: &MyApp.Telemetry.redact/1, max_bytes: 2_048]]}
+```
+
+`:arguments` are the arguments given to `call_tool/4` (before pre-hooks on a
+governed client). `:result` is the returned `ToolResult` as
+`%{"content" => ..., "isError" => ..., "structuredContent" => ...}` (no
+`_meta`), or `nil` for an error or a task. Each holds what `redact` returned,
+`{:truncated, byte_size}` when its JSON is over `:max_bytes` (never a partial
+value), or `:redaction_failed` when `redact` raises or returns something that
+cannot be JSON-encoded - a `ConduitMcp.Client.Secret` included. No hash of a
+payload is ever emitted. A hub takes the same `:telemetry` option for every
+server, or per server in its `client_opts`.
 
 | Event | Emitted in | Adds |
 |---|---|---|
 | `[:conduit_mcp, :client, :request, :start \| :stop \| :exception]` | caller | One span per request sent (each MRTR round is one). `:method`; `:stop` adds `:status`, `:error_kind`, `:request_id` |
-| `[:conduit_mcp, :client, :tool_call, :start \| :stop \| :exception]` | caller | One span per `call_tool/4`. `:tool_name`; `:stop` adds `:status`, `:error_kind`, `:is_error` and measurement `:rounds` |
+| `[:conduit_mcp, :client, :tool_call, :start \| :stop \| :exception]` | caller | One span per `call_tool/4`. `:tool_name`; `:stop` adds `:status`, `:error_kind`, `:is_error` and measurement `:rounds`. With payload capture, `:start` adds `:arguments` and `:stop` adds `:result` |
 | `[:conduit_mcp, :client, :connection, :transition]` | connection | `:from`, `:to`, `:reason`, `:attempt` |
 | `[:conduit_mcp, :client, :request, :cancel]` | connection | `:method`, `:request_id`, `:reason` (`:timeout`, `:caller_down`, `:caller_timeout`) |
 | `[:conduit_mcp, :client, :response, :dropped]` | connection | `:request_id` |

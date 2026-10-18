@@ -228,6 +228,31 @@ defmodule ConduitMcp.TelemetryContractTest do
 
     missing = ConduitMcp.Telemetry.events() -- Enum.map(emitted, &elem(&1, 0))
     assert missing == [], "no flow emitted #{inspect(missing)}"
+
+    # TL-2: payload keys appear only on the client that opted in.
+    for {event, key} <- [
+          {[:conduit_mcp, :client, :tool_call, :start], :arguments},
+          {[:conduit_mcp, :client, :tool_call, :stop], :result}
+        ] do
+      metas = for {^event, _measurements, metadata} <- emitted, do: metadata
+      assert Enum.any?(metas, &(Map.get(&1, key) == "[redacted]")), inspect(event)
+      assert Enum.any?(metas, &(not Map.has_key?(&1, key))), inspect(event)
+    end
+  end
+
+  test "payload capture keys are optional tool_call metadata, nowhere else" do
+    specs = ConduitMcp.Telemetry.__event_specs__()
+
+    with_payload =
+      for {event, _m, always, sometimes} <- specs,
+          key <- [:arguments, :result],
+          key in always or key in sometimes,
+          do: {event, key, key in always}
+
+    assert with_payload == [
+             {[:conduit_mcp, :client, :tool_call, :start], :arguments, false},
+             {[:conduit_mcp, :client, :tool_call, :stop], :result, false}
+           ]
   end
 
   defp sorted(keys), do: Enum.sort(keys)
@@ -399,16 +424,20 @@ defmodule ConduitMcp.TelemetryContractTest do
     name = {__MODULE__, make_ref()}
 
     start_supervised!(
-      {Client,
-       name: name,
-       server_id: "gov",
-       protocol: :modern,
-       transport: {InProcess, server: Server},
-       policy: [allow: ["gov/*"]],
-       hooks: [
-         pre_tool_call: [{:all, fn _call, _ctx -> :cont end, id: :pass}],
-         post_tool_call: [{:all, fn _call, _result, _ctx -> raise "no" end, on_error: :ignore}]
-       ]},
+      {
+        Client,
+        # The optional `:arguments`/`:result` keys (TL-2).
+        name: name,
+        server_id: "gov",
+        protocol: :modern,
+        transport: {InProcess, server: Server},
+        policy: [allow: ["gov/*"]],
+        hooks: [
+          pre_tool_call: [{:all, fn _call, _ctx -> :cont end, id: :pass}],
+          post_tool_call: [{:all, fn _call, _result, _ctx -> raise "no" end, on_error: :ignore}]
+        ],
+        telemetry: [capture_payloads: [redact: fn _payload -> "[redacted]" end]]
+      },
       id: name
     )
 

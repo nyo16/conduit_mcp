@@ -619,7 +619,7 @@ defmodule ConduitMcp.Client do
     with {:ok, view} <- negotiated_view(client, mode, opts) do
       base = Telemetry.base(client, view.server_id, view.transport, view.era)
 
-      Telemetry.tool_call_span(base, name, fn ->
+      Telemetry.tool_call_span(base, name, args, view.capture_payloads, fn ->
         __send_tool_call__(
           client,
           view,

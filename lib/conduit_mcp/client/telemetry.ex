@@ -5,7 +5,10 @@ defmodule ConduitMcp.Client.Telemetry do
   # names (documented in `ConduitMcp.Telemetry`). Metadata is built here from
   # an allowlist only (TL-1): client name, server id, method, sanitized tool
   # name, era, transport kind, closed-set atoms and request ids. Never
-  # arguments, results, `_meta`, tokens or raw error data.
+  # `_meta`, tokens or raw error data, and never arguments or results except
+  # through the opt-in, host-redacted, size-capped `:capture_payloads` of the
+  # `tool_call` span (TL-2; `payload/2`). No digest of a payload is emitted
+  # either: low-entropy arguments are brute-forceable from one.
   #
   # Spans (`request`, `tool_call`, modern `input_request`) run in the
   # caller, and `tool.rejected` in the process that fetched the list (a
@@ -18,6 +21,7 @@ defmodule ConduitMcp.Client.Telemetry do
   # never touched.
 
   alias ConduitMcp.Client.Error
+  alias ConduitMcp.Client.ToolResult
   alias ConduitMcp.Reflect
 
   @logger_keys [:mcp_client, :mcp_server, :mcp_transport, :mcp_era]
@@ -173,29 +177,44 @@ defmodule ConduitMcp.Client.Telemetry do
     end
   end
 
+  @typedoc "`false`, or the validated `:telemetry` `:capture_payloads` (TL-2)."
+  @type capture :: false | %{redact: (term() -> term()), max_bytes: pos_integer()}
+
   @doc """
   Runs `fun` inside a `[:conduit_mcp, :client, :tool_call, ...]` span. `fun`
   returns `{result, rounds}`.
+
+  With `capture` enabled, `:start` carries `:arguments` (`args` through
+  `payload/2`) and `:stop` carries `:result` (the tool result's wire map
+  through `payload/2`, `nil` for an error or a task); both are computed
+  here, in the caller. With `capture` `false` neither key is present.
   """
-  @spec tool_call_span(base(), String.t(), (-> {result, non_neg_integer()})) :: result
+  @spec tool_call_span(base(), String.t(), map(), capture(), (-> {result, non_neg_integer()})) ::
+          result
         when result: term()
-  def tool_call_span(base, tool_name, fun) do
+  def tool_call_span(base, tool_name, args, capture, fun) do
     meta = Map.put(base, :tool_name, Reflect.text(tool_name, 128))
     start = System.monotonic_time()
 
     :telemetry.execute(
       [:conduit_mcp, :client, :tool_call, :start],
       %{monotonic_time: start, system_time: System.system_time()},
-      meta
+      captured(meta, capture, :arguments, args)
     )
 
     try do
       {result, rounds} = fun.()
 
+      stop_meta =
+        meta
+        |> Map.merge(status(result))
+        |> Map.put(:is_error, error_flag(result))
+        |> captured(capture, :result, result_wire(result))
+
       :telemetry.execute(
         [:conduit_mcp, :client, :tool_call, :stop],
         stop_measurements(start, %{rounds: rounds}),
-        meta |> Map.merge(status(result)) |> Map.put(:is_error, error_flag(result))
+        stop_meta
       )
 
       result
@@ -209,6 +228,41 @@ defmodule ConduitMcp.Client.Telemetry do
 
         :erlang.raise(kind, reason, __STACKTRACE__)
     end
+  end
+
+  defp captured(meta, %{} = _capture, key, nil), do: Map.put(meta, key, nil)
+  defp captured(meta, %{} = capture, key, value), do: Map.put(meta, key, payload(capture, value))
+  defp captured(meta, _off, _key, _value), do: meta
+
+  # What the server sent, minus `_meta` (the transport's and the server's
+  # side channel, never a payload). Errors and tasks carry no result.
+  defp result_wire({:ok, %ToolResult{} = result}) do
+    wire = %{"content" => result.content, "isError" => result.is_error}
+
+    if result.structured == nil,
+      do: wire,
+      else: Map.put(wire, "structuredContent", result.structured)
+  end
+
+  defp result_wire(_other), do: nil
+
+  @doc """
+  One captured payload (TL-2): `redact.(value)` when it JSON-encodes within
+  `max_bytes`; `{:truncated, byte_size}` when it encodes larger (never a
+  partial value); `:redaction_failed` when `redact` raises, throws or exits,
+  or returns something that cannot be JSON-encoded - a
+  `ConduitMcp.Client.Secret` included, whose encoder raises - so the raw
+  value never gets through.
+  """
+  @spec payload(%{redact: (term() -> term()), max_bytes: pos_integer()}, term()) ::
+          term() | {:truncated, pos_integer()} | :redaction_failed
+  def payload(%{redact: redact, max_bytes: max_bytes}, value) do
+    redacted = redact.(value)
+    size = redacted |> JSON.encode_to_iodata!() |> IO.iodata_length()
+
+    if size > max_bytes, do: {:truncated, size}, else: redacted
+  catch
+    _kind, _reason -> :redaction_failed
   end
 
   @doc """

@@ -603,7 +603,7 @@ To give a model the tools of several servers, run a `ConduitMcp.Client.Hub`. It 
 
 Safe defaults, each documented in [Client security](guides/client_security.md):
 
-- **Secrets.** Credentials are `ConduitMcp.Client.Secret` values that never print and refuse to JSON-encode. Crash reports and telemetry carry no tokens, tool arguments or results.
+- **Secrets.** Credentials are `ConduitMcp.Client.Secret` values that never print and refuse to JSON-encode. Crash reports and telemetry carry no tokens; telemetry carries tool arguments and results only if you opt in with `telemetry: [capture_payloads: [redact: fun]]`, and then only what `fun` returns, size-capped.
 - **Tokens.** A token must be visible ASCII; a trailing newline from `File.read!/1` is refused instead of leaking into an error.
 - **Address checks.** `server_url_policy: :public_only` connects to the address it checked, so DNS rebinding can't redirect the request.
 - **Credential-scoped cache.** Private results are cached per credential, and `ConduitMcp.Client.set_auth/3` switches credentials at runtime.

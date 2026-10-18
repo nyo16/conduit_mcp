@@ -134,7 +134,11 @@ defmodule ConduitMcp.Client.Pipeline do
 
   `[:conduit_mcp, :client, :policy, :decision]` per policy evaluation and
   `[:conduit_mcp, :client, :hook, :stop | :exception]` per hook run (see
-  `ConduitMcp.Telemetry`); neither carries arguments or results.
+  `ConduitMcp.Telemetry`); neither carries arguments or results. With the
+  client's `telemetry: [capture_payloads: ...]`, the `tool_call` span's
+  `:arguments` are the arguments given to `run/3` (the span opens before
+  the pre-hooks, and a denied call sends nothing) and its `:result` is
+  what `run/3` returns (after post-hooks and shaping).
   """
 
   alias ConduitMcp.Client
@@ -200,7 +204,7 @@ defmodule ConduitMcp.Client.Pipeline do
       call = initial_call(view.server_id, target, meta)
       base = Telemetry.base(client, view.server_id, view.transport, view.era)
 
-      Telemetry.tool_call_span(base, call.name, fn ->
+      Telemetry.tool_call_span(base, call.name, call.args, view.capture_payloads, fn ->
         execute(state(client, view, gov, call, base, own, opts))
       end)
     end

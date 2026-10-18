@@ -906,9 +906,18 @@ Smaller behaviour changes worth knowing about:
   intake, governance, hub, adapters, OAuth, input requests, transport
   mailbox), all listed in `ConduitMcp.Telemetry.events/0` with their
   metadata keys. Client metadata comes from an allowlist and never carries
-  arguments, results or secrets; client-spawned processes set `mcp_*`
-  Logger metadata. `ConduitMcp.PromEx` gains MRTR, subscription, client and
-  OAuth metric groups.
+  secrets, nor arguments or results unless payload capture is enabled
+  (below); client-spawned processes set `mcp_*` Logger metadata.
+  `ConduitMcp.PromEx` gains MRTR, subscription, client and OAuth metric
+  groups.
+- **Opt-in payload capture in client telemetry** (TL-2): `telemetry:
+  [capture_payloads: [redact: fun, max_bytes: 4_096]]` (client and hub)
+  adds `:arguments` to `[:conduit_mcp, :client, :tool_call, :start]` and
+  `:result` to `:stop`, passed through the required `redact` in the
+  caller; an over-size value becomes `{:truncated, byte_size}`, and a
+  raising `redact` or an unencodable return (a `Secret` included)
+  `:redaction_failed`. `capture_payloads: true` without `:redact` raises at
+  start. Off by default: neither key is present.
 - **Optional dependencies** `:finch` (`~> 0.21`, the client's HTTP transport
   and OAuth) and `:jsv` (`~> 0.26`, client schema validation), guarded by
   `ConduitMcp.OptionalDeps.finch!/0`, `jsv!/0`, `oauth_client!/0` and

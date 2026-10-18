@@ -4,6 +4,31 @@ defmodule ConduitMcp.Client.Config do
 
   @protocols [:auto, :modern, :legacy]
 
+  @telemetry_keys [
+    capture_payloads: [
+      type: {:custom, __MODULE__, :validate_capture_payloads, []},
+      default: false,
+      doc: """
+      Opt-in capture of tool-call payloads in the
+      `[:conduit_mcp, :client, :tool_call, ...]` span (TL-2). `false`
+      (the default): the span's metadata has no `:arguments` or
+      `:result` key at all. To enable it, pass `[redact: fun, max_bytes:
+      n]`: `:redact` (**required**; `true` alone is rejected) is a
+      one-arity function run in the calling process on the arguments
+      and on the result before they reach any handler, and `:max_bytes`
+      (default 4 096) caps the JSON size of what it returns. See
+      "Payload capture" in `ConduitMcp.Telemetry`.
+      """
+    ]
+  ]
+
+  @telemetry_schema NimbleOptions.new!(@telemetry_keys)
+
+  @capture_schema NimbleOptions.new!(
+                    redact: [type: {:fun, 1}, required: true],
+                    max_bytes: [type: :pos_integer, default: 4_096]
+                  )
+
   @schema NimbleOptions.new!(
             name: [
               type: :any,
@@ -401,6 +426,16 @@ defmodule ConduitMcp.Client.Config do
               `fn -> unix_milliseconds end` used for grant expiry (default
               the system clock); for tests.
               """
+            ],
+            telemetry: [
+              type: :keyword_list,
+              default: [],
+              keys: @telemetry_keys,
+              doc: """
+              Telemetry settings. Client events carry allowlisted metadata
+              only (see `ConduitMcp.Telemetry`); payload capture is the one
+              opt-in exception.
+              """
             ]
           )
 
@@ -463,7 +498,10 @@ defmodule ConduitMcp.Client.Config do
     :governance,
     # The client capabilities per era, derived from the handler once here so
     # the connection never calls handler code to build them.
-    :capabilities
+    :capabilities,
+    # `false`, or `%{redact: fun, max_bytes: n}` (`:telemetry
+    # :capture_payloads`).
+    :capture_payloads
   ]
 
   @type protocol :: :auto | :modern | :legacy | String.t()
@@ -496,7 +534,8 @@ defmodule ConduitMcp.Client.Config do
           roots: keyword(),
           max_cache_ttl: pos_integer(),
           governance: struct(),
-          capabilities: %{modern: map(), legacy: map()}
+          capabilities: %{modern: map(), legacy: map()},
+          capture_payloads: false | %{redact: (term() -> term()), max_bytes: pos_integer()}
         }
 
   @doc """
@@ -524,6 +563,7 @@ defmodule ConduitMcp.Client.Config do
       {:ok, valid} ->
         {transport, _transport_opts} = valid[:transport]
         {governance, valid} = Keyword.split(valid, @governance_keys)
+        {telemetry, valid} = Keyword.pop!(valid, :telemetry)
         server_id = valid[:server_id] || default_server_id(valid[:name])
 
         struct!(
@@ -532,6 +572,7 @@ defmodule ConduitMcp.Client.Config do
           |> Keyword.put(:server_id, server_id)
           |> Keyword.put_new_lazy(:probe_timeout, fn -> default_probe_timeout(transport) end)
           |> Keyword.put_new_lazy(:client_info, &default_client_info/0)
+          |> Keyword.put(:capture_payloads, telemetry[:capture_payloads])
           |> Keyword.put(:capabilities, %{
             modern: capabilities(valid, :modern),
             legacy: capabilities(valid, :legacy)
@@ -731,4 +772,44 @@ defmodule ConduitMcp.Client.Config do
     do:
       {:error,
        "expected :first_listing or a map of tool name to fingerprint, got: #{inspect(other)}"}
+
+  @doc false
+  # NimbleOptions `{:custom, ...}` validator for `:telemetry
+  # :capture_payloads`. Redaction is mandatory, so `true` is refused.
+  @spec validate_capture_payloads(term()) ::
+          {:ok, false | %{redact: (term() -> term()), max_bytes: pos_integer()}}
+          | {:error, String.t()}
+  def validate_capture_payloads(false), do: {:ok, false}
+
+  def validate_capture_payloads(true),
+    do:
+      {:error,
+       "true is not accepted: payload capture requires a :redact function " <>
+         "(capture_payloads: [redact: &MyApp.redact/1])"}
+
+  def validate_capture_payloads(opts) when is_list(opts) do
+    case NimbleOptions.validate(opts, @capture_schema) do
+      {:ok, valid} -> {:ok, Map.new(valid)}
+      {:error, error} -> {:error, Exception.message(error)}
+    end
+  end
+
+  def validate_capture_payloads(other),
+    do:
+      {:error,
+       "expected false or [redact: fun/1, max_bytes: pos_integer], got: #{inspect(other)}"}
+
+  @doc false
+  # Validates a `:telemetry` keyword list without converting it, for a hub's
+  # defaults (each server's client validates the merged options again).
+  @spec validate_telemetry(term()) :: {:ok, keyword()} | {:error, String.t()}
+  def validate_telemetry(opts) when is_list(opts) do
+    case NimbleOptions.validate(opts, @telemetry_schema) do
+      {:ok, _valid} -> {:ok, opts}
+      {:error, error} -> {:error, Exception.message(error)}
+    end
+  end
+
+  def validate_telemetry(other),
+    do: {:error, "expected a keyword list, got: #{inspect(other)}"}
 end
