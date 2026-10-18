@@ -43,10 +43,12 @@ defmodule ConduitMcp.Subscriptions.Stream do
   #     the cancellation page makes the first a MUST, the subscriptions page
   #     the second a SHOULD.
   #
-  # Registry entries and the slot are released in an `after`: under HTTP/1.1
-  # keep-alive this process serves the connection's next request. A killed
-  # process leaks neither: the registry drops a dead registrant's entries,
-  # and a dead pid's slot row is swept by `SSEStream.acquire_slot/3`.
+  # Registry entries, the admission entry and the slot are released in an
+  # `after`: under HTTP/1.1 keep-alive this process serves the connection's
+  # next request. A killed process leaks none: the registry drops a dead
+  # registrant's entries, `Subscriptions.Admission` a dead stream's (it
+  # monitors each), and a dead pid's slot row is swept by
+  # `SSEStream.acquire_slot/3`.
 
   require Logger
 

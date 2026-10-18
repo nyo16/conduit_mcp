@@ -31,6 +31,9 @@ defmodule ConduitMcp.Server do
     register in (it starts no client)
   - `ConduitMcp.Subscriptions` — the `Registry` of `subscriptions/listen`
     streams by topic
+  - `ConduitMcp.Subscriptions.Admission` — the live `subscriptions/listen`
+    streams of each principal (`:max_listens_per_principal`); a process
+    streams call once per listen, not an ETS owner
   - `ConduitMcp.Session.Janitor` (as `ConduitMcp.Session.Janitor.Default`) —
     sweeps expired sessions; disable with
     `config :conduit_mcp, :session_janitor, false`

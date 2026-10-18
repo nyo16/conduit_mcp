@@ -56,6 +56,8 @@ defmodule ConduitMcp.Subscriptions do
   Registry entries belong to the stream's process: a stream that ends
   unregisters them, and the registry drops the entries of a process that
   dies (it is linked to every registrant), so a killed stream leaks nothing.
+  The same holds for its entry in `ConduitMcp.Subscriptions.Admission`, which
+  monitors every admitted stream.
 
   Each stream is bounded by the transport (see
   `ConduitMcp.Transport.StreamableHTTP`): at most `:max_listens_per_principal`
@@ -70,14 +72,16 @@ defmodule ConduitMcp.Subscriptions do
   A client that went away is only noticed on the stream's next write, so a
   client opening one listen per run (e.g. the MCP Inspector CLI) would
   otherwise be locked out by its own dead streams. Admission and eviction
-  are serialized per principal, so even a burst of concurrent listens never
-  holds more than the cap live at once; superseded streams still writing
-  their teardown are not counted (each also holds a `:max_streams` slot
-  until it closes). One principal still never holds more than the cap
-  (SV-10), and another principal's streams are never evicted.
+  are one step of `ConduitMcp.Subscriptions.Admission`, a node-local process
+  that answers admissions in arrival order, so even a burst of concurrent
+  listens never holds more than the cap live at once; superseded streams
+  still writing their teardown are not counted (each also holds a
+  `:max_streams` slot until it closes). One principal still never holds more
+  than the cap (SV-10), and another principal's streams are never evicted.
   """
 
   alias ConduitMcp.Notifications
+  alias ConduitMcp.Subscriptions.Admission
 
   @typedoc "What a stream subscribes to; see the Topics table."
   @type topic ::
@@ -171,48 +175,19 @@ defmodule ConduitMcp.Subscriptions do
   # ref, so the stream loop matches it and `flush/1` drops a late one) and
   # ends with the server-initiated teardown.
   #
-  # Count, evict and register run under a node-local `:global` lock on the
-  # principal, so a burst of concurrent admissions is serialized: the live
-  # count never exceeds `max`, even transiently. A superseded stream stays
-  # registered until its teardown finishes; the admitting process records it
-  # under `superseded_key/1` (an entry it owns, dropped when it leaves or
-  # dies) so it is not counted, nor evicted, a second time.
+  # The bookkeeping lives in `ConduitMcp.Subscriptions.Admission`, which
+  # answers admissions one at a time: the live count never exceeds `max`,
+  # even during a burst. A superseded stream leaves the live set at once, so
+  # it is not counted, nor evicted, a second time while it writes its
+  # teardown.
   @spec admit(String.t(), pos_integer(), reference()) :: :ok
-  def admit(principal_key, max, ref) do
-    :global.trans(
-      {{__MODULE__, principal_key}, self()},
-      fn -> do_admit(principal_key, max, ref) end,
-      [node()]
-    )
-  end
-
-  defp do_admit(principal_key, max, ref) do
-    live = live_listeners(principal_key)
-
-    live
-    |> Enum.sort()
-    |> Enum.take(max(length(live) - max + 1, 0))
-    |> Enum.each(fn {_seq, pid, victim} ->
-      {:ok, _owner} = Registry.register(__MODULE__, superseded_key(principal_key), victim)
-      send(pid, {__MODULE__, victim, :superseded})
-    end)
-
-    seq = System.unique_integer([:monotonic])
-    {:ok, _owner} = Registry.register(__MODULE__, listener_key(principal_key), {seq, ref})
-    :ok
-  end
+  defdelegate admit(principal_key, max, ref), to: Admission
 
   @doc false
-  # The not-yet-superseded streams of `principal_key`, as `{seq, pid, ref}`.
-  @spec live_listeners(String.t()) :: [{integer(), pid(), reference()}]
-  def live_listeners(principal_key) do
-    superseded =
-      MapSet.new(Registry.lookup(__MODULE__, superseded_key(principal_key)), &elem(&1, 1))
-
-    for {pid, {seq, ref}} <- Registry.lookup(__MODULE__, listener_key(principal_key)),
-        not MapSet.member?(superseded, ref),
-        do: {seq, pid, ref}
-  end
+  # The not-yet-superseded streams of `principal_key`, as `{seq, pid, ref}`,
+  # oldest first.
+  @spec live_listeners(String.t()) :: [Admission.listener()]
+  defdelegate live_listeners(principal_key), to: Admission
 
   @doc false
   # Subscribes the calling process to `topics`; what `publish/2` sends it is
@@ -223,21 +198,13 @@ defmodule ConduitMcp.Subscriptions do
   end
 
   @doc false
-  # Undoes `subscribe/2` and `admit/2` for the calling process. Needed even
-  # though the registry cleans up after a dead process: under HTTP/1.1
-  # keep-alive the same process goes on to serve the connection's next
-  # request.
+  # Undoes `subscribe/2` and `admit/3` for the calling process. Needed even
+  # though the registry and `Admission` clean up after a dead process: under
+  # HTTP/1.1 keep-alive the same process goes on to serve the connection's
+  # next request.
   @spec leave([topic()], String.t()) :: :ok
   def leave(topics, principal_key) do
-    Enum.each(
-      [listener_key(principal_key), superseded_key(principal_key) | topics],
-      &Registry.unregister(__MODULE__, &1)
-    )
+    :ok = Admission.leave(principal_key)
+    Enum.each(topics, &Registry.unregister(__MODULE__, &1))
   end
-
-  @doc false
-  @spec listener_key(String.t()) :: {:listener, String.t()}
-  def listener_key(principal_key), do: {:listener, principal_key}
-
-  defp superseded_key(principal_key), do: {:superseded, principal_key}
 end

@@ -27,6 +27,11 @@ defmodule ConduitMcp.Application do
       by the notification topics they deliver. The registry's own processes
       only clean up after streams that die; publishing and registering go
       straight to its ETS tables from the calling process.
+    * `ConduitMcp.Subscriptions.Admission` — always started; the live
+      `subscriptions/listen` streams of each principal behind
+      `:max_listens_per_principal`. Unlike the table owners it is called:
+      admitting a stream (once per listen) counts, supersedes and records in
+      one serialized step. It runs no user code.
     * `ConduitMcp.Session.Janitor` — always started against
       `ConduitMcp.Session.EtsStore`, under the name
       `ConduitMcp.Session.Janitor.Default` so it cannot collide with a janitor
@@ -46,6 +51,8 @@ defmodule ConduitMcp.Application do
   Every table above is `:public`; the owners create the table and then idle.
   Reads and writes go directly to ETS from the calling process — the owners
   are not `handle_call` gateways and must not become ones.
+  (`ConduitMcp.Subscriptions.Admission` owns no table; see its moduledoc for
+  why a process answering calls is right there.)
 
   It also starts `ConduitMcp.Client.Registry`, a passive unique `Registry`
   (partitioned by scheduler) in which every `ConduitMcp.Client` registers
@@ -112,7 +119,8 @@ defmodule ConduitMcp.Application do
       ConduitMcp.Transport.SSEStream.Owner,
       {Registry,
        keys: :unique, name: ConduitMcp.Client.Registry, partitions: System.schedulers_online()},
-      ConduitMcp.Subscriptions
+      ConduitMcp.Subscriptions,
+      ConduitMcp.Subscriptions.Admission
     ]
   end
 
