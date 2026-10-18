@@ -13,7 +13,8 @@ defmodule ConduitMcp.Protocol.Modern do
       version. Request-scoped `io.modelcontextprotocol/*` keys a method
       echoed from the request's `_meta` (protocol version, client
       capabilities, client info, log level) are removed from the result's
-      `_meta`; other keys, such as a `progressToken`, are kept;
+      `_meta`; the result's other keys are kept. `tools/call` never echoes
+      the request's `_meta` on this era, so these are the tool's own;
     * on the six cacheable results — `server/discover`, `tools/list`,
       `prompts/list`, `resources/list`, `resources/templates/list` and
       `resources/read` — `"ttlMs"` and `"cacheScope"`.

@@ -107,6 +107,7 @@ nothing published after the acknowledgment is missed.
 | Server | `:max_stream_lifetime` reached | `notifications/cancelled` for the listen id, then the closing result |
 | Server | the OAuth bearer token's `exp` passed, if that comes before the lifetime | the same |
 | Server | `:listen_idle_timeout` with no notification delivered | the same |
+| Server | a newer listen of the same principal arrived at `:max_listens_per_principal`; this stream is that principal's oldest | the same |
 
 On a server-side close, the order is fixed: first `notifications/cancelled`
 (with `requestId` set to the listen id and a `reason`), then the
@@ -126,7 +127,7 @@ stream slot. A process that is killed leaks neither.
 
 | Transport option | Default | Over the limit |
 |---|---|---|
-| `:max_listens_per_principal` | `4` | HTTP **429**, JSON-RPC `-32000`, no stream |
+| `:max_listens_per_principal` | `4` | admitted; the principal's **oldest** stream is ended gracefully (reason `:superseded`) |
 | `:max_streams` | `1_000` | HTTP **503**, JSON-RPC `-32000`, no stream |
 | `:listen_idle_timeout` | 30 minutes | graceful close |
 | `:max_stream_lifetime` | 1 hour | graceful close |
@@ -144,11 +145,15 @@ stream slot. A process that is killed leaks neither.
 - **Per-principal cap.** The principal is
   `ConduitMcp.Principal.rate_limit_key/1`: the authenticated id, otherwise
   the client's address bucket. This cap is always on and needs no Hammer
-  backend. The client is over its own allowance and can close one of its
-  streams.
+  backend. It is never answered 429: a client's dead streams are only noticed
+  on their next write, so a client that opens a listen per run would lock
+  itself out. Instead the new listen is admitted and the principal's oldest
+  stream gets `notifications/cancelled`, then the closing result, then
+  closes. Admission is serialized per principal, so even a burst never holds
+  more than the cap live; another principal's streams are never touched.
 - **Server-wide cap.** `:max_streams` is shared with streamed `tools/call`
   responses. A full server is a capacity problem, not something the client
-  did, so it is answered 503 rather than 429.
+  did, so it is answered 503 (and supersedes nothing).
 
 These options must be positive integers, or `init/1` raises
 `ArgumentError`. See [Rate Limiting](rate_limiting.md#listen-streams)
@@ -177,12 +182,12 @@ legacy `resources.subscribe` is advertised only when the server defines
 
 A listen whose stream opened emits these events instead of
 `[:conduit_mcp, :request, :stop]`, because its duration is a lifetime, not
-a latency. A listen refused with 406, 429 or 503 emits neither.
+a latency. A listen refused with 406 or 503 emits neither.
 
 | Event | Measurements | Metadata |
 |---|---|---|
 | `[:conduit_mcp, :subscription, :start]` | `system_time`, `resource_subscriptions` (count) | `filters`, `server_module` |
-| `[:conduit_mcp, :subscription, :stop]` | `duration` (native units) | `filters`, `server_module`, `reason` |
+| `[:conduit_mcp, :subscription, :stop]` | `duration` (native units) | `filters`, `server_module`, `reason` (`:client_closed`, `:max_lifetime`, `:token_expired`, `:idle_timeout`, `:superseded`) |
 
 `filters` is a list of atoms: `:tools_list_changed`,
 `:prompts_list_changed`, `:resources_list_changed`,

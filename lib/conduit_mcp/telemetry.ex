@@ -301,7 +301,7 @@ defmodule ConduitMcp.Telemetry do
   A modern `subscriptions/listen` stream (see `ConduitMcp.Subscriptions`)
   emits these instead of `[:conduit_mcp, :request, :stop]`: its duration is
   how long the stream stayed open, which would swamp a latency metric. A
-  listen refused before its stream opened (HTTP 406, 429 or 503) emits
+  listen refused before its stream opened (HTTP 406 or 503) emits
   neither.
 
   #### `[:conduit_mcp, :subscription, :start]`
@@ -337,8 +337,10 @@ defmodule ConduitMcp.Telemetry do
     * `:server_module` (module) - The MCP server module
     * `:reason` (atom) - `:client_closed` (the client went away),
       `:max_lifetime` (`:max_stream_lifetime` reached), `:token_expired`
-      (the bearer token's `exp` passed) or `:idle_timeout`
-      (`:listen_idle_timeout` without a notification). Every reason but
+      (the bearer token's `exp` passed), `:idle_timeout`
+      (`:listen_idle_timeout` without a notification) or `:superseded` (a
+      newer listen of the same principal took its place at
+      `:max_listens_per_principal`). Every reason but
       `:client_closed` ended with `notifications/cancelled` and the
       graceful-closure result.
 

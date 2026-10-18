@@ -10,15 +10,20 @@ defmodule ConduitMcp.Subscriptions.Stream do
   # Admission, before anything is sent, so a refusal is a plain JSON-RPC
   # error body:
   #
-  #   * `:max_listens_per_principal` streams per principal
+  #   * `:max_listens_per_principal` live streams per principal
   #     (`ConduitMcp.Principal.rate_limit_key/1`: the principal id, else the
-  #     client's address bucket) - the next is HTTP 429. The client is over
-  #     its own allowance and can close one of its streams.
+  #     client's address bucket) - never refused: at the cap, the principal's
+  #     OLDEST stream is superseded (`Subscriptions.admit/3`) and ends with
+  #     the server-initiated teardown below, reason `:superseded`. A client
+  #     that disconnected is only noticed on the next write, so refusing
+  #     would lock out a client that opens a listen per run (the MCP
+  #     Inspector CLI) for up to two keep-alive intervals; superseding keeps
+  #     the same bound (SV-10) without that.
   #   * a `:max_streams` slot in `SSEStream.streams_table/0`, the cap shared
   #     with streamed `tools/call` responses - HTTP 503 when full. A
   #     `tools/call` at the cap can still be answered as plain JSON; a listen
   #     cannot, and the server-wide cap is the server's capacity, not
-  #     anything this client did, so it is 503 rather than 429.
+  #     anything this client did, so it is 503.
   #
   # Then, in order: register the topics (so nothing published after the
   # acknowledgment is missed), open the SSE response, send
@@ -31,8 +36,9 @@ defmodule ConduitMcp.Subscriptions.Stream do
   #     nothing more is sent;
   #   * the deadline - `:max_stream_lifetime`, or the bearer token's `exp`
   #     when that comes first - or `:listen_idle_timeout` with no
-  #     notification delivered: the server ends the subscription, sending
-  #     `notifications/cancelled` for the listen id and then the
+  #     notification delivered, or a newer listen of the same principal
+  #     superseding this one at the cap: the server ends the subscription,
+  #     sending `notifications/cancelled` for the listen id and then the
   #     graceful-closure result (`SubscriptionsListenResult`), in that order:
   #     the cancellation page makes the first a MUST, the subscriptions page
   #     the second a SHOULD.
@@ -67,15 +73,12 @@ defmodule ConduitMcp.Subscriptions.Stream do
     ref = make_ref()
 
     try do
-      cond do
-        not Subscriptions.admit(principal, conn.private[:max_listens_per_principal]) ->
-          reject(conn, spec, 429, "Too many concurrent subscriptions/listen streams")
-
-        not acquire_slot(table, conn.private[:max_streams]) ->
-          reject(conn, spec, 503, "Too many open streams")
-
-        true ->
-          serve(conn, spec, ref)
+      # The slot first: a listen refused 503 must not supersede anything.
+      if acquire_slot(table, conn.private[:max_streams]) do
+        :ok = Subscriptions.admit(principal, conn.private[:max_listens_per_principal], ref)
+        serve(conn, spec, ref)
+      else
+        reject(conn, spec, 503, "Too many open streams")
       end
     after
       Subscriptions.leave(filter.topics, principal)
@@ -182,6 +185,9 @@ defmodule ConduitMcp.Subscriptions.Stream do
 
   # --- loop callbacks ---------------------------------------------------------
 
+  defp on_message({Subscriptions, ref, :superseded}, conn, %{ref: ref} = state),
+    do: {:halt, conn, %{state | reason: :superseded}}
+
   defp on_message({Subscriptions, ref, notification}, conn, %{ref: ref} = state) do
     case encode(notification, state.id) do
       nil ->
@@ -256,6 +262,9 @@ defmodule ConduitMcp.Subscriptions.Stream do
   defp reason_text(:max_lifetime), do: "Maximum stream lifetime reached"
   defp reason_text(:token_expired), do: "Access token expired"
   defp reason_text(:idle_timeout), do: "Subscription idle timeout"
+
+  defp reason_text(:superseded),
+    do: "Superseded by a newer subscriptions/listen stream of the same principal"
 
   defp server_info(spec) do
     case Ctx.from_conn(spec.conn) do

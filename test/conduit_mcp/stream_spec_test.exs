@@ -87,7 +87,9 @@ defmodule ConduitMcp.StreamSpecTest do
         )
 
       assert %{"id" => 9, "result" => %{"resultType" => "complete"}} = response
-      assert response["result"]["_meta"]["progressToken"] == "t"
+      # The modern era does not echo the request's _meta into the result.
+      refute Map.has_key?(response["result"]["_meta"], "progressToken")
+      refute Map.has_key?(response["result"]["_meta"], "io.modelcontextprotocol/logLevel")
 
       me = self()
       assert_receive {:ran, ^me, 9}

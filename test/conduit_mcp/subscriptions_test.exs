@@ -216,36 +216,84 @@ defmodule ConduitMcp.SubscriptionsTest do
       refute_received {Subscriptions, ^ref, _}
     end
 
-    test "admit/2 counts each principal's streams separately, up to the cap" do
+    test "admit/3 at the cap supersedes the principal's oldest stream, never another's" do
       principal = "principal-#{System.unique_integer([:positive])}"
+      other = "someone-else-#{principal}"
+
+      {other_pid, other_ref} = spawn_admit(other, 2)
+      [{p1, r1}, {p2, r2}] = for _ <- 1..2, do: spawn_admit(principal, 2)
+
+      {p3, r3} = spawn_admit(principal, 2)
+      assert_receive {:superseded, ^p1, ^r1}
+      refute_received {:superseded, _, _}
+
+      {p4, r4} = spawn_admit(principal, 2)
+      assert_receive {:superseded, ^p2, ^r2}
+      refute_received {:superseded, _, _}
+
+      assert live(principal) == [{p3, r3}, {p4, r4}]
+      assert live(other) == [{other_pid, other_ref}]
+    end
+
+    test "a burst of concurrent admit/3 calls never holds more than the cap live" do
+      principal = "burst-#{System.unique_integer([:positive])}"
       parent = self()
 
-      admitted =
-        for _ <- 1..3 do
-          spawn_admit(principal, 2, parent)
+      pids =
+        for _ <- 1..20 do
+          spawn_link(fn ->
+            ref = make_ref()
+            :ok = Subscriptions.admit(principal, 3, ref)
+            send(parent, {:admitted, self(), length(Subscriptions.live_listeners(principal))})
+            hold(parent, ref)
+          end)
         end
 
-      assert Enum.sort(admitted) == [false, true, true]
-      assert Subscriptions.admit("someone-else-#{principal}", 2)
-      Subscriptions.leave([], "someone-else-#{principal}")
+      on_exit(fn -> Enum.each(pids, &send(&1, :stop)) end)
+
+      for pid <- pids do
+        assert_receive {:admitted, ^pid, count}
+        assert count <= 3
+      end
+
+      assert length(live(principal)) == 3
+
+      for _ <- 1..17, do: assert_receive({:superseded, _pid, _ref})
+      refute_received {:superseded, _, _}
     end
   end
 
+  defp live(principal),
+    do:
+      for({_seq, pid, ref} <- Enum.sort(Subscriptions.live_listeners(principal)), do: {pid, ref})
+
   # Each stream is its own process; the spawned process holds its entry
-  # until told to stop, at the end of the test.
-  defp spawn_admit(principal, max, parent) do
+  # until told to stop, at the end of the test, and reports a supersession.
+  defp spawn_admit(principal, max) do
+    parent = self()
+
     pid =
       spawn_link(fn ->
-        send(parent, {:admitted, self(), Subscriptions.admit(principal, max)})
-
-        receive do
-          :stop -> :ok
-        end
+        ref = make_ref()
+        :ok = Subscriptions.admit(principal, max, ref)
+        send(parent, {:admitted, self(), ref})
+        hold(parent, ref)
       end)
 
     on_exit(fn -> send(pid, :stop) end)
 
-    assert_receive {:admitted, ^pid, admitted}
-    admitted
+    assert_receive {:admitted, ^pid, ref}
+    {pid, ref}
+  end
+
+  defp hold(parent, ref) do
+    receive do
+      {Subscriptions, ^ref, :superseded} ->
+        send(parent, {:superseded, self(), ref})
+        hold(parent, ref)
+
+      :stop ->
+        :ok
+    end
   end
 end
