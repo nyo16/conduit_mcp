@@ -83,7 +83,7 @@ defmodule ConduitMcp.DiscoverTest do
       result = Discover.result(EndpointWithInstructions, %Plug.Conn{})
 
       assert result["supportedVersions"] == ["2026-07-28", "2025-11-25", "2025-06-18"]
-      assert result["capabilities"] == %{"tools" => %{"listChanged" => true}}
+      assert result["capabilities"] == %{"tools" => %{"listChanged" => true}, "logging" => %{}}
       assert result["instructions"] == "Endpoint guidance."
     end
 
