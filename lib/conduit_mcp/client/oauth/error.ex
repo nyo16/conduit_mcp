@@ -81,7 +81,9 @@ defmodule ConduitMcp.Client.OAuth.Error do
     * `:no_registration_method` - no pre-registered client, CIMD or DCR applies.
     * `:registration_failed` - dynamic client registration was refused.
     * `:invalid_grant` - the token endpoint rejected the code or refresh token.
-    * `:token_request_failed` - the token endpoint failed otherwise.
+    * `:token_request_failed` - the token endpoint failed otherwise (`data:
+      %{reason: :invalid_token_response}` for a malformed answer, an access
+      token holding anything but visible ASCII included).
     * `:step_up_limit` - the step-up attempt limit for a resource and scope set
       was reached (see `ConduitMcp.Client.OAuth.Scopes.step_up_allowed?/4`).
     * `:url_blocked` - `ConduitMcp.Client.URLPolicy` refused a server-supplied

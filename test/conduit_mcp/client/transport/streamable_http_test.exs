@@ -51,7 +51,7 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTPTest do
       end
 
       assert {:error, message} = validate(url: "https://x/", headers: [{"x-a", "v\r\nx-b: w"}])
-      assert message =~ "CR, LF or NUL"
+      assert message =~ "visible ASCII characters, spaces and tabs"
       assert {:error, _} = validate(url: "https://x/", headers: [{"bad name", "v"}])
 
       assert {:ok, opts} =
@@ -146,6 +146,26 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTPTest do
         start([url: "https://127.0.0.1:1/", server_url_policy: :public_only], protocol: :modern)
 
       assert {:error, %Client.Error{kind: :closed}} = Client.await_ready(name, 2_000)
+    end
+
+    # W-S4: pinning the vetted address is only as good as the certificate
+    # check bound to the original name.
+    test "is refused together with insecure_skip_tls_verify" do
+      assert {:error, message} =
+               validate(
+                 url: "https://x/",
+                 server_url_policy: :public_only,
+                 insecure_skip_tls_verify: true
+               )
+
+      assert message =~ "server_url_policy"
+      assert message =~ "insecure_skip_tls_verify"
+    end
+
+    test "a :resolver is a one-arity function" do
+      assert {:ok, _} = validate(url: "https://x/", resolver: fn _host -> {:ok, []} end)
+      assert {:error, message} = validate(url: "https://x/", resolver: :nope)
+      assert message =~ "resolver"
     end
   end
 

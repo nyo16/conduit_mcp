@@ -19,6 +19,7 @@ if Code.ensure_loaded?(Finch) do
 
     alias ConduitMcp.Client.OAuth.{Config, Error, HTTP, Scopes, Tokens}
     alias ConduitMcp.Client.Secret
+    alias ConduitMcp.Client.Transport.StreamableHTTP
 
     @doc """
     Posts `params` (the grant's own parameters) to `endpoint` with `client`'s
@@ -111,9 +112,13 @@ if Code.ensure_loaded?(Finch) do
       end
     end
 
-    # RFC 6749 §5.1; `token_type` must be Bearer (case-insensitive).
+    # RFC 6749 §5.1; `token_type` must be Bearer (case-insensitive). The
+    # access token goes into an `Authorization` header, so it must be
+    # visible ASCII (`StreamableHTTP.bearer_token?/1`): a token with any
+    # other byte is refused here, and the error names no value.
     defp tokens(config, body, requested) do
-      with access when is_binary(access) and access != "" <- body["access_token"],
+      with access when is_binary(access) <- body["access_token"],
+           true <- StreamableHTTP.bearer_token?(access),
            type when is_binary(type) <- body["token_type"],
            "bearer" <- String.downcase(type),
            refresh when is_nil(refresh) or (is_binary(refresh) and refresh != "") <-

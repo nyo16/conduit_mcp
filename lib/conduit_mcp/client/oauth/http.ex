@@ -46,7 +46,12 @@ if Code.ensure_loaded?(Finch) do
     #     development and tests) admits plain `http` to a loopback host,
     #     connected by name with no address check. `https` URLs are always
     #     checked.
+    #   * An error never carries a header value: Mint's
+    #     `{:invalid_header_value, name, value}` (a `Basic` credential
+    #     included) is reduced to `{:invalid_header_value, name}`
+    #     (`ConduitMcp.Client.HTTP.transport_error/1`).
 
+    alias ConduitMcp.Client.HTTP, as: ClientHTTP
     alias ConduitMcp.Client.OAuth.URL
     alias ConduitMcp.Client.Secret
     alias ConduitMcp.Client.URLPolicy
@@ -173,7 +178,7 @@ if Code.ensure_loaded?(Finch) do
 
         {:error, reason} ->
           if rest == [] or now_ms() >= deadline,
-            do: {:error, {:transport_error, reason}},
+            do: {:error, ClientHTTP.transport_error(reason)},
             else: connect(rest, uri, ctx, deadline)
       end
     end
@@ -199,7 +204,7 @@ if Code.ensure_loaded?(Finch) do
           read(conn, ref, %{status: nil, headers: [], body: [], size: 0}, max, deadline)
 
         {:error, _conn, reason} ->
-          {:error, {:transport_error, reason}}
+          {:error, ClientHTTP.transport_error(reason)}
       end
     end
 
@@ -221,7 +226,7 @@ if Code.ensure_loaded?(Finch) do
             {:error, :timeout}
 
           {:error, _conn, reason, _responses} ->
-            {:error, {:transport_error, reason}}
+            {:error, ClientHTTP.transport_error(reason)}
         end
       end
     end
@@ -253,7 +258,7 @@ if Code.ensure_loaded?(Finch) do
     defp collect([{:done, ref} | _rest], ref, acc, _max), do: {:done, acc}
 
     defp collect([{:error, ref, reason} | _rest], ref, _acc, _max),
-      do: {:error, {:transport_error, reason}}
+      do: {:error, ClientHTTP.transport_error(reason)}
 
     defp collect([_other | rest], ref, acc, max), do: collect(rest, ref, acc, max)
 

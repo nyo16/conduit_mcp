@@ -137,6 +137,7 @@ resource limits, or MuonTrap for kill-on-parent-exit.
 | No bearer over plain HTTP | `:auth` with an `http` URL to a non-loopback host raises at start |
 | Deadlines | A total deadline per request (bytes arriving slowly never extend it); long-lived streams get `listen_idle_timeout` (120 s) |
 | Owned headers | `:headers` cannot set `accept`, `authorization`, `content-type`, `mcp-*`, `last-event-id` or hop-by-hop headers |
+| Header bytes | A bearer token must be visible ASCII (0x21-0x7E), `:headers` values visible ASCII, space and tab. A static value outside that raises at start; a token obtained per request (an `:auth` function's, a token store's) outside it fails the request with `kind: :auth, reason: :invalid_token`, and a token endpoint's with `:invalid_token_response`. Neither error, nor any HTTP-layer error (`{:invalid_header_value, name}`), carries a header value, so a malformed token never reaches an error message, a log line or an LLM adapter's tool result |
 | Session ids | 1 to 1024 visible ASCII characters, else the handshake fails; held as a `Secret` |
 | 401 / 403 | `kind: :auth` with the parsed challenges |
 
@@ -164,6 +165,29 @@ zone ids, backslashes or control characters are refused.
 ConduitMcp.Client.URLPolicy.check("https://127.1/", :public_only)
 #=> {:error, {:blocked_address, {127, 0, 0, 1}}}
 ```
+
+The request then connects to the first vetted address, never resolving the
+name again, so a DNS answer that changes between the check and the connect
+(rebinding) cannot send it elsewhere. TLS SNI, certificate verification and
+the `Host` header all use the URL's host name. Each request (the legacy
+GET stream and session `DELETE` included) is checked and pinned in its own
+process; `resolver:` replaces DNS for the check, and runs there too, never
+in the connection. The pinned connections come from pools the transport
+starts in the Finch instance, yours with `finch:` included: one per vetted
+address, sized by `:pool_size`, with `:transport_opts` as TLS options.
+
+What this guarantees, and what it does not:
+
+- **Every byte goes to an address that passed the policy at that request.**
+  A later request resolves and vets the name again, so a pool may hold
+  connections to every address the host has had.
+- **The certificate check is the binding to the name.** That is why
+  `:public_only` together with `insecure_skip_tls_verify: true` raises at
+  start: without verification, whoever answers at the vetted address (or on
+  the path to it) gets the request and its credentials.
+- **Public addresses are still reachable.** The policy keeps requests away
+  from internal networks; it does not vouch for the public server the user
+  named.
 
 ## Secrets
 
@@ -196,6 +220,10 @@ Elsewhere:
 - Client telemetry metadata comes from a fixed allowlist: no arguments,
   results, `_meta`, tokens or raw error data. Tool names and methods are
   sanitized, and are server-supplied, so never use them as metric tags.
+- **Finch's own telemetry is not the client's.** The `[:finch, ...]`
+  events carry the request in their metadata, its headers included: the
+  clear-text `Authorization` and `Mcp-Session-Id`. Never log or export
+  Finch telemetry metadata wholesale; pick the fields you need.
 - Server log entries (`notifications/message`) are rate limited per
   connection (`:log_rate_limit`, 50/s with bursts of 100; drops emit
   `[:conduit_mcp, :client, :log, :dropped]`) and reach subscribers and

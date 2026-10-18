@@ -32,6 +32,11 @@ if Code.ensure_loaded?(Finch) do
     #     HTTP/1 stops the worker owning the socket, so the socket closes
     #     and the server sees the disconnect (modern-era cancellation); then
     #     drops any message of the request already in the mailbox.
+    #   * Pinning (W-S4): a request with `:pin` connects to that vetted
+    #     address through a pool started for it, with Mint's `hostname:` set
+    #     to the URL's host (`target/1`); the name is never resolved.
+    #   * No header value in an error: `transport_error/1` strips Mint's
+    #     `{:invalid_header_value, name, value}` (B1).
     #
     # The pool: a user-started Finch (`finch:` option), or the one
     # `child_spec/3` builds, started under the client's supervisor.
@@ -64,8 +69,16 @@ if Code.ensure_loaded?(Finch) do
             optional(:body) => iodata() | nil,
             optional(:deadline) => integer() | :infinity,
             optional(:idle_timeout) => pos_integer() | :infinity,
-            optional(:redirect) => false | :same_origin
+            optional(:redirect) => false | :same_origin,
+            optional(:pin) => pin()
           }
+
+    @typedoc """
+    Connect to `address` - vetted by `ConduitMcp.Client.URLPolicy` - instead
+    of resolving the URL's host; `pool` holds `:size` and `:transport_opts`
+    of the pinned pool.
+    """
+    @type pin :: %{address: :inet.ip_address(), pool: keyword()}
 
     # --- the pool ----------------------------------------------------------
 
@@ -136,8 +149,10 @@ if Code.ensure_loaded?(Finch) do
       headers =
         [{"accept-encoding", "identity"} | Enum.map(request.headers, &expose/1)]
 
+      {url, build_opts} = target(request)
+
       finch_request =
-        Finch.build(request.method, request.url, headers, Map.get(request, :body))
+        Finch.build(request.method, url, headers, Map.get(request, :body), build_opts)
 
       ref = Finch.async_request(finch_request, request.finch, receive_timeout: :infinity)
 
@@ -155,8 +170,38 @@ if Code.ensure_loaded?(Finch) do
     rescue
       # `Finch.build/5` raises on a URL it cannot parse; `async_request/3`
       # on a pool that is not running.
-      error in [ArgumentError, Finch.Error] -> {:error, {:transport_error, error}}
+      error in [ArgumentError, Finch.Error] -> {:error, transport_error(error)}
     end
+
+    # W-S4: a pinned request goes to the vetted address. The Finch request's
+    # URL carries the IP, so Finch neither resolves the name nor shares a
+    # pool with unpinned requests; its pool is started here, keyed by that
+    # address plus a tag naming the host, with Mint's `hostname:` set to
+    # the URL's host - SNI, certificate verification and the `Host` header
+    # all use the original name. One pool per vetted address of the host.
+    defp target(%{pin: %{address: address, pool: pool}} = request) do
+      uri = URI.parse(request.url)
+      url = URI.to_string(%{uri | host: address |> :inet.ntoa() |> List.to_string()})
+      tag = {__MODULE__, :pinned, uri.host, :erlang.phash2(pool)}
+
+      transport_opts = Keyword.fetch!(pool, :transport_opts)
+
+      # Mint connects to an IPv6 literal only when asked to try inet6.
+      transport_opts =
+        if tuple_size(address) == 8, do: [{:inet6, true} | transport_opts], else: transport_opts
+
+      :ok =
+        Finch.start_pool(request.finch, Finch.Pool.new(url, tag: tag),
+          size: Keyword.fetch!(pool, :size),
+          count: 1,
+          protocols: [:http1],
+          conn_opts: [hostname: uri.host, transport_opts: transport_opts]
+        )
+
+      {url, [pool_tag: tag]}
+    end
+
+    defp target(request), do: {request.url, []}
 
     defp expose({name, value}),
       do: {name, if(Secret.secret?(value), do: Secret.expose(value), else: value)}
@@ -181,7 +226,7 @@ if Code.ensure_loaded?(Finch) do
           {:ok, %{response | headers: response.headers || []}}
 
         {^ref, {:error, error}} ->
-          {:error, {:transport_error, error}}
+          {:error, transport_error(error)}
       after
         wait_ms(response) -> timed_out(response)
       end
@@ -241,7 +286,7 @@ if Code.ensure_loaded?(Finch) do
       receive do
         {^ref, {:data, data}} -> {:data, data, touch(response)}
         {^ref, :done} -> :done
-        {^ref, {:error, error}} -> {:error, {:transport_error, error}}
+        {^ref, {:error, error}} -> {:error, transport_error(error)}
         {^ref, {:trailers, _trailers}} -> next(response)
       after
         wait_ms(response) -> timed_out(response)
@@ -289,6 +334,23 @@ if Code.ensure_loaded?(Finch) do
         0 -> :ok
       end
     end
+
+    @doc """
+    `{:transport_error, reason}` for an HTTP-layer error, stripped of any
+    header value it carries. Mint refuses a header value holding a byte
+    outside visible ASCII, space and tab by returning (and Finch forwarding)
+    the whole value - an `Authorization` header included - so
+    `{:invalid_header_value, name, value}` becomes `{:invalid_header_value,
+    name}` before the error is wrapped, logged or rendered anywhere.
+    """
+    @spec transport_error(term()) :: {:transport_error, term()}
+    def transport_error(error), do: {:transport_error, scrub(error)}
+
+    defp scrub(%struct{reason: {:invalid_header_value, name, _value}})
+         when struct in [Finch.HTTPError, Mint.HTTPError],
+         do: {:invalid_header_value, name}
+
+    defp scrub(error), do: error
 
     @doc """
     A whole request bounded by `timeout` ms in total: `{:ok, status, body}`

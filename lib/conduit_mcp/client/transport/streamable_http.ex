@@ -35,16 +35,37 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
               default: :any,
               doc: """
               `:public_only` applies `ConduitMcp.Client.URLPolicy` to the
-              URL before every request: `https` only, and the host must not
-              resolve to a private, loopback or otherwise internal address.
-              For a URL that comes from end users rather than operator
-              configuration. `:any` trusts the URL.
+              URL before every request, in the request's own process:
+              `https` only, and the host is resolved (A and AAAA) and
+              refused if any address is private, loopback, link-local or
+              otherwise internal (unless `:allow_private` admits it). The
+              request then connects to the first vetted address - the name
+              is never resolved a second time, so a DNS answer that changes
+              between the check and the connect (rebinding) cannot redirect
+              it - with TLS SNI, certificate verification and the `Host`
+              header all bound to the URL's host name. Such connections
+              come from pools the transport starts in the Finch instance
+              (yours with `:finch`), one per vetted address, configured by
+              `:pool_size` and `:transport_opts`. Refused together with
+              `:insecure_skip_tls_verify`. For a URL that comes from end
+              users rather than operator configuration. `:any` trusts the
+              URL and lets Finch resolve it.
               """
             ],
             allow_private: [
               type: {:list, :any},
               default: [],
               doc: "CIDRs that `server_url_policy: :public_only` admits anyway."
+            ],
+            resolver: [
+              type: {:or, [{:fun, 1}, nil]},
+              default: nil,
+              doc: """
+              The DNS resolver `server_url_policy: :public_only` uses, a
+              `t:ConduitMcp.Client.URLPolicy.resolver/0`; called in the
+              request's process, never the connection. Default: the system
+              resolver.
+              """
             ],
             headers: [
               type: {:custom, __MODULE__, :validate_headers, []},
@@ -110,7 +131,8 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
               type: :keyword_list,
               default: [],
               doc: """
-              TLS options for the library-started pool (Mint
+              TLS options for the library-started pool, and with
+              `server_url_policy: :public_only` for the pinned pools (Mint
               `:transport_opts`, for example `cacertfile:`). Anything that
               turns certificate verification off (`verify:` other than
               `:verify_peer`, or a `verify_fun:`) is refused; see
@@ -123,7 +145,8 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
               doc: """
               Do not verify the server's TLS certificate. For local
               development only: a warning is logged whenever the transport
-              starts. Needs the library-started pool.
+              starts. Needs the library-started pool, and is refused with
+              `server_url_policy: :public_only`.
               """
             ],
             redirect: [
@@ -196,7 +219,16 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
   *listener* process for the standalone GET stream.
 
   The HTTP pool is Finch: the one named by `:finch`, else one started under
-  the client's supervisor (`child_specs/2`) and stopped with it.
+  the client's supervisor (`child_specs/2`) and stopped with it. With
+  `server_url_policy: :public_only` each request vets the URL in its own
+  process and connects to the vetted address, through a pool per address
+  started in that Finch instance (see the option, and the guide
+  `client_security.md`).
+
+  A bearer token must be visible ASCII (0x21-0x7E): one an `:auth`
+  function or a token store returns with any other byte - a trailing
+  newline, a control byte - fails the request with `kind: :auth, reason:
+  :invalid_token`, an error that holds no part of the token.
 
   ## Requests
 
@@ -348,6 +380,15 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
          "invalid value for :insecure_skip_tls_verify option: it applies to the " <>
            "library-started pool only; configure TLS on your :finch pool instead"}
 
+      # W-S4: the pinned connection is bound to the URL's host only by the
+      # certificate check; without it any server at the vetted address (or
+      # on the path to it) gets the request and its credentials.
+      opts[:insecure_skip_tls_verify] and opts[:server_url_policy] == :public_only ->
+        {:error,
+         "invalid value for :insecure_skip_tls_verify option: it is refused with " <>
+           "server_url_policy: :public_only, whose address pinning relies on " <>
+           "certificate verification"}
+
       true ->
         :ok
     end
@@ -438,6 +479,7 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
            auth: opts[:auth],
            url: opts[:url],
            finch: opts[:finch] || http.pool_name(key),
+           url_policy: url_policy(opts),
            era: nil,
            version: nil,
            session: nil,
@@ -455,6 +497,24 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
 
       {:error, message} ->
         {:error, {:invalid_options, message}}
+    end
+  end
+
+  # `server_url_policy: :public_only`, computed once: what each request's
+  # process needs to vet the URL and connect to the vetted address
+  # (`ConduitMcp.Client.HTTP` starts one pinned pool per address).
+  defp url_policy(opts) do
+    if opts[:server_url_policy] == :public_only do
+      check = [allow_private: opts[:allow_private]]
+      check = if opts[:resolver], do: [{:resolver, opts[:resolver]} | check], else: check
+
+      %{
+        check: check,
+        pool: [
+          size: opts[:pool_size],
+          transport_opts: Keyword.put_new(opts[:transport_opts], :verify, :verify_peer)
+        ]
+      }
     end
   end
 
@@ -538,8 +598,7 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
       headers: headers(state, method, params, era, session, wire_opts),
       auth: state.auth,
       redirect: state.opts[:redirect],
-      url_policy: state.opts[:server_url_policy],
-      allow_private: state.opts[:allow_private],
+      url_policy: state.url_policy,
       max_bytes: state.opts[:max_message_bytes],
       deadline: deadline(state, mode, wire_opts),
       idle_timeout: if(mode == :listen, do: state.opts[:listen_idle_timeout], else: :infinity),
@@ -739,8 +798,7 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
       session_headers: legacy_headers(state, nil, state.session),
       auth: state.auth,
       redirect: state.opts[:redirect],
-      url_policy: state.opts[:server_url_policy],
-      allow_private: state.opts[:allow_private],
+      url_policy: state.url_policy,
       max_bytes: state.opts[:max_message_bytes],
       idle_timeout: state.opts[:listen_idle_timeout]
     }
@@ -906,6 +964,32 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
 
   # SHOULD: a legacy client ends its session with DELETE. Bounded by 1 s; any
   # answer (a 405 included) or failure is fine.
+  #
+  # Under `server_url_policy: :public_only` the DELETE must be vetted and
+  # pinned like every other request, which resolves the host (perhaps with
+  # the host's `:resolver`): that runs in a task, never in the connection,
+  # which waits for it no longer than the same 1 s.
+  defp delete_session(%{era: :legacy, session: session, url_policy: %{}} = state)
+       when session != nil do
+    spec = %{
+      http: state.http,
+      finch: state.finch,
+      url: state.url,
+      headers: legacy_headers(state, nil, session),
+      auth: static_auth(state.opts[:auth]),
+      redirect: state.opts[:redirect],
+      url_policy: state.url_policy,
+      deadline: System.monotonic_time(:millisecond) + 1_000
+    }
+
+    exchange = state.exchange
+    task = Task.Supervisor.async_nolink(state.task_sup, fn -> exchange.delete(spec) end)
+    _ = Task.yield(task, 1_000) || Task.shutdown(task, :brutal_kill)
+    :ok
+  catch
+    _kind, _reason -> :ok
+  end
+
   defp delete_session(%{era: :legacy, session: session} = state) when session != nil do
     request = %{
       method: :delete,
@@ -922,17 +1006,41 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
 
   defp delete_session(_state), do: :ok
 
-  # Static credentials only: the DELETE runs in the connection, which never
-  # runs user code.
-  defp auth_header({:bearer, token}), do: [{"authorization", bearer(token)}]
+  defp static_auth({:bearer, _token} = auth), do: auth
+  defp static_auth(_auth), do: nil
+
+  # Static credentials only, as every DELETE gets: the unpinned one runs in
+  # the connection, which never runs user code. `validate_auth/1` already
+  # checked a static token.
+  defp auth_header({:bearer, token}) do
+    case bearer(token) do
+      {:ok, header} -> [{"authorization", header}]
+      {:error, _error} -> []
+    end
+  end
+
   defp auth_header(_auth), do: []
 
   @doc false
-  @spec bearer(String.t() | Secret.t()) :: Secret.t()
+  # The `Authorization` value for `token`. A token must be 1 or more visible
+  # ASCII characters (0x21-0x7E, which covers RFC 6750 `b64token`): Mint
+  # refuses any other byte in a header value by echoing the whole value in
+  # its error, so such a token - a function's `"tok\n"`, a host store's or
+  # an authorization server's control byte - is refused here, by an error
+  # that names no value.
+  @spec bearer(String.t() | Secret.t()) :: {:ok, Secret.t()} | {:error, Error.t()}
   def bearer(token) do
-    token = if Secret.secret?(token), do: Secret.expose(token), else: token
-    Secret.new("Bearer " <> token)
+    token = token_text(token)
+
+    if bearer_token?(token),
+      do: {:ok, Secret.new("Bearer " <> token)},
+      else: {:error, Error.new(:auth, :invalid_token)}
   end
+
+  @doc false
+  @spec bearer_token?(term()) :: boolean()
+  def bearer_token?(token) when is_binary(token), do: String.match?(token, ~r/\A[\x21-\x7E]+\z/)
+  def bearer_token?(_token), do: false
 
   # --- option validators --------------------------------------------------------------
 
@@ -980,7 +1088,8 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
             {:halt,
              {:error,
               "the value of header #{inspect(name)} must be a string (or a " <>
-                "ConduitMcp.Client.Secret wrapping one) without CR, LF or NUL"}}
+                "ConduitMcp.Client.Secret wrapping one) of visible ASCII characters, " <>
+                "spaces and tabs"}}
 
           true ->
             {:cont, {:ok, [{name, value} | acc]}}
@@ -999,9 +1108,12 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
 
   defp token?(name), do: name != "" and Enum.all?(:binary.bin_to_list(name), &(&1 in @tchars))
 
+  # What Mint accepts in a header value: visible ASCII, space and tab. Any
+  # other byte would fail every request with an error echoing the value.
   defp valid_header_value?(value) do
-    value = if Secret.secret?(value), do: Secret.expose(value), else: value
-    is_binary(value) and not String.contains?(value, ["\r", "\n", <<0>>])
+    value = token_text(value)
+
+    is_binary(value) and String.match?(value, ~r/\A[\x20-\x7E\t]*\z/)
   end
 
   @doc false
@@ -1011,9 +1123,12 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
   # A plain token is wrapped, so the options never show it (`inspect/1`,
   # supervisor reports).
   def validate_auth({:bearer, token}) do
-    if valid_header_value?(token) and token_text(token) != "",
+    if bearer_token?(token_text(token)),
       do: {:ok, {:bearer, Secret.new(token)}},
-      else: {:error, "expected {:bearer, token} with a non-empty string token or Secret"}
+      else:
+        {:error,
+         "expected {:bearer, token} with a non-empty token (a string or Secret) of " <>
+           "visible ASCII characters only"}
   end
 
   def validate_auth(fun) when is_function(fun, 1), do: {:ok, fun}

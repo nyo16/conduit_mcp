@@ -817,7 +817,7 @@ OAuth returns `:oauth_not_configured`.
 | `:no_registration_method` | No pre-registered client, CIMD or dynamic registration applies |
 | `:registration_failed` | Dynamic registration was refused |
 | `:invalid_grant` | The token endpoint rejected the code or refresh token |
-| `:token_request_failed` | The token endpoint failed otherwise |
+| `:token_request_failed` | The token endpoint failed otherwise; `data: %{reason: :invalid_token_response}` when its answer is malformed, an access token holding anything but visible ASCII (0x21-0x7E) included |
 | `:step_up_limit` | `max_step_up_attempts` reached for this resource and scope set |
 | `:url_blocked` | The URL policy refused a server-supplied URL before connecting |
 | `:client_secret_unavailable` | A `{:system, "VAR"}` client secret names an unset variable |
