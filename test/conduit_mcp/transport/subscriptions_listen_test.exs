@@ -522,6 +522,7 @@ defmodule ConduitMcp.Transport.SubscriptionsListenTest do
       pid = stream_pid(uri)
       ref = Process.monitor(pid)
       assert pid in Subscriptions.subscribers(:tools)
+      assert [{_seq, ^pid, _ref}] = Subscriptions.live_listeners("user:dc")
 
       :ok = :gen_tcp.close(socket)
 
@@ -534,7 +535,7 @@ defmodule ConduitMcp.Transport.SubscriptionsListenTest do
 
       assert Subscriptions.subscribers({:resource, uri}) == []
       refute pid in Subscriptions.subscribers(:tools)
-      assert Registry.lookup(Subscriptions, Subscriptions.listener_key("user:dc")) == []
+      assert Subscriptions.live_listeners("user:dc") == []
       assert :ets.lookup(SSEStream.streams_table(), {:slot, pid}) == []
     end
 
@@ -552,6 +553,7 @@ defmodule ConduitMcp.Transport.SubscriptionsListenTest do
 
       pid = stream_pid(uri)
       ref = Process.monitor(pid)
+      assert [{_seq, ^pid, _ref}] = Subscriptions.live_listeners("user:killed")
       Process.exit(pid, :kill)
 
       assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
@@ -559,7 +561,7 @@ defmodule ConduitMcp.Transport.SubscriptionsListenTest do
 
       assert Subscriptions.subscribers({:resource, uri}) == []
       refute pid in Subscriptions.subscribers(:prompts)
-      assert Registry.lookup(Subscriptions, Subscriptions.listener_key("user:killed")) == []
+      assert Subscriptions.live_listeners("user:killed") == []
       assert Registry.keys(Subscriptions, pid) == []
     end
   end
