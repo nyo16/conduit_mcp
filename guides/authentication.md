@@ -238,6 +238,40 @@ end
  port: 4001}
 ```
 
+## Insufficient Scope and Step-Up
+
+A tool, resource or prompt can require OAuth scopes (`scope "users:delete"` in the DSL, `scope:` on a component). A request whose token lacks them is rejected before the callback runs. How it's rejected depends on the strategy.
+
+**Under `strategy: :oauth`** the response is **HTTP 403** with a Bearer challenge, so the client can ask its authorization server for a token with more scope and retry:
+
+```http
+HTTP/1.1 403 Forbidden
+www-authenticate: Bearer error="insufficient_scope", scope="users:delete", resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"
+content-type: application/json
+
+{"jsonrpc": "2.0", "id": 4,
+ "error": {"code": -32000, "message": "Insufficient scope. Required: users:delete",
+           "data": {"error": "insufficient_scope", "scope": "users:delete"}}}
+```
+
+The body is still the JSON-RPC error, with the request id, so the client can match it to its request. Both protocol eras get the same challenge.
+
+**Every other strategy** answers the same JSON-RPC error at HTTP 200. Only OAuth has an authorization server to step up with. The error's `data` (`"error" => "insufficient_scope"`, `"scope"`) is the same under every strategy.
+
+A request with no principal at all fails a scope check closed.
+
+## Modern Era (`2026-07-28`)
+
+Authentication runs before the protocol era is decided, so both eras authenticate the same way, with the same 401.
+
+- **`server/discover` is authenticated** like every other POST, even though it needs no `_meta`. Capabilities can depend on who is asking. Under `strategy: :oauth`, the 401 carries `WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource"`, so a modern client can find the authorization server and authorize first.
+- **Listen streams end with their token.** A `subscriptions/listen` stream opened with an OAuth bearer token closes at the token's `exp`, or at `:max_stream_lifetime` if that comes first. See [Subscriptions](subscriptions.md#how-a-stream-ends).
+- **Ownership follows the principal.** MRTR `requestState` tokens and tasks-extension tasks are bound to `ConduitMcp.Principal.id/1`. Without authentication they are bound to `nil`, and MRTR state then expires after 60 seconds instead of 5 minutes.
+
+> #### Client-side OAuth {: .info}
+>
+> This library's OAuth support verifies tokens, which is the server's side of the protocol. The client-side concerns — RFC 9207 `iss` validation, `application_type`, issuer-bound credentials and Client ID Metadata Documents — belong to the planned ConduitMCP client. They are covered in the upcoming client OAuth guide (`client_oauth.md`), not here. The server doesn't ignore them; they aren't its job.
+
 ## Telemetry
 
 Auth events: `[:conduit_mcp, :auth, :verify]` with metadata `%{strategy, status}`,

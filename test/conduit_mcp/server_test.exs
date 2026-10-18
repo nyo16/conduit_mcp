@@ -77,7 +77,7 @@ defmodule ConduitMcp.ServerTest do
     test "returns error for unknown resource" do
       conn = %Plug.Conn{}
       {:error, error} = TestServer.handle_read_resource(conn, "test://unknown")
-      assert error["code"] == ConduitMcp.Errors.resource_not_found()
+      assert error["code"] == ConduitMcp.Protocol.Legacy.resource_not_found()
       assert error["message"] == "Resource not found"
     end
   end
@@ -178,7 +178,7 @@ defmodule ConduitMcp.ServerTest do
       assert tool["message"] == "Unknown tool: nope"
 
       assert {:error, resource} = DefaultsOnlyServer.handle_read_resource(conn, "test://nope")
-      assert resource["code"] == ConduitMcp.Errors.resource_not_found()
+      assert resource["code"] == ConduitMcp.Protocol.Legacy.resource_not_found()
       assert resource["message"] == "Resource not found: test://nope"
 
       assert {:error, prompt} = DefaultsOnlyServer.handle_get_prompt(conn, "nope", %{})

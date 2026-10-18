@@ -207,10 +207,36 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
         |> StreamableHTTP.call(opts)
 
       assert get_resp_header(conn, "access-control-allow-origin") == ["*"]
-      assert get_resp_header(conn, "access-control-allow-methods") == ["GET, POST, OPTIONS"]
+
+      assert get_resp_header(conn, "access-control-allow-methods") == [
+               "GET, POST, DELETE, OPTIONS"
+             ]
+
+      # A browser client must be allowed to send the session and protocol
+      # headers, and to read them back; without these, a cross-origin client
+      # can never present the session it was issued.
+      assert get_resp_header(conn, "access-control-allow-headers") == [
+               "content-type, authorization, mcp-session-id, mcp-protocol-version, " <>
+                 "mcp-method, mcp-name"
+             ]
+
+      assert get_resp_header(conn, "access-control-expose-headers") == [
+               "mcp-session-id, mcp-protocol-version"
+             ]
+    end
+
+    test "an explicit :cors_headers replaces the default allow-headers" do
+      opts =
+        StreamableHTTP.init(
+          server_module: TestServer,
+          cors_origin: "*",
+          cors_headers: "content-type, mcp-param-region"
+        )
+
+      conn = conn(:options, "/") |> StreamableHTTP.call(opts)
 
       assert get_resp_header(conn, "access-control-allow-headers") == [
-               "content-type, authorization"
+               "content-type, mcp-param-region"
              ]
     end
 
@@ -263,6 +289,41 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
       assert body["transport"] == "streamable-http"
       assert body["version"] == "2025-11-25"
       assert body["status"] == "ready"
+    end
+
+    # The specification lets a client open a server-to-client SSE stream with
+    # a GET; a server that offers none MUST answer 405. Answering 200 with a
+    # JSON body told such a client the stream had opened.
+    test "a GET asking for an event stream gets 405 with an allow header" do
+      conn =
+        conn(:get, "/")
+        |> put_req_header("accept", "text/event-stream")
+        |> StreamableHTTP.call(@opts)
+
+      assert conn.status == 405
+      assert get_resp_header(conn, "allow") == ["GET, POST, OPTIONS"]
+    end
+
+    test "with sessions on, the allow header names DELETE too" do
+      opts = StreamableHTTP.init(server_module: TestServer, session: [])
+
+      conn =
+        conn(:get, "/")
+        |> put_req_header("accept", "application/json, text/event-stream")
+        |> StreamableHTTP.call(opts)
+
+      assert conn.status == 405
+      assert get_resp_header(conn, "allow") == ["GET, POST, DELETE, OPTIONS"]
+    end
+
+    test "a GET with another Accept still gets the info JSON" do
+      conn =
+        conn(:get, "/")
+        |> put_req_header("accept", "application/json")
+        |> StreamableHTTP.call(@opts)
+
+      assert conn.status == 200
+      assert JSON.decode!(conn.resp_body)["status"] == "ready"
     end
   end
 
@@ -370,7 +431,10 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
   end
 
   describe "POST / with notifications" do
-    test "handles notifications with 204 status" do
+    # The Streamable HTTP transport answers an accepted notification or
+    # response with 202 Accepted and no body; 204 is not what the
+    # specification prescribes, and a strict client treats it as a failure.
+    test "answers a notification with 202 and no body" do
       request_body =
         JSON.encode!(%{
           "jsonrpc" => "2.0",
@@ -382,7 +446,19 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
         |> put_req_header("content-type", "application/json")
         |> StreamableHTTP.call(@opts)
 
-      assert conn.status == 204
+      assert conn.status == 202
+      assert conn.resp_body == ""
+    end
+
+    test "answers a JSON-RPC response with 202 and no body" do
+      request_body = JSON.encode!(%{"jsonrpc" => "2.0", "id" => 7, "result" => %{}})
+
+      conn =
+        conn(:post, "/", request_body)
+        |> put_req_header("content-type", "application/json")
+        |> StreamableHTTP.call(@opts)
+
+      assert conn.status == 202
       assert conn.resp_body == ""
     end
   end
@@ -556,6 +632,114 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
       assert response["error"]["message"] =~ "Session not found"
     end
 
+    # R12 / SV-8: a modern request ignores the session it presents, but must
+    # not be able to present one bound to somebody else.
+    test "a session records its principal, and a mixed request from another principal is refused" do
+      verify = fn
+        "alice-token" -> {:ok, %{id: "alice"}}
+        "mallory-token" -> {:ok, %{id: "mallory"}}
+        _ -> {:error, "invalid"}
+      end
+
+      opts =
+        StreamableHTTP.init(
+          server_module: TestServer,
+          session: [store: ConduitMcp.Session.EtsStore],
+          auth: [strategy: :function, verify: verify]
+        )
+
+      post = fn body, token, session_id ->
+        conn(:post, "/", JSON.encode!(body))
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("authorization", "Bearer " <> token)
+        # Required on every modern HTTP request (Plugs.HeaderValidation);
+        # ignored by the legacy initialize.
+        |> put_req_header("mcp-method", body["method"])
+        |> then(fn conn ->
+          if body["method"] == "initialize",
+            do: conn,
+            else: put_req_header(conn, "mcp-protocol-version", "2026-07-28")
+        end)
+        |> then(&if(session_id, do: put_req_header(&1, "mcp-session-id", session_id), else: &1))
+        |> StreamableHTTP.call(opts)
+      end
+
+      init_conn = post.(JSON.decode!(initialize_request_body()), "alice-token", nil)
+      [session_id] = get_resp_header(init_conn, "mcp-session-id")
+
+      assert {:ok, %{"principal" => "alice"}} =
+               ConduitMcp.Session.get(session_id, ConduitMcp.Session.EtsStore)
+
+      mixed = %{
+        "jsonrpc" => "2.0",
+        "id" => 2,
+        "method" => "tools/list",
+        "params" => %{
+          "_meta" => %{
+            "io.modelcontextprotocol/protocolVersion" => "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities" => %{}
+          }
+        }
+      }
+
+      refused = JSON.decode!(post.(mixed, "mallory-token", session_id).resp_body)
+      assert refused["error"]["code"] == ConduitMcp.Errors.invalid_request()
+
+      allowed = JSON.decode!(post.(mixed, "alice-token", session_id).resp_body)
+      assert allowed["result"]["resultType"] == "complete"
+    end
+
+    # W-S3: a legacy request presenting a session bound to another principal
+    # is answered exactly as for an unknown session id, so the id is no oracle,
+    # and it cannot cancel the owner's requests nor end the session.
+    test "a legacy request or DELETE from another principal is answered as an unknown session" do
+      verify = fn
+        "alice-token" -> {:ok, %{id: "alice"}}
+        "mallory-token" -> {:ok, %{id: "mallory"}}
+        _ -> {:error, "invalid"}
+      end
+
+      opts =
+        StreamableHTTP.init(
+          server_module: TestServer,
+          session: [store: ConduitMcp.Session.EtsStore],
+          auth: [strategy: :function, verify: verify]
+        )
+
+      request = fn method, body, token, session_id ->
+        conn(method, "/", if(body, do: JSON.encode!(body), else: ""))
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> then(&if(session_id, do: put_req_header(&1, "mcp-session-id", session_id), else: &1))
+        |> StreamableHTTP.call(opts)
+      end
+
+      init_conn = request.(:post, JSON.decode!(initialize_request_body()), "alice-token", nil)
+      [session_id] = get_resp_header(init_conn, "mcp-session-id")
+
+      list = %{"jsonrpc" => "2.0", "id" => 2, "method" => "tools/list"}
+
+      cancel = %{
+        "jsonrpc" => "2.0",
+        "method" => "notifications/cancelled",
+        "params" => %{"requestId" => 7}
+      }
+
+      unknown = request.(:post, list, "mallory-token", "no-such-session")
+      assert unknown.status == 404
+
+      for {method, body} <- [{:post, list}, {:post, cancel}, {:delete, nil}] do
+        conn = request.(method, body, "mallory-token", session_id)
+        assert {conn.status, conn.resp_body} == {404, unknown.resp_body}
+      end
+
+      assert {:ok, %{"principal" => "alice"}} =
+               ConduitMcp.Session.get(session_id, ConduitMcp.Session.EtsStore)
+
+      assert request.(:post, list, "alice-token", session_id).status == 200
+      assert request.(:delete, nil, "alice-token", session_id).status == 200
+    end
+
     test "require_session: true rejects non-initialize POST without session header" do
       opts =
         StreamableHTTP.init(
@@ -707,6 +891,38 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
 
       assert conn.status == 401
     end
+
+    # SV-12: the modern handshake is not an unauthenticated side door. An
+    # anonymous `server/discover` gets the same 401 + RFC 9728 challenge a
+    # legacy `ping` does, so a modern client can start OAuth discovery from it.
+    test "an unauthenticated modern server/discover gets 401 with resource_metadata" do
+      body = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "server/discover",
+        "params" => %{
+          "_meta" => %{
+            "io.modelcontextprotocol/protocolVersion" => "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities" => %{}
+          }
+        }
+      }
+
+      conn =
+        post_json(body, @oauth_opts, [
+          {"mcp-method", "server/discover"},
+          {"mcp-protocol-version", "2026-07-28"}
+        ])
+
+      assert conn.status == 401
+      assert [challenge] = get_resp_header(conn, "www-authenticate")
+      assert challenge =~ "Bearer"
+
+      assert challenge =~
+               ~s(resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource")
+
+      refute JSON.decode!(conn.resp_body)["result"]
+    end
   end
 
   describe "origin validation" do
@@ -804,23 +1020,271 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
   end
 
   describe "MCP-Protocol-Version header" do
-    test "POST responses include MCP-Protocol-Version header" do
-      ping_body =
-        JSON.encode!(%{
-          "jsonrpc" => "2.0",
-          "id" => 1,
-          "method" => "ping"
-        })
+    setup do
+      ConduitMcp.Session.EtsStore.ensure_table()
+      :ok
+    end
 
-      conn =
-        conn(:post, "/", ping_body)
-        |> put_req_header("content-type", "application/json")
-        |> StreamableHTTP.call(@opts)
+    test "POST responses include MCP-Protocol-Version header" do
+      conn = post_json(%{"jsonrpc" => "2.0", "id" => 1, "method" => "ping"}, @opts)
 
       assert conn.status == 200
+      assert get_resp_header(conn, "mcp-protocol-version") == ["2025-11-25"]
+    end
 
-      protocol_versions = get_resp_header(conn, "mcp-protocol-version")
-      assert protocol_versions == ["2025-11-25"]
+    # A client that negotiated 2025-06-18 was told on every response that the
+    # connection spoke 2025-11-25, the hardcoded latest version.
+    test "initialize echoes the negotiated version, not the latest" do
+      conn = post_json(JSON.decode!(initialize_request_body()), @opts)
+
+      assert JSON.decode!(conn.resp_body)["result"]["protocolVersion"] == "2025-06-18"
+      assert get_resp_header(conn, "mcp-protocol-version") == ["2025-06-18"]
+    end
+
+    test "a session's requests echo the version negotiated at initialize" do
+      opts = StreamableHTTP.init(server_module: TestServer, session: [])
+      init = post_json(JSON.decode!(initialize_request_body()), opts)
+      [session_id] = get_resp_header(init, "mcp-session-id")
+
+      # The session, not the request header, is the record of what was
+      # negotiated.
+      conn =
+        post_json(%{"jsonrpc" => "2.0", "id" => 2, "method" => "ping"}, opts, [
+          {"mcp-session-id", session_id},
+          {"mcp-protocol-version", "2025-11-25"}
+        ])
+
+      assert get_resp_header(conn, "mcp-protocol-version") == ["2025-06-18"]
+    end
+
+    test "without sessions, a supported request header is echoed" do
+      conn =
+        post_json(%{"jsonrpc" => "2.0", "id" => 1, "method" => "ping"}, @opts, [
+          {"mcp-protocol-version", "2025-06-18"}
+        ])
+
+      assert get_resp_header(conn, "mcp-protocol-version") == ["2025-06-18"]
+    end
+
+    # 2025-11-25 transports: an invalid or unsupported MCP-Protocol-Version
+    # MUST be answered 400 Bad Request. It used to be served (and merely not
+    # echoed).
+    test "an unsupported request header is a 400, and is never echoed" do
+      conn =
+        post_json(%{"jsonrpc" => "2.0", "id" => 1, "method" => "ping"}, @opts, [
+          {"mcp-protocol-version", "1999-01-01"}
+        ])
+
+      assert conn.status == 400
+      assert conn.halted
+      refute conn.resp_body =~ "1999-01-01"
+
+      assert %{"id" => 1, "error" => %{"code" => -32600, "data" => %{"supported" => supported}}} =
+               JSON.decode!(conn.resp_body)
+
+      assert supported == ConduitMcp.Protocol.supported_versions()
+    end
+
+    test "a request without the header is served (the spec's 2025-03-26 default)" do
+      conn = post_json(%{"jsonrpc" => "2.0", "id" => 1, "method" => "ping"}, @opts)
+
+      assert conn.status == 200
+      assert JSON.decode!(conn.resp_body)["result"] == %{}
+    end
+
+    test "initialize is exempt: it negotiates the version in its body" do
+      conn =
+        post_json(JSON.decode!(initialize_request_body()), @opts, [
+          {"mcp-protocol-version", "2099-01-01"}
+        ])
+
+      assert conn.status == 200
+      assert JSON.decode!(conn.resp_body)["result"]["protocolVersion"] == "2025-06-18"
+    end
+
+    test "a DELETE with an unsupported header is a 400 too" do
+      opts = StreamableHTTP.init(server_module: TestServer, session: [])
+
+      conn =
+        conn(:delete, "/")
+        |> put_req_header("mcp-protocol-version", "1999-01-01")
+        |> StreamableHTTP.call(opts)
+
+      assert conn.status == 400
+    end
+  end
+
+  describe "DELETE / (session termination)" do
+    setup do
+      ConduitMcp.Session.EtsStore.ensure_table()
+      :ok
+    end
+
+    defp open_session(opts) do
+      init = post_json(JSON.decode!(initialize_request_body()), opts)
+      [session_id] = get_resp_header(init, "mcp-session-id")
+      session_id
+    end
+
+    defp send_delete(opts, headers) do
+      Enum.reduce(headers, conn(:delete, "/"), fn {k, v}, conn -> put_req_header(conn, k, v) end)
+      |> StreamableHTTP.call(opts)
+    end
+
+    test "ends a live session; the id is then unknown" do
+      opts = StreamableHTTP.init(server_module: TestServer, session: [])
+      session_id = open_session(opts)
+
+      conn = send_delete(opts, [{"mcp-session-id", session_id}])
+
+      assert conn.status == 200
+      assert {:error, :not_found} = ConduitMcp.Session.get(session_id)
+
+      after_delete =
+        post_json(%{"jsonrpc" => "2.0", "id" => 2, "method" => "ping"}, opts, [
+          {"mcp-session-id", session_id}
+        ])
+
+      assert after_delete.status == 404
+    end
+
+    test "an unknown session id gets the same 404 a POST does" do
+      opts = StreamableHTTP.init(server_module: TestServer, session: [])
+
+      conn = send_delete(opts, [{"mcp-session-id", "no-such-session"}])
+
+      assert conn.status == 404
+      assert JSON.decode!(conn.resp_body)["error"]["message"] =~ "Session not found"
+    end
+
+    test "a DELETE with no session id is a 400" do
+      opts = StreamableHTTP.init(server_module: TestServer, session: [])
+
+      conn = send_delete(opts, [])
+
+      assert conn.status == 400
+      assert JSON.decode!(conn.resp_body)["error"]["message"] =~ "Mcp-Session-Id"
+    end
+
+    test "with sessions off, DELETE is 405 with an allow header" do
+      conn = send_delete(@opts, [{"mcp-session-id", "anything"}])
+
+      assert conn.status == 405
+      assert get_resp_header(conn, "allow") == ["GET, POST, OPTIONS"]
+    end
+
+    test "DELETE still requires authentication" do
+      opts =
+        StreamableHTTP.init(
+          server_module: TestServer,
+          session: [],
+          auth: [strategy: :bearer_token, token: "s3cret"]
+        )
+
+      conn = send_delete(opts, [{"mcp-session-id", "anything"}])
+
+      assert conn.status == 401
+    end
+  end
+
+  describe "insufficient OAuth scope" do
+    defmodule ScopedServer do
+      @moduledoc false
+      use ConduitMcp.Server
+
+      tool "read_data", "Requires data:read" do
+        scope("data:read")
+        handle(fn _conn, _params -> text("data") end)
+      end
+    end
+
+    @rsa_key JOSE.JWK.generate_key({:rsa, 2048})
+    @rsa_private @rsa_key |> JOSE.JWK.to_map() |> elem(1) |> Map.put("kid", "k1")
+    @rsa_public @rsa_key
+                |> JOSE.JWK.to_public()
+                |> JOSE.JWK.to_map()
+                |> elem(1)
+                |> Map.put("kid", "k1")
+
+    defp oauth_opts do
+      StreamableHTTP.init(
+        server_module: ScopedServer,
+        auth: [
+          strategy: :oauth,
+          issuer: "https://auth.example.com",
+          audience: "https://mcp.example.com",
+          key_provider: {ConduitMcp.OAuth.KeyProvider.Static, keys: [@rsa_public]}
+        ]
+      )
+    end
+
+    defp bearer(scope) do
+      now = System.system_time(:second)
+
+      claims = %{
+        "iss" => "https://auth.example.com",
+        "aud" => "https://mcp.example.com",
+        "sub" => "user-1",
+        "exp" => now + 3600,
+        "scope" => scope
+      }
+
+      {:ok, token, _} = Joken.encode_and_sign(claims, Joken.Signer.create("RS256", @rsa_private))
+      {"authorization", "Bearer " <> token}
+    end
+
+    defp call_read_data(opts, headers) do
+      post_json(
+        %{
+          "jsonrpc" => "2.0",
+          "id" => 9,
+          "method" => "tools/call",
+          "params" => %{"name" => "read_data", "arguments" => %{}}
+        },
+        opts,
+        headers
+      )
+    end
+
+    # MCP authorization: a token lacking a scope gets 403 with an
+    # `insufficient_scope` Bearer challenge naming the scope, which is what
+    # lets a client step up. A JSON-RPC error at 200 gave it nothing to act on.
+    test "answers 403 with an insufficient_scope challenge" do
+      conn = call_read_data(oauth_opts(), [bearer("other")])
+
+      assert conn.status == 403
+      assert [challenge] = get_resp_header(conn, "www-authenticate")
+      assert challenge =~ ~s(Bearer error="insufficient_scope")
+      assert challenge =~ ~s(scope="data:read")
+      assert challenge =~ "resource_metadata="
+
+      # The body is still the JSON-RPC error, correlated to the request.
+      body = JSON.decode!(conn.resp_body)
+      assert body["id"] == 9
+      assert body["error"]["code"] == ConduitMcp.Protocol.server_error()
+    end
+
+    test "a token with the scope is served" do
+      conn = call_read_data(oauth_opts(), [bearer("data:read")])
+
+      assert conn.status == 200
+      assert JSON.decode!(conn.resp_body)["result"]["content"]
+    end
+
+    # Only OAuth has an authorization server to step up with, so other
+    # strategies keep the JSON-RPC error at 200.
+    test "without OAuth the denial stays a JSON-RPC error at 200" do
+      opts =
+        StreamableHTTP.init(
+          server_module: ScopedServer,
+          auth: [strategy: :bearer_token, token: "s3cret"]
+        )
+
+      conn = call_read_data(opts, [{"authorization", "Bearer s3cret"}])
+
+      assert conn.status == 200
+      assert get_resp_header(conn, "www-authenticate") == []
+      assert JSON.decode!(conn.resp_body)["error"]["message"] =~ "Insufficient scope"
     end
   end
 
@@ -863,5 +1327,14 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
       assert get_resp_header(conn, "x-content-type-options") == ["nosniff"]
       assert get_resp_header(conn, "x-frame-options") == ["DENY"]
     end
+  end
+
+  defp post_json(body, opts, headers \\ []) do
+    headers
+    |> Enum.reduce(conn(:post, "/", JSON.encode!(body)), fn {k, v}, conn ->
+      put_req_header(conn, k, v)
+    end)
+    |> put_req_header("content-type", "application/json")
+    |> StreamableHTTP.call(opts)
   end
 end

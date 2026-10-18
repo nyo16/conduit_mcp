@@ -52,7 +52,9 @@ defmodule ConduitMcp.HandlerTasksTest do
       assert response["result"]["task"]["status"] == "working"
     end
 
-    test "tasks/get returns -32002 for missing task" do
+    # MCP 2025-11-25 (tasks): "Invalid or nonexistent taskId ... -32602". It
+    # used to be -32002, the resource-not-found code.
+    test "tasks/get returns -32602 for missing task" do
       request = %{
         "jsonrpc" => "2.0",
         "id" => 1,
@@ -62,7 +64,8 @@ defmodule ConduitMcp.HandlerTasksTest do
 
       response = Handler.handle_request(request, TestServer)
 
-      assert response["error"]["code"] == ConduitMcp.Errors.resource_not_found()
+      assert response["error"]["code"] == ConduitMcp.Errors.invalid_params()
+      assert response["error"]["message"] == "Task not found: missing"
     end
 
     test "tasks/get returns invalid_params when taskId missing" do
@@ -329,7 +332,7 @@ defmodule ConduitMcp.HandlerTasksTest do
       {:ok, _} = ConduitMcp.Tasks.create("oh1", %{"tool" => "echo"}, "alice")
 
       bob = Handler.handle_request(task_req("tasks/get", "oh1"), TestServer, owner_conn("bob"))
-      assert bob["error"]["code"] == ConduitMcp.Errors.resource_not_found()
+      assert bob["error"]["code"] == ConduitMcp.Errors.invalid_params()
 
       alice =
         Handler.handle_request(task_req("tasks/get", "oh1"), TestServer, owner_conn("alice"))
@@ -342,7 +345,7 @@ defmodule ConduitMcp.HandlerTasksTest do
       ConduitMcp.Tasks.update("oh2", %{"status" => "completed", "result" => %{"ok" => true}})
 
       bob = Handler.handle_request(task_req("tasks/result", "oh2"), TestServer, owner_conn("bob"))
-      assert bob["error"]["code"] == ConduitMcp.Errors.resource_not_found()
+      assert bob["error"]["code"] == ConduitMcp.Errors.invalid_params()
 
       alice =
         Handler.handle_request(task_req("tasks/result", "oh2"), TestServer, owner_conn("alice"))
@@ -354,7 +357,7 @@ defmodule ConduitMcp.HandlerTasksTest do
       {:ok, _} = ConduitMcp.Tasks.create("oh3", %{}, "alice")
 
       bob = Handler.handle_request(task_req("tasks/cancel", "oh3"), TestServer, owner_conn("bob"))
-      assert bob["error"]["code"] == ConduitMcp.Errors.resource_not_found()
+      assert bob["error"]["code"] == ConduitMcp.Errors.invalid_params()
       assert {:ok, %{"status" => "working"}} = ConduitMcp.Tasks.get("oh3", "alice")
     end
 
@@ -373,7 +376,7 @@ defmodule ConduitMcp.HandlerTasksTest do
       {:ok, _} = ConduitMcp.Tasks.create("oh5", %{}, "alice")
       # No conn → empty %Plug.Conn{} → owner nil. This used to succeed.
       resp = Handler.handle_request(task_req("tasks/get", "oh5"), TestServer)
-      assert resp["error"]["code"] == ConduitMcp.Errors.resource_not_found()
+      assert resp["error"]["code"] == ConduitMcp.Errors.invalid_params()
     end
 
     test "an unauthenticated caller can still read an unowned task" do

@@ -104,7 +104,7 @@ defmodule ConduitMcp.Reflect do
   rescue
     # `Protocol.UndefinedError` alone is not enough. Every exception reachable
     # here must land on `inspect/2`, because the two call paths that matter -
-    # `notifications/cancelled` (reached from `ConduitMcp.Handler`'s
+    # `notifications/cancelled` (reached from `ConduitMcp.Handler.Legacy`'s
     # handle_notification/3, outside the request-path rescue) and
     # `Logger.debug` in `Transport.Shared.dispatch_post/2` - have no rescue of
     # their own, so a raise here leaves the client with a bare 500 and no

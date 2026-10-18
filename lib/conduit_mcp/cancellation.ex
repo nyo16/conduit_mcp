@@ -33,6 +33,16 @@ defmodule ConduitMcp.Cancellation do
   cancellation at all — the client's notification will arrive after the
   response has already been sent.
 
+  ## Modern streams: disconnect is cancellation
+
+  The modern (`2026-07-28`) HTTP transport has no client-to-server
+  notifications; a client cancels by closing the stream. When a streamed
+  `tools/call` response (`ConduitMcp.StreamSpec`) fails to write because
+  the client is gone, the transport records the cancellation here, under
+  the request's own scope, so `cancelled?/1` turns `true` for the running
+  tool. A tool that has not returned within the transport's
+  `:stream_cancel_timeout` is killed.
+
   ## Scoping
 
   JSON-RPC ids are **client-chosen** and conventionally small integers, so
@@ -300,11 +310,18 @@ defmodule ConduitMcp.Cancellation do
 
   Accepts a `Plug.Conn` whose `assigns` carries `:mcp_request_id` (set by
   `ConduitMcp.Handler` before dispatch) — the conn also supplies the scope —
-  or an explicit id plus scope.
+  or an explicit id plus scope. For a conn, both the client's cancellation
+  (`notifications/cancelled`, keyed by scope and id) and the server's own
+  (`cancel_request/2`, keyed to this one request) count.
   """
   @spec cancelled?(Plug.Conn.t() | request_id() | nil) :: boolean()
-  def cancelled?(%Plug.Conn{assigns: %{mcp_request_id: id}} = conn),
-    do: cancelled?(id, scope(conn))
+  def cancelled?(%Plug.Conn{assigns: %{mcp_request_id: id}} = conn) do
+    cancelled?(id, scope(conn)) or
+      case request_scope(conn) do
+        nil -> false
+        request_scope -> cancelled?(id, request_scope)
+      end
+  end
 
   def cancelled?(%Plug.Conn{}), do: false
   def cancelled?(nil), do: false
@@ -319,6 +336,42 @@ defmodule ConduitMcp.Cancellation do
   end
 
   def cancelled?(_request_id, _scope), do: false
+
+  @doc """
+  Cancels the one request `conn` is handling, from the server side.
+
+  For cancellations the server decides on — a modern client closing its
+  response stream, a stream reaching `:max_stream_lifetime` — rather than a
+  client's `notifications/cancelled`. The row is keyed to the request's
+  private token (assigned by the handler pipeline when it tracks the request), not
+  to `{scope, id}`: two clients behind one address without a session or
+  principal share a scope, and both number their requests from 1, so a
+  `{scope, id}` row would be visible to — and cleared by — the other
+  client's request.
+
+  Returns `:ok`, and does nothing for a conn that is not in flight.
+  """
+  @spec cancel_request(Plug.Conn.t() | map(), term()) :: :ok
+  def cancel_request(%Plug.Conn{assigns: %{mcp_request_id: id}} = conn, reason) do
+    case request_scope(conn) do
+      nil ->
+        :ok
+
+      request_scope ->
+        _ = cancel(id, reason, request_scope)
+        :ok
+    end
+  end
+
+  def cancel_request(_conn, _reason), do: :ok
+
+  @doc false
+  # The scope of the request-private rows written by `cancel_request/2`.
+  @spec request_scope(Plug.Conn.t() | map()) :: scope() | nil
+  def request_scope(%Plug.Conn{assigns: %{mcp_request_token: token}}) when is_integer(token),
+    do: "request:" <> Integer.to_string(token)
+
+  def request_scope(_conn), do: nil
 
   @doc """
   Returns the cancellation reason recorded for the request, or `nil`.

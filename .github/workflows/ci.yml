@@ -122,8 +122,12 @@ jobs:
       - run: mix deps.compile
       - run: mix compile
 
+      # `:integration` (real Bandit sockets, Finch) and `:stdio` (spawned
+      # `elixir` servers) tests are part of this job. test_helper.exs excludes
+      # nothing; the explicit includes keep them here if it ever does.
+      # coveralls.json enforces the coverage floor (86 %).
       - name: Run tests with coverage
-        run: mix coveralls
+        run: mix coveralls --include integration --include stdio
         env:
           MIX_ENV: test
 
@@ -180,6 +184,11 @@ jobs:
 
       - name: Check for unused dependencies
         run: mix deps.unlock --check-unused
+
+      # Hex rejects some metadata (a description over 300 characters) only
+      # at publish time; building the package here fails the PR instead.
+      - name: Check the Hex package builds
+        run: mix hex.build
 
   dialyzer:
     name: Dialyzer

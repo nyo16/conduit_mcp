@@ -36,6 +36,8 @@ defmodule ConduitMcp.Validation.SchemaConverter do
     `:type_coercion` setting of `ConduitMcp.Validation` for this param (and the
     fields of an object param)
   - `additional_properties: boolean` -> kept as a marker; see Nested Objects
+  - `header: name` -> dropped. It is the `x-mcp-header` JSON Schema annotation
+    (see `ConduitMcp.DSL.SchemaBuilder`), not a validation rule
 
   Any other option, or a recognised option with a value of the wrong shape
   (`min: "5"`), raises `ArgumentError` when the tool is compiled.
@@ -209,6 +211,11 @@ defmodule ConduitMcp.Validation.SchemaConverter do
     [{:additional_properties, value} | acc]
   end
 
+  # The `x-mcp-header` annotation, published by `ConduitMcp.DSL.SchemaBuilder`
+  # and checked at compile time by `ConduitMcp.DSL.__validate_x_mcp_headers__!/2`.
+  # It constrains the HTTP request, not the argument, so it validates nothing.
+  defp convert_validation_opt({:header, _name}, acc), do: acc
+
   # A silently dropped constraint is a security control that vanished:
   # `field(:name, :string, min_lenght: 3)` used to emit a compile-time warning
   # and validate *nothing*. Warnings scroll past; this does not.
@@ -230,7 +237,7 @@ defmodule ConduitMcp.Validation.SchemaConverter do
   }
 
   # `:default` accepts any value, so it has no expected shape to report.
-  @recognised_validation_opts [:default | Map.keys(@expected_values)]
+  @recognised_validation_opts [:default, :header | Map.keys(@expected_values)]
 
   defp convert_validation_opt({key, value}, _acc) when is_map_key(@expected_values, key) do
     raise ArgumentError,

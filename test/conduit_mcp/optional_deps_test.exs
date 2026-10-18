@@ -76,6 +76,43 @@ defmodule ConduitMcp.OptionalDepsTest do
     end
   end
 
+  describe "finch!/0" do
+    test "returns the client's HTTP module when Finch is compiled in" do
+      assert OptionalDeps.finch!() == ConduitMcp.Client.HTTP
+    end
+
+    test "raises naming :finch and the version floor when the module is absent" do
+      error =
+        assert_raise OptionalDependencyError, fn ->
+          OptionalDeps.finch!(ConduitMcp.Client.NoSuchHTTP)
+        end
+
+      assert error.deps == [{:finch, "~> 0.21"}]
+      assert Exception.message(error) =~ ~s({:finch, "~> 0.21"})
+      assert Exception.message(error) =~ "Streamable HTTP client transport"
+    end
+  end
+
+  describe "oauth_plug!/0, oauth_client!/0, client_assertion!/0" do
+    test "return their modules when the deps are compiled in" do
+      assert OptionalDeps.oauth_plug!() == ConduitMcp.Plugs.OAuth
+      assert OptionalDeps.oauth_client!() == ConduitMcp.Client.OAuth.Session
+      assert OptionalDeps.client_assertion!() == ConduitMcp.Client.OAuth.ClientAssertion
+    end
+
+    test "raise naming the missing dependency when the module is absent" do
+      for {check, deps} <- [
+            {&OptionalDeps.oauth_plug!/1, [{:joken, "~> 2.6"}, {:jose, "~> 1.11"}]},
+            {&OptionalDeps.oauth_client!/1, [{:finch, "~> 0.21"}]},
+            {&OptionalDeps.client_assertion!/1, [{:jose, "~> 1.11"}]}
+          ] do
+        error = assert_raise OptionalDependencyError, fn -> check.(ConduitMcp.NoSuchModule) end
+        assert error.deps == deps
+        assert Exception.message(error) =~ "mix deps.compile conduit_mcp --force"
+      end
+    end
+  end
+
   describe "availability in this build" do
     test "optional deps are present for the library's own suite" do
       # This suite always compiles with every optional dep installed, which is
@@ -83,6 +120,24 @@ defmodule ConduitMcp.OptionalDepsTest do
       # job rather than an assertion here.
       assert OptionalDeps.oauth_available?()
       assert OptionalDeps.oauth_plug!() == ConduitMcp.Plugs.OAuth
+    end
+
+    test "the JSV schema validator is compiled in" do
+      assert OptionalDeps.jsv_available?()
+      assert OptionalDeps.jsv!() == ConduitMcp.Client.SchemaValidator.JSV
+    end
+
+    test "the error a missing :jsv raises names the dependency and the option" do
+      message =
+        OptionalDependencyError.exception(
+          feature: "Client JSON Schema validation (the :validate option)",
+          module: ConduitMcp.Client.SchemaValidator.JSV,
+          deps: [{:jsv, "~> 0.26"}]
+        )
+        |> Exception.message()
+
+      assert message =~ ":validate option"
+      assert message =~ ~s({:jsv, "~> 0.26"})
     end
   end
 end

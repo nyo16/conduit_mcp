@@ -15,8 +15,15 @@ defmodule Examples.ObanTasks.Worker do
     worker promptly.
   - `input_required` is implemented with `{:snooze, _}` per the
     oban-thinking guidance: the worker writes `input_required`, snoozes
-    for a few seconds, and re-checks `metadata.input` on its next
-    attempt.
+    for a few seconds, and re-checks for the input on its next attempt.
+
+  ## Two eras
+
+  Jobs enqueued for a modern (`2026-07-28`) client carry `"era" =>
+  "modern"` and report through `ConduitMcp.Ext.Tasks` (`progress/2`,
+  `complete/2`, `require_input/3`, `cancelled?/1`); input arrives from the
+  client's `tasks/update` in the task's `input_responses`. Other jobs are
+  the frozen legacy (`2025-11-25`) flow over `ConduitMcp.Tasks`.
   """
 
   use Oban.Worker,
@@ -24,7 +31,8 @@ defmodule Examples.ObanTasks.Worker do
     max_attempts: 3,
     unique: [period: 300, keys: [:task_id]]
 
-  alias ConduitMcp.{Cancellation, Tasks}
+  alias ConduitMcp.{Cancellation, MRTR, Tasks}
+  alias ConduitMcp.Ext.Tasks, as: ExtTasks
 
   @chunks 10
   @snooze_secs 5
@@ -40,6 +48,15 @@ defmodule Examples.ObanTasks.Worker do
   def timeout(_job), do: :timer.minutes(5)
 
   @impl Oban.Worker
+  def perform(%Oban.Job{args: %{"era" => "modern", "task_id" => task_id, "tool" => tool} = args}) do
+    case tool do
+      "slow_render" -> modern_render(task_id, args)
+      "ask_then_render" -> modern_ask_then_render(task_id, args)
+      other -> {:cancel, "unknown tool: #{other}"}
+    end
+  end
+
+  # Legacy (2025-11-25, frozen reference): ConduitMcp.Tasks rows.
   def perform(%Oban.Job{
         id: job_id,
         attempt: attempt,
@@ -55,6 +72,105 @@ defmodule Examples.ObanTasks.Worker do
       "ask_then_render" -> ask_then_render(task_id, args)
       other -> {:cancel, "unknown tool: #{other}"}
     end
+  end
+
+  # --- modern (tasks extension) ---
+
+  defp modern_render(task_id, %{"duration_ms" => requested} = args) do
+    total = clamp_duration(requested)
+    chunk_ms = max(div(total, @chunks), 50)
+
+    Enum.reduce_while(1..@chunks, :ok, fn step, _ ->
+      # tasks/cancel is cooperative: it marks the task cancelled and the
+      # worker stops at the next chunk. An expired (janitor-evicted) task
+      # answers :not_found to every call, so stop then too.
+      if ExtTasks.cancelled?(task_id) do
+        {:halt, {:cancel, "cancelled by client"}}
+      else
+        case ExtTasks.progress(task_id, "Rendering: #{round(step / @chunks * 100)}%") do
+          :ok ->
+            Process.sleep(chunk_ms)
+            {:cont, :ok}
+
+          {:error, reason} ->
+            {:halt, {:cancel, "task gone: #{inspect(reason)}"}}
+        end
+      end
+    end)
+    |> case do
+      :ok ->
+        result = %{
+          "content" => [
+            %{
+              "type" => "text",
+              "text" => "Render of #{inspect(args["script"])} completed in #{total}ms."
+            }
+          ]
+        }
+
+        _ = ExtTasks.complete(task_id, result)
+        :ok
+
+      cancel ->
+        cancel
+    end
+  end
+
+  defp modern_ask_then_render(task_id, args) do
+    case ExtTasks.status(task_id) do
+      {:ok, %{status: "cancelled"}} ->
+        {:cancel, "cancelled while waiting for input"}
+
+      {:ok, %{input_responses: %{"script" => response}}} ->
+        resume_with(task_id, args, response)
+
+      {:ok, %{status: "input_required"}} ->
+        # Not answered yet (or only partially): look again later.
+        {:snooze, @snooze_secs}
+
+      {:ok, %{status: "working"}} ->
+        # First attempt: ask the client. It sees the request in tasks/get
+        # and answers with tasks/update; the task returns to working once
+        # every key is answered.
+        :ok =
+          ExtTasks.require_input(
+            task_id,
+            %{"script" => MRTR.elicit("What should be rendered?", script_schema())},
+            status_message: "Waiting for a script"
+          )
+
+        {:snooze, @snooze_secs}
+
+      {:ok, _terminal} ->
+        :ok
+
+      {:error, :not_found} ->
+        {:cancel, "task expired"}
+    end
+  end
+
+  defp resume_with(task_id, args, %{"action" => "accept", "content" => %{"script" => script}})
+       when is_binary(script) do
+    args = Map.merge(args, %{"script" => script, "duration_ms" => args["duration_ms"] || 1_000})
+    modern_render(task_id, args)
+  end
+
+  defp resume_with(task_id, _args, _declined_or_malformed) do
+    _ =
+      ExtTasks.complete(task_id, %{
+        "content" => [%{"type" => "text", "text" => "Render declined."}],
+        "isError" => true
+      })
+
+    :ok
+  end
+
+  defp script_schema do
+    %{
+      "type" => "object",
+      "required" => ["script"],
+      "properties" => %{"script" => %{"type" => "string", "description" => "Free-form script"}}
+    }
   end
 
   # --- slow_render: straightforward long-running tool ---

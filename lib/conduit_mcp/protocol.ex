@@ -1,11 +1,15 @@
 defmodule ConduitMcp.Protocol do
   @moduledoc """
-  JSON-RPC 2.0 message construction and MCP protocol version negotiation.
+  JSON-RPC 2.0 message construction and MCP protocol versions.
 
-  ConduitMCP targets MCP spec **2025-11-25** as the primary version and
-  also accepts clients on **2025-06-18** for backward compatibility.
-  `protocol_version/0` returns the preferred version; `negotiate_version/1`
-  resolves a client's requested version to one the server supports.
+  ConduitMCP is dual-era. It speaks MCP **2026-07-28** (the *modern* era:
+  version and capabilities travel in every request's `_meta`, no handshake)
+  and **2025-11-25** / **2025-06-18** (the *legacy* era, negotiated by
+  `initialize`). `supported_versions/0` lists all three, newest first — the
+  list `server/discover` advertises. `modern_versions/0` and
+  `legacy_versions/0` split it by era; `negotiate_version/1` resolves an
+  `initialize` request and only ever picks a legacy version.
+  `protocol_version/0` is the preferred legacy version.
 
   ## Building responses
 
@@ -25,8 +29,7 @@ defmodule ConduitMcp.Protocol do
   - `invalid_params/0`      → -32602
   - `internal_error/0`      → -32603
   - `server_error/0`        → -32000 (generic server-defined)
-  - `resource_not_found/0`  → -32002
-  - `task_not_ready/0`      → -32004 (`tasks/result` before completion)
+  - `task_not_ready/0`      → -32004 (legacy `tasks/result` before completion)
   - `request_cancelled/0`   → -32800 (`notifications/cancelled`)
 
   Use these instead of hardcoded integers so error code constants stay
@@ -42,7 +45,9 @@ defmodule ConduitMcp.Protocol do
   """
 
   @protocol_version "2025-11-25"
-  @supported_versions ["2025-11-25", "2025-06-18"]
+  @modern_versions ["2026-07-28"]
+  @legacy_versions ["2025-11-25", "2025-06-18"]
+  @supported_versions @modern_versions ++ @legacy_versions
 
   @type json_rpc_id :: String.t() | integer()
   @type method :: String.t()
@@ -80,15 +85,30 @@ defmodule ConduitMcp.Protocol do
           data: any() | nil
         }
 
+  @doc "The preferred legacy protocol version, `#{@protocol_version}`."
+  @spec protocol_version() :: String.t()
   def protocol_version, do: @protocol_version
+
+  @doc "Every supported protocol version, newest first: #{inspect(@supported_versions)}."
+  @spec supported_versions() :: [String.t()]
   def supported_versions, do: @supported_versions
 
+  @doc "The modern-era (per-request `_meta`) versions: #{inspect(@modern_versions)}."
+  @spec modern_versions() :: [String.t()]
+  def modern_versions, do: @modern_versions
+
+  @doc "The legacy-era (`initialize`-negotiated) versions: #{inspect(@legacy_versions)}."
+  @spec legacy_versions() :: [String.t()]
+  def legacy_versions, do: @legacy_versions
+
   @doc """
-  Returns the best matching protocol version for the given client version.
-  Returns `nil` if no compatible version is found.
+  Resolves the version an `initialize` request asks for: the version itself
+  when it is a legacy version, otherwise `nil`. A modern version is never
+  negotiated by `initialize`; modern clients send it per request instead.
   """
+  @spec negotiate_version(term()) :: String.t() | nil
   def negotiate_version(client_version) do
-    if client_version in @supported_versions do
+    if client_version in @legacy_versions do
       client_version
     else
       nil
@@ -104,7 +124,6 @@ defmodule ConduitMcp.Protocol do
   # The moduledoc above advertised `server_error/0` while this block omitted
   # it, so `ConduitMcp.Protocol.server_error()` raised UndefinedFunctionError.
   defdelegate server_error, to: ConduitMcp.Errors
-  defdelegate resource_not_found, to: ConduitMcp.Errors
   defdelegate task_not_ready, to: ConduitMcp.Errors
   defdelegate request_cancelled, to: ConduitMcp.Errors
 
@@ -139,6 +158,19 @@ defmodule ConduitMcp.Protocol do
       not Map.has_key?(message, "id") and
       Map.has_key?(message, "method") and
       is_binary(Map.get(message, "method"))
+  end
+
+  @doc """
+  Validates if a message is a JSON-RPC 2.0 response: an `id`, no `method`, and
+  exactly one of `result` and `error`.
+  """
+  @spec valid_response?(term()) :: boolean()
+  def valid_response?(message) do
+    is_map(message) and
+      Map.get(message, "jsonrpc") == "2.0" and
+      Map.has_key?(message, "id") and
+      not Map.has_key?(message, "method") and
+      Map.has_key?(message, "result") != Map.has_key?(message, "error")
   end
 
   @doc """

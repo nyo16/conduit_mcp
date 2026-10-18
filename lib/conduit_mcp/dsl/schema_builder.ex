@@ -161,11 +161,14 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
   @doc """
   Builds a resource schema from DSL definition.
 
-  Used for `resources/list` (static URIs only).
+  Used for `resources/list` (static URIs only). `name` — required by the MCP
+  `Resource` schema in every revision — is the URI, since the DSL has no
+  separate resource name.
   """
   def build_resource_schema(%{uri: uri, description: description, mime_type: mime_type}) do
     schema = %{
-      "uri" => uri
+      "uri" => uri,
+      "name" => uri
     }
 
     schema = if description, do: Map.put(schema, "description", description), else: schema
@@ -178,14 +181,15 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
   Builds a resource-template schema from a templated DSL definition.
 
   Used for `resources/templates/list` (URIs with `{param}` placeholders).
-  Emits `uriTemplate` instead of `uri` per MCP spec.
+  Emits `uriTemplate` instead of `uri` per MCP spec, and the template as the
+  required `name`.
   """
   def build_resource_template_schema(%{
         uri: uri,
         description: description,
         mime_type: mime_type
       }) do
-    schema = %{"uriTemplate" => uri}
+    schema = %{"uriTemplate" => uri, "name" => uri}
     schema = if description, do: Map.put(schema, "description", description), else: schema
     if mime_type, do: Map.put(schema, "mimeType", mime_type), else: schema
   end
@@ -234,6 +238,7 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
 
     base = add_description(base, param)
     base = add_enum(base, param)
+    base = add_header(base, param)
 
     # A blockless `:object` param carries `nested: nil` — an open object,
     # which is `{"properties": {}}` in JSON Schema, not a crash.
@@ -256,6 +261,7 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
     base = %{"type" => "array"}
 
     base = add_description(base, param)
+    base = add_header(base, param)
 
     # Build items schema
     items_schema = build_items_schema(items_def)
@@ -269,6 +275,7 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
     base = add_description(base, param)
     base = add_enum(base, param)
     base = add_default(base, param)
+    base = add_header(base, param)
 
     base
   end
@@ -330,6 +337,17 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
     case Keyword.get(param.opts, :default) do
       nil -> schema
       default_value -> Map.put(schema, "default", default_value)
+    end
+  end
+
+  # `header:` becomes the `x-mcp-header` annotation. It is emitted on every
+  # property kind, valid or not, so `ConduitMcp.Headers.validate_x_mcp_header/1`
+  # sees — and the build rejects — an annotation on an object, an array or an
+  # array item instead of the option silently vanishing.
+  defp add_header(schema, param) do
+    case Keyword.get(param.opts, :header) do
+      nil -> schema
+      header -> Map.put(schema, "x-mcp-header", header)
     end
   end
 

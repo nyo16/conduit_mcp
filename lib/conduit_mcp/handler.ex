@@ -2,50 +2,99 @@ defmodule ConduitMcp.Handler do
   @moduledoc """
   Routes JSON-RPC 2.0 MCP requests to a server module's behaviour callbacks.
 
-  `handle_request/3` is the single entry point: transports decode the
-  request body, hand the resulting map to this module, and serialize the
-  returned map back out. The handler itself is stateless — it does not own
-  the server module, the connection, or any process state. Each request
-  is independent and can run concurrently in its own Bandit process.
+  Transports decode the request body, hand the resulting map to this module,
+  and serialize what comes back. The handler itself is stateless — it does
+  not own the server module, the connection, or any process state. Each
+  request is independent and can run concurrently in its own Bandit process.
 
-  ## Routed methods
+  Two entry points:
 
-  - `initialize` — version negotiation and capability advertisement
-  - `ping` — round-trip liveness check
-  - `tools/list`, `tools/call`
-  - `resources/list`, `resources/templates/list`, `resources/read`
-  - `resources/subscribe`, `resources/unsubscribe`
-  - `prompts/list`, `prompts/get`
-  - `completion/complete`
-  - `logging/setLevel`
-  - `tasks/get`, `tasks/cancel`, `tasks/result`, `tasks/list`
-  - `notifications/initialized`, `notifications/cancelled`
+    * `dispatch/3` — the transport contract: classifies the request's
+      protocol era (unless given a `ConduitMcp.Ctx`) and returns
+      `{:reply, response}`, `{:stream, spec}` or `:noreply`.
+    * `handle_request/3` — the map-returning wrapper over `dispatch/3`, kept
+      for manual-mode callers.
 
-  Unknown methods return `-32601 Method not found`. Unknown notifications are
-  logged and dropped (per JSON-RPC notification semantics) — but a *known*
-  notification that is malformed is answered with an error whose `id` is
-  `null`, rather than dropped. See `handle_request/3`.
+  ## Protocol eras
+
+  Every request is classified by `ConduitMcp.Era.classify/2`:
+
+    * **Modern** (`2026-07-28`) — the request's `params._meta` carries
+      `io.modelcontextprotocol/protocolVersion` and
+      `io.modelcontextprotocol/clientCapabilities`, or the method is
+      `server/discover`. Routed methods: `server/discover`, `tools/list`,
+      `tools/call`, `resources/list`, `resources/templates/list`,
+      `resources/read`, `prompts/list`, `prompts/get`, `completion/complete`
+      and `subscriptions/listen` (a long-lived stream; see
+      `ConduitMcp.Subscriptions`).
+      Results carry `resultType`, `serverInfo` `_meta` and (on cacheable
+      results) `ttlMs`/`cacheScope`; see `ConduitMcp.Protocol.Modern`.
+    * **Legacy** (`2025-11-25`, `2025-06-18`) — everything else. Routed
+      methods: `initialize`, `ping`, `tools/list`, `tools/call`,
+      `resources/list`, `resources/templates/list`, `resources/read`,
+      `resources/subscribe`, `resources/unsubscribe`, `prompts/list`,
+      `prompts/get`, `completion/complete`, `logging/setLevel`, `tasks/get`,
+      `tasks/cancel`, `tasks/result`, `tasks/list`, and the notifications
+      `notifications/initialized` and `notifications/cancelled`.
+
+  Unknown methods return `-32601 Method not found` in both eras — on the
+  modern path that includes every legacy-only method (`initialize`, `ping`,
+  …), answered with HTTP 404 (`ConduitMcp.Protocol.Modern.http_status/1`).
+  Unknown notifications are logged and dropped (per JSON-RPC notification
+  semantics) — but a *known* legacy notification that is malformed is
+  answered with an error whose `id` is `null`, rather than dropped. See
+  `handle_request/3`. The modern era defines no client notifications over
+  HTTP, so every modern notification is dropped.
+
+  The callbacks receive a `Plug.Conn` in both eras; the request's
+  `ConduitMcp.Ctx` is in it (`ConduitMcp.Ctx.from_conn/1`).
 
   ## Capability detection
 
   When the server module defines `__capabilities__/0` (typically generated
-  by `ConduitMcp.Endpoint`), it is consulted for the `initialize` reply.
-  Otherwise the base `tools`/`resources`/`prompts` set is used.
-  Capability flags for optional features (`completions`, `logging`,
-  `resources.subscribe`) are overlaid at runtime based on which callbacks
-  the server exports, via the internal `ServerMeta` cache.
+  by `ConduitMcp.Endpoint`), it is consulted for the `initialize` reply and
+  the `server/discover` result. Otherwise the base
+  `tools`/`resources`/`prompts` set is used. Capability flags for optional
+  features (`completions`, `logging`, `resources.subscribe`) are overlaid at
+  runtime based on which callbacks the server exports. See
+  `ConduitMcp.Capabilities.build/2`.
 
   ## Telemetry
 
   Emits these events:
 
   - `[:conduit_mcp, :request, :stop]` — every request, with
-    `%{duration: <native>}` and metadata `%{method, server_module, status}`.
+    `%{duration: <native>}` and metadata `%{method, server_module, status,
+    era, protocol_version, traceparent, tracestate, baggage}` — except a
+    `subscriptions/listen` that opened a stream, which is measured by
+    `[:conduit_mcp, :subscription, :start | :stop]` instead (emitted by the
+    transport): its duration is the stream's lifetime, not a latency.
   - `[:conduit_mcp, :tool, :execute]` — per `tools/call`.
   - `[:conduit_mcp, :resource, :read]` — per `resources/read`.
   - `[:conduit_mcp, :prompt, :get]` — per `prompts/get`.
+  - `[:conduit_mcp, :mrtr, :input_required]` — per modern
+    `InputRequiredResult` sent.
   - `[:conduit_mcp, :request, :cancelled]` — when a
     `notifications/cancelled` for a request in flight is recorded.
+
+  ## Multi round-trip requests
+
+  On the modern path `tools/call`, `resources/read` and `prompts/get`
+  callbacks may return `{:input_required, input_requests, state}`; a retry's
+  `requestState` is verified before the callback runs, and the restored state
+  arrives in `conn.assigns[:mcp_input]`. See `ConduitMcp.Server` and
+  `ConduitMcp.MRTR`. On the legacy path that return is answered with
+  `-32603` ("MRTR input requests require protocol 2026-07-28").
+
+  ## Tasks extension
+
+  With `ConduitMcp.Ext.Tasks` enabled, the modern era also routes
+  `tasks/get`, `tasks/update` and `tasks/cancel`, and a `tools/call`
+  callback may return `{:task, attrs}`; the client must declare
+  `io.modelcontextprotocol/tasks` in the request's capability extensions
+  (`-32021` otherwise) and gets a `CreateTaskResult`. Anywhere else —
+  other methods, the legacy era, the extension disabled — that return is
+  answered with `-32603`.
 
   ## Cancellation
 
@@ -55,24 +104,147 @@ defmodule ConduitMcp.Handler do
   clear any cancellation flag after the response is produced. Tools poll
   `ConduitMcp.Cancellation.cancelled?(conn)` for cooperative aborts.
   `notifications/cancelled` is recorded only for a request in flight in the
-  caller's scope; one naming an unknown or completed request is ignored.
+  caller's scope; one naming an unknown or completed request is ignored. A
+  modern request never has a session, so its scope is its principal, else
+  its client IP.
+
+  ## Layout
+
+  This module is the public entry point only. The work is split into
+  internal (undocumented) modules:
+
+  - `Handler.Legacy` / `Handler.Modern` — each era's request validation and
+    routing table; `Handler.Legacy` also has the lifecycle, logging and
+    subscription methods only that era has.
+  - `Handler.Pipeline` — the per-request wrapper: `request.stop`
+    telemetry, in-flight tracking, and the rescue that turns a raise into
+    `-32603`.
+  - Method modules (`Handler.Tools`, `.Resources`, `.Prompts`,
+    `.Completion`, `.LegacyTasks`, with shared helpers in `.Common`) return
+    an era-neutral `t:result/0` and never build JSON-RPC maps. The three
+    MRTR methods run their callback through `Handler.MRTR`, which opens
+    `requestState`, gates and seals `{:input_required, ...}`, and refuses it
+    on the legacy era.
+  - `ConduitMcp.Protocol.Legacy` / `ConduitMcp.Protocol.Modern` shape a
+    `t:result/0` into the JSON-RPC response of their era.
   """
 
-  require Logger
-  alias ConduitMcp.Cancellation
+  alias ConduitMcp.Ctx
+  alias ConduitMcp.Era
+  alias ConduitMcp.Handler.Legacy
+  alias ConduitMcp.Handler.Modern
   alias ConduitMcp.Protocol
-  alias ConduitMcp.ServerMeta
+  alias ConduitMcp.StreamSpec
+
+  @typedoc """
+  The era-neutral outcome of a method: a result map, an input-required
+  round, or an error code, message and optional `data` member. Shaped into a
+  protocol response by the era's response shaper
+  (`ConduitMcp.Protocol.Legacy` or `ConduitMcp.Protocol.Modern`).
+
+  `{:input_required, input_requests, state}` is what an MRTR callback
+  returned; by the time it reaches `ConduitMcp.Protocol.Modern` its `state`
+  has been sealed into the `requestState` token. Only the modern era shapes
+  it: the legacy era answers it with `-32603` before shaping.
+
+  `{:task, task}` is a `ConduitMcp.Ext.Tasks` task created for a modern
+  `tools/call` (its wire `Task` map), shaped into a `CreateTaskResult`.
+  """
+  @type result ::
+          {:ok, map()}
+          | {:input_required, %{optional(String.t()) => map()}, term()}
+          | {:task, map()}
+          | {:error, integer(), String.t(), map() | nil}
+
+  @typedoc """
+  What a transport does with a message:
+
+    * `{:reply, response}` — send the JSON-RPC `response` map. For a modern
+      request the HTTP status is
+      `ConduitMcp.Protocol.Modern.http_status/1` of it.
+    * `{:stream, spec}` — a `ConduitMcp.StreamSpec`: a response the
+      transport may send as a Server-Sent Events stream, relaying the
+      notifications the work emits ahead of it. Returned for a modern
+      `tools/call` whose `_meta` carries a `progressToken` or a `logLevel`
+      (kind `:response`), and for a modern `subscriptions/listen` whose
+      filter parsed (kind `:listen`).
+    * `:noreply` — a notification: nothing to send.
+  """
+  @type reply :: {:reply, map()} | {:stream, ConduitMcp.StreamSpec.t()} | :noreply
+
+  @doc """
+  Classifies and handles a decoded JSON-RPC message.
+
+  The third argument is either the request's `ConduitMcp.Ctx` — what a
+  transport passes once it has run `ConduitMcp.Era.classify/2` itself (and,
+  for a modern request, `ConduitMcp.Plugs.HeaderValidation`) — or the
+  request's `Plug.Conn`, in which case the request is classified here. A
+  context already stored on that conn is ignored: the conn may belong to an
+  outer request.
+
+  A classification failure (invalid modern `_meta`, or a mixed request whose
+  session is bound to another principal) is answered with a modern error
+  response; on HTTP such a rejection is a 400, whatever its code (see
+  `ConduitMcp.Era`).
+  """
+  @spec dispatch(map(), module(), Ctx.t() | Plug.Conn.t() | map()) :: reply()
+  def dispatch(request, server_module, %Ctx{} = ctx),
+    do: dispatch_era(request, server_module, ctx)
+
+  def dispatch(request, server_module, conn) do
+    case Era.classify(request, conn) do
+      {:ok, ctx} -> dispatch_era(request, server_module, ctx)
+      {:error, code, message, data} -> reject(request, server_module, conn, {code, message, data})
+    end
+  end
+
+  defp dispatch_era(request, server_module, %Ctx{era: :modern} = ctx),
+    do: Modern.dispatch(request, server_module, ctx)
+
+  defp dispatch_era(request, server_module, %Ctx{era: :legacy} = ctx) do
+    case Legacy.handle_request(request, server_module, ctx) do
+      :ok -> :noreply
+      response -> {:reply, response}
+    end
+  end
+
+  # Only modern `_meta` can fail classification, so the rejection is shaped
+  # and instrumented as modern.
+  defp reject(request, server_module, conn, {code, message, data}) do
+    ctx = %Ctx{era: :modern, conn: conn}
+
+    response =
+      ConduitMcp.Handler.Pipeline.instrument(request, server_module, ctx, fn ->
+        Protocol.Modern.to_response(
+          Map.get(request, "id"),
+          Map.get(request, "method"),
+          {:error, code, message, data}
+        )
+      end)
+
+    {:reply, response}
+  end
 
   @doc """
   Handles an MCP request and returns a JSON-RPC response.
   Emits telemetry events for monitoring and metrics.
 
+  A wrapper over `dispatch/3` that classifies the request's era itself.
   Returns a response map for a request, and `:ok` for a notification that was
-  handled or ignored.
+  handled or ignored, or for a JSON-RPC response: the server sends no
+  requests of its own, so a response answers nothing and is dropped.
+  `ConduitMcp.Transport.Shared.dispatch_post/2` answers `:ok` with
+  `202 Accepted` and no body. A `{:stream, spec}` dispatch of kind
+  `:response` is run to completion in the calling process
+  (`ConduitMcp.StreamSpec.run/1`): its notifications are dropped and its
+  final response is returned. One of kind `:listen` — a modern
+  `subscriptions/listen` — is answered `-32601`: a long-lived notification
+  stream needs a transport that can hold it open, which a map return
+  cannot.
 
   A notification has no id to correlate, so JSON-RPC says a failed one is
-  dropped. `notifications/cancelled` is the exception: in these cases it
-  returns an **error map with `"id" => nil`** instead of `:ok`, because
+  dropped. Legacy `notifications/cancelled` is the exception: in these cases
+  it returns an **error map with `"id" => nil`** instead of `:ok`, because
   reporting the client's own mistake back to it is a lesser deviation than a
   silent drop:
 
@@ -98,937 +270,44 @@ defmodule ConduitMcp.Handler do
   # callers pass an adapter-built conn; the default exists for direct calls.
   @spec handle_request(map(), module(), Plug.Conn.t() | map()) :: map() | :ok
   def handle_request(request, server_module, conn \\ %Plug.Conn{}) do
-    start_time = System.monotonic_time()
-
-    result =
-      cond do
-        Protocol.valid_request?(request) ->
-          handle_method(request, server_module, conn)
-
-        Protocol.valid_notification?(request) ->
-          handle_notification(request, server_module, conn)
-
-        true ->
-          Protocol.error_response(
-            Map.get(request, "id"),
-            Protocol.invalid_request(),
-            "Invalid JSON-RPC 2.0 request"
-          )
-      end
-
-    duration = System.monotonic_time() - start_time
-
-    :telemetry.execute(
-      [:conduit_mcp, :request, :stop],
-      %{duration: duration},
-      %{
-        method: telemetry_text(Map.get(request, "method")),
-        server_module: server_module,
-        status: if(match?(%{"error" => _}, result), do: :error, else: :ok)
-      }
-    )
-
-    result
-  end
-
-  defp handle_method(request, server_module, conn) do
-    method = Map.get(request, "method")
-    id = Map.get(request, "id")
-    params = Map.get(request, "params", %{})
-    conn = Plug.Conn.assign(conn, :mcp_request_id, id)
-    scope = Cancellation.scope(conn)
-
-    Logger.debug("Handling method", method: ConduitMcp.Reflect.text(method))
-
-    Cancellation.track(id, scope)
-
-    try do
-      do_handle_method(method, id, params, server_module, conn)
-    after
-      Cancellation.untrack(id, scope)
-      Cancellation.clear(id, scope)
+    case dispatch(request, server_module, conn) do
+      {:stream, %StreamSpec{kind: :listen} = spec} -> reject_listen(request, server_module, spec)
+      reply -> to_map(reply, request)
     end
   end
 
-  # The one routing table. `ConduitMcp.Protocol.methods/0` publishes exactly
-  # this map, so the documented method list and the dispatcher cannot drift:
-  # they are the same data. Previously `Protocol.methods/0` was a second,
-  # hand-maintained copy that did not know about six routed methods.
-  @request_methods %{
-    # Lifecycle
-    "initialize" => :initialize,
-    "ping" => :ping,
+  defp reject_listen(request, server_module, spec) do
+    ctx = Ctx.from_conn(spec.conn) || %Ctx{era: :modern, conn: spec.conn}
 
-    # Tools
-    "tools/list" => :list_tools,
-    "tools/call" => :call_tool,
+    ConduitMcp.Handler.Pipeline.instrument(request, server_module, ctx, fn ->
+      Protocol.Modern.to_response(
+        spec.request_id,
+        spec.method,
+        {:error, ConduitMcp.Errors.method_not_found(),
+         "Method not found: subscriptions/listen requires a streaming transport", nil}
+      )
+    end)
+  end
 
-    # Resources
-    "resources/list" => :list_resources,
-    "resources/templates/list" => :list_resource_templates,
-    "resources/read" => :read_resource,
-    "resources/subscribe" => :subscribe_resource,
-    "resources/unsubscribe" => :unsubscribe_resource,
-
-    # Prompts
-    "prompts/list" => :list_prompts,
-    "prompts/get" => :get_prompt,
-
-    # Completion
-    "completion/complete" => :complete,
-
-    # Logging
-    "logging/setLevel" => :set_log_level,
-
-    # Tasks
-    "tasks/get" => :get_task,
-    "tasks/cancel" => :cancel_task,
-    "tasks/result" => :task_result,
-    "tasks/list" => :list_tasks
-  }
-
-  @notification_methods %{
-    "notifications/initialized" => :initialized,
-    "notifications/cancelled" => :cancelled
-  }
+  @doc false
+  @spec to_map(reply(), map()) :: map() | :ok
+  def to_map({:reply, response}, _request), do: response
+  def to_map(:noreply, _request), do: :ok
+  def to_map({:stream, spec}, _request), do: StreamSpec.run(spec)
 
   @doc """
-  Every method this handler routes, mapped to its internal name.
+  Every method this handler routes, in either era, mapped to its internal
+  name.
 
   Published as `ConduitMcp.Protocol.methods/0`.
   """
   @spec methods() :: %{optional(String.t()) => atom()}
-  def methods, do: Map.merge(@request_methods, @notification_methods)
-
-  defp do_handle_method(method, id, params, server_module, conn) do
-    case Map.get(@request_methods, method) do
-      nil ->
-        Protocol.error_response(
-          id,
-          Protocol.method_not_found(),
-          "Method not found: #{ConduitMcp.Reflect.text(method)}"
-        )
-
-      route ->
-        route(route, id, params, server_module, conn)
-    end
-  rescue
-    error ->
-      Logger.error("Error handling method",
-        error: Exception.message(error),
-        method: ConduitMcp.Reflect.text(method),
-        request_id: id
-      )
-
-      Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
-  end
-
-  defp route(:initialize, id, params, server_module, conn),
-    do: handle_initialize(id, params, server_module, conn)
-
-  defp route(:ping, id, _params, _server_module, _conn),
-    do: Protocol.success_response(id, %{})
-
-  defp route(:list_tools, id, params, server_module, conn),
-    do: dispatch_list(id, server_module, :handle_list_tools, conn, params)
-
-  defp route(:call_tool, id, params, server_module, conn),
-    do: handle_tool_call(id, params, server_module, conn)
-
-  defp route(:list_resources, id, params, server_module, conn),
-    do: dispatch_list(id, server_module, :handle_list_resources, conn, params)
-
-  defp route(:list_resource_templates, id, _params, server_module, conn),
-    do: handle_list_resource_templates(id, server_module, conn)
-
-  defp route(:read_resource, id, params, server_module, conn),
-    do: handle_resource_read(id, params, server_module, conn)
-
-  defp route(:subscribe_resource, id, params, server_module, conn),
-    do: handle_subscribe(id, params, server_module, conn)
-
-  defp route(:unsubscribe_resource, id, params, server_module, conn),
-    do: handle_unsubscribe(id, params, server_module, conn)
-
-  defp route(:list_prompts, id, params, server_module, conn),
-    do: dispatch_list(id, server_module, :handle_list_prompts, conn, params)
-
-  defp route(:get_prompt, id, params, server_module, conn),
-    do: handle_prompt_get(id, params, server_module, conn)
-
-  defp route(:complete, id, params, server_module, conn),
-    do: handle_completion(id, params, server_module, conn)
-
-  defp route(:set_log_level, id, params, server_module, conn),
-    do: handle_logging(id, params, server_module, conn)
-
-  defp route(:get_task, id, params, _server_module, conn),
-    do: handle_tasks_get(id, params, conn)
-
-  defp route(:cancel_task, id, params, _server_module, conn),
-    do: handle_tasks_cancel(id, params, conn)
-
-  defp route(:task_result, id, params, _server_module, conn),
-    do: handle_tasks_result(id, params, conn)
-
-  defp route(:list_tasks, id, params, _server_module, conn),
-    do: handle_tasks_list(id, params, conn)
-
-  defp handle_notification(notification, _server_module, conn) do
-    method = Map.get(notification, "method")
-    Logger.debug("Handling notification", method: ConduitMcp.Reflect.text(method))
-
-    # Routed off `@notification_methods` for the same reason requests are
-    # routed off `@request_methods`: a hand-written `case` over string literals
-    # is a second copy of the table, and adding an entry to the table without
-    # touching the copy makes `Protocol.methods/0` advertise a method this
-    # function logs as unknown and drops.
-    case Map.get(@notification_methods, method) do
-      :initialized ->
-        Logger.info("Client initialized")
-        :ok
-
-      :cancelled ->
-        handle_cancelled(notification, conn)
-
-      nil ->
-        Logger.warning("Unknown notification", method: ConduitMcp.Reflect.text(method))
-        :ok
-    end
-  end
-
-  # A notification carries no id, so a malformed one is answered with a
-  # JSON-RPC error whose id is null. Returning :ok here turned a client mistake
-  # into a 500: this path is outside do_handle_method/5's rescue, so a
-  # non-map `params` (`Map.get/2` raises BadMapError) or a non-scalar
-  # requestId (the interpolation raised) escaped handle_request/3 entirely.
-  # A missing `params` is a well-formed notification with no requestId, which
-  # is ignored.
-  defp handle_cancelled(notification, conn) do
-    case Map.get(notification, "params", %{}) do
-      %{} = params ->
-        cancel_request(params, conn)
-
-      _ ->
-        Protocol.error_response(
-          nil,
-          Protocol.invalid_params(),
-          "notifications/cancelled requires a params object"
-        )
-    end
-  end
-
-  # Validation first, so a malformed id is reported whether or not anything
-  # is in flight; then the in-flight gate, so a cancel naming no running
-  # request writes no row. MCP lets a receiver ignore such a cancel, and
-  # recording it let an unauthenticated client fill its quota with ids that
-  # name nothing.
-  defp cancel_request(params, conn) do
-    request_id = Map.get(params, "requestId")
-    scope = Cancellation.scope(conn)
-
-    cond do
-      is_nil(request_id) ->
-        :ok
-
-      not Cancellation.valid_request_id?(request_id) ->
-        invalid_request_id_error()
-
-      Cancellation.in_flight?(request_id, scope) ->
-        request_id
-        |> Cancellation.cancel(Map.get(params, "reason"), scope)
-        |> cancel_result()
-
-      true ->
-        :ok
-    end
-  end
-
-  defp cancel_result(:ok), do: :ok
-  defp cancel_result({:error, :invalid_request_id}), do: invalid_request_id_error()
-
-  defp cancel_result({:error, :cancellation_limit_reached}) do
-    Logger.warning("cancellation quota reached for caller; dropping notifications/cancelled")
-
-    # -32000, not -32603: a per-caller quota is a server-defined refusal,
-    # not a fault in the server.
-    Protocol.error_response(
-      nil,
-      Protocol.server_error(),
-      "Too many outstanding cancellations; try again shortly."
-    )
-  end
-
-  defp invalid_request_id_error do
-    Protocol.error_response(
-      nil,
-      Protocol.invalid_params(),
-      "notifications/cancelled requires a string or integer requestId " <>
-        "(strings at most 256 bytes)"
-    )
-  end
-
-  defp handle_initialize(id, params, server_module, conn) do
-    case Map.get(params, "protocolVersion") do
-      version when is_binary(version) ->
-        negotiate_and_initialize(id, version, params, server_module, conn)
-
-      other ->
-        # `protocolVersion: {}` used to make the interpolation below raise, and
-        # the surrounding rescue turned a client mistake into a misleading
-        # "Internal server error".
-        Protocol.error_response(
-          id,
-          Protocol.invalid_params(),
-          "protocolVersion must be a string, got: #{ConduitMcp.Reflect.text(other, 40)}"
-        )
-    end
-  end
-
-  defp negotiate_and_initialize(id, client_version, params, server_module, conn) do
-    client_info = Map.get(params, "clientInfo", %{})
-
-    Logger.info("Initializing connection with client", client_info: client_info)
-
-    # Clamped and control-character-stripped: a 1 MB protocolVersion sits well
-    # inside the transports' body limit and used to be reflected in full into
-    # both the error message and the log line.
-    safe_version = ConduitMcp.Reflect.text(client_version, 40)
-
-    Logger.debug("Protocol version", version: safe_version)
-
-    negotiated_version = Protocol.negotiate_version(client_version)
-
-    if is_nil(negotiated_version) do
-      Logger.warning(
-        "Client requested unsupported protocol version: #{safe_version}. " <>
-          "Supported: #{inspect(Protocol.supported_versions())}"
-      )
-
-      Protocol.error_response(
-        id,
-        Protocol.invalid_request(),
-        "Unsupported protocol version: #{safe_version}. " <>
-          "Supported versions: #{Enum.join(Protocol.supported_versions(), ", ")}"
-      )
-    else
-      server_name =
-        Map.get(conn.private, :server_name) || "conduit-mcp"
-
-      server_version =
-        Map.get(conn.private, :server_version) ||
-          Application.spec(:conduit_mcp, :vsn) |> to_string()
-
-      capabilities = build_capabilities(server_module)
-
-      result = %{
-        "protocolVersion" => negotiated_version,
-        "serverInfo" => %{
-          "name" => server_name,
-          "version" => server_version
-        },
-        "capabilities" => capabilities
-      }
-
-      Protocol.success_response(id, result)
-    end
-  end
-
-  defp dispatch_list(id, server_module, callback_name, conn, params) do
-    dispatch_callback(
-      id,
-      fn -> call_list_callback(server_module, callback_name, conn, params) end,
-      Atom.to_string(callback_name)
-    )
-  end
-
-  defp handle_tool_call(id, params, server_module, conn) do
-    tool_name = Map.get(params, "name")
-    tool_params = Map.get(params, "arguments", %{})
-    start_time = System.monotonic_time()
-
-    result =
-      with :ok <- check_tool_scope(conn, server_module, tool_name),
-           {:ok, validated_params} <-
-             ConduitMcp.Validation.validate_tool_params(server_module, tool_name, tool_params) do
-        dispatch_callback(
-          id,
-          fn -> server_module.handle_call_tool(conn, tool_name, validated_params) end,
-          "handle_call_tool"
-        )
-        |> maybe_add_meta(params)
-      else
-        {:error, :tool_not_found} ->
-          unknown_target_error(id, "tool", tool_name)
-
-        {:error, :insufficient_scope, required_scope} ->
-          insufficient_scope_error(id, required_scope)
-
-        {:error, validation_errors} ->
-          Protocol.error_response(
-            id,
-            ConduitMcp.Errors.invalid_params(),
-            "Parameter validation failed",
-            %{"errors" => ConduitMcp.Validation.format_validation_errors(validation_errors)}
-          )
-      end
-
-    duration = System.monotonic_time() - start_time
-
-    :telemetry.execute(
-      [:conduit_mcp, :tool, :execute],
-      %{duration: duration},
-      %{
-        tool_name: telemetry_text(tool_name),
-        server_module: server_module,
-        status: if(match?(%{"error" => _}, result), do: :error, else: :ok)
-      }
-    )
-
-    result
-  end
-
-  defp handle_resource_read(id, params, server_module, conn) do
-    uri = Map.get(params, "uri")
-    start_time = System.monotonic_time()
-
-    result =
-      case authorize_resource(conn, server_module, uri) do
-        :ok ->
-          dispatch_callback(
-            id,
-            fn -> server_module.handle_read_resource(conn, uri) end,
-            "handle_read_resource"
-          )
-          |> ensure_resource_uri(uri)
-
-        {:error, :insufficient_scope, required} ->
-          insufficient_scope_error(id, required)
-
-        {:error, :invalid_uri} ->
-          invalid_uri_error(id, uri)
-      end
-
-    duration = System.monotonic_time() - start_time
-
-    :telemetry.execute(
-      [:conduit_mcp, :resource, :read],
-      %{duration: duration},
-      %{
-        uri: telemetry_text(uri),
-        server_module: server_module,
-        status: if(Map.has_key?(result, "error"), do: :error, else: :ok)
-      }
-    )
-
-    result
-  end
-
-  defp handle_prompt_get(id, params, server_module, conn) do
-    prompt_name = Map.get(params, "name")
-    prompt_args = Map.get(params, "arguments", %{})
-    start_time = System.monotonic_time()
-
-    result =
-      with :ok <-
-             verify_scope(conn, required_scope(server_module, :scope_for_prompt, prompt_name)),
-           {:ok, validated_args} <-
-             ConduitMcp.Validation.validate_prompt_args(server_module, prompt_name, prompt_args) do
-        dispatch_callback(
-          id,
-          fn -> server_module.handle_get_prompt(conn, prompt_name, validated_args) end,
-          "handle_get_prompt"
-        )
-      else
-        {:error, :prompt_not_found} ->
-          unknown_target_error(id, "prompt", prompt_name)
-
-        {:error, :insufficient_scope, required} ->
-          insufficient_scope_error(id, required)
-
-        {:error, validation_errors} ->
-          Protocol.error_response(
-            id,
-            ConduitMcp.Errors.invalid_params(),
-            "Argument validation failed",
-            %{"errors" => ConduitMcp.Validation.format_validation_errors(validation_errors)}
-          )
-      end
-
-    duration = System.monotonic_time() - start_time
-
-    :telemetry.execute(
-      [:conduit_mcp, :prompt, :get],
-      %{duration: duration},
-      %{
-        prompt_name: telemetry_text(prompt_name),
-        server_module: server_module,
-        status: if(Map.has_key?(result, "error"), do: :error, else: :ok)
-      }
-    )
-
-    result
-  end
-
-  # Telemetry metadata documents these fields as `String.t() | nil`. They come
-  # from the client's JSON body, so a map, list or number is possible once the
-  # request is past the checks that used to raise on it (resources/read with
-  # `"uri": {}` now returns -32602 and still emits). Passing it through would
-  # break every handler written against the documented type - including
-  # `ConduitMcp.Telemetry`'s default logger, which `:telemetry` then detaches.
-  defp telemetry_text(value) when is_binary(value), do: value
-  defp telemetry_text(_value), do: nil
-
-  # One source of "you asked for something that doesn't exist" for tools and
-  # prompts, so the three authoring modes cannot disagree. `-32602` is what the
-  # MCP specification prescribes ("Unknown tool: invalid_tool_name"); the name
-  # is echoed through `ConduitMcp.Reflect` because it is client input.
-  defp unknown_target_error(id, kind, name) do
-    Protocol.error_response(
-      id,
-      ConduitMcp.Errors.invalid_params(),
-      "Unknown #{kind}: #{ConduitMcp.Reflect.text(name)}"
-    )
-  end
-
-  # Every scoped surface — tools, resources and prompts — is authorized the
-  # same way: look up the declared scope, then check it against the principal's
-  # granted scopes. An unauthenticated request has no scopes, so a scoped
-  # surface fails closed.
-  defp check_tool_scope(conn, server_module, tool_name) do
-    verify_scope(conn, required_scope(server_module, :scope_for_tool, tool_name))
-  end
-
-  defp required_scope(server_module, capability, key) do
-    if ServerMeta.has?(server_module, capability) do
-      apply_scope_lookup(server_module, capability, key)
-    else
-      nil
-    end
-  end
-
-  defp apply_scope_lookup(server_module, :scope_for_tool, key),
-    do: server_module.__scope_for_tool__(key)
-
-  defp apply_scope_lookup(server_module, :scope_for_prompt, key),
-    do: server_module.__scope_for_prompt__(key)
-
-  defp apply_scope_lookup(server_module, :scope_for_resource, key),
-    do: server_module.__scope_for_resource__(key)
-
-  defp insufficient_scope_error(id, required_scope) do
-    Protocol.error_response(
-      id,
-      ConduitMcp.Errors.server_error(),
-      "Insufficient scope. Required: #{required_scope}"
-    )
-  end
-
-  # `uri` is client input, and a templated resource's scope lookup matches it
-  # with `Regex.run/2`, which raises for a non-binary. Gating on the type
-  # first keeps a client mistake a -32602 rather than the request-path
-  # rescue's -32603 and its error log. Used by every route that authorizes a
-  # resource by uri: resources/read, subscribe and unsubscribe.
-  defp authorize_resource(conn, server_module, uri) when is_binary(uri),
-    do: verify_scope(conn, required_scope(server_module, :scope_for_resource, uri))
-
-  defp authorize_resource(_conn, _server_module, _uri), do: {:error, :invalid_uri}
-
-  defp invalid_uri_error(id, nil),
-    do: Protocol.error_response(id, Protocol.invalid_params(), "Missing uri")
-
-  defp invalid_uri_error(id, uri) do
-    Protocol.error_response(
-      id,
-      Protocol.invalid_params(),
-      "uri must be a string, got: #{ConduitMcp.Reflect.text(uri, 40)}"
-    )
-  end
-
-  defp verify_scope(_conn, nil), do: :ok
-
-  defp verify_scope(conn, required_scope) do
-    token_scopes = ConduitMcp.Principal.scopes(conn)
-    required = String.split(required_scope, " ", trim: true)
-
-    if Enum.all?(required, &(&1 in token_scopes)) do
-      :ok
-    else
-      {:error, :insufficient_scope, required_scope}
-    end
-  end
-
-  defp handle_list_resource_templates(id, server_module, conn) do
-    if ServerMeta.has?(server_module, :list_resource_templates) do
-      dispatch_callback(
-        id,
-        fn -> server_module.handle_list_resource_templates(conn) end,
-        "handle_list_resource_templates"
-      )
-    else
-      Protocol.success_response(id, %{"resourceTemplates" => []})
-    end
-  end
-
-  defp handle_completion(id, params, server_module, conn) do
-    ref = Map.get(params, "ref", %{})
-    argument = Map.get(params, "argument", %{})
-
-    with :ok <- validate_completion_ref(ref),
-         :ok <- verify_scope(conn, completion_scope(server_module, ref)) do
-      if ServerMeta.has?(server_module, :complete) do
-        dispatch_callback(
-          id,
-          fn -> server_module.handle_complete(conn, ref, argument) end,
-          "handle_complete"
-        )
-      else
-        Protocol.success_response(id, %{
-          "completion" => %{"values" => [], "total" => 0, "hasMore" => false}
-        })
-      end
-    else
-      {:error, :insufficient_scope, required} ->
-        insufficient_scope_error(id, required)
-
-      {:error, message} ->
-        Protocol.error_response(id, ConduitMcp.Errors.invalid_params(), message)
-    end
-  end
-
-  # Completions are declared inside the same `resource`/`prompt` block as
-  # `scope`, so enumerating them is reading part of that surface. Without this,
-  # a caller lacking `vault:read` could still enumerate a scoped resource's
-  # argument values.
-  defp completion_scope(server_module, %{"type" => "ref/resource", "uri" => uri}),
-    do: required_scope(server_module, :scope_for_resource, uri)
-
-  defp completion_scope(server_module, %{"type" => "ref/prompt", "name" => name}),
-    do: required_scope(server_module, :scope_for_prompt, name)
-
-  defp completion_scope(_server_module, _ref), do: nil
-
-  defp validate_completion_ref(%{"type" => "ref/prompt", "name" => name}) when is_binary(name),
-    do: :ok
-
-  defp validate_completion_ref(%{"type" => "ref/resource", "uri" => uri}) when is_binary(uri),
-    do: :ok
-
-  # `ref/resource`'s uri is gated for the same reason `authorize_resource/3`
-  # gates it: `completion_scope/2` hands it to the templated scope lookup.
-  defp validate_completion_ref(%{"type" => type} = ref)
-       when type in ["ref/prompt", "ref/resource"] do
-    field = ref_required_field(type)
-
-    case Map.fetch(ref, field) do
-      {:ok, value} ->
-        {:error,
-         "Invalid completion ref: #{field} must be a string, got: " <>
-           ConduitMcp.Reflect.text(value, 40)}
-
-      :error ->
-        {:error, "Invalid completion ref: missing #{field}"}
-    end
-  end
-
-  defp validate_completion_ref(%{"type" => type}) do
-    {:error,
-     ~s(Invalid completion ref type "#{ConduitMcp.Reflect.text(type, 40)}"; ) <>
-       ~s(expected "ref/prompt" or "ref/resource")}
-  end
-
-  defp validate_completion_ref(_),
-    do: {:error, "Invalid completion ref: missing type"}
-
-  defp ref_required_field("ref/prompt"), do: "name"
-  defp ref_required_field("ref/resource"), do: "uri"
-
-  defp handle_logging(id, params, server_module, conn) do
-    level = Map.get(params, "level")
-
-    if ServerMeta.has?(server_module, :set_log_level) do
-      dispatch_callback(
-        id,
-        fn -> server_module.handle_set_log_level(conn, level) end,
-        "handle_set_log_level"
-      )
-    else
-      Protocol.success_response(id, %{})
-    end
-  end
-
-  defp handle_subscribe(id, params, server_module, conn) do
-    subscription(id, params, server_module, conn, :subscribe)
-  end
-
-  defp handle_unsubscribe(id, params, server_module, conn) do
-    subscription(id, params, server_module, conn, :unsubscribe)
-  end
-
-  # Subscribing to a resource delivers its change notifications, so it is
-  # gated on the same scope as reading it. Without this, a caller lacking
-  # `vault:read` could subscribe to a scoped `vault://` resource.
-  defp subscription(id, params, server_module, conn, kind) do
-    uri = Map.get(params, "uri")
-
-    case authorize_resource(conn, server_module, uri) do
-      :ok ->
-        dispatch_subscription(id, server_module, conn, kind, uri)
-
-      {:error, :insufficient_scope, required} ->
-        insufficient_scope_error(id, required)
-
-      {:error, :invalid_uri} ->
-        invalid_uri_error(id, uri)
-    end
-  end
-
-  defp dispatch_subscription(id, server_module, conn, :subscribe, uri) do
-    if ServerMeta.has?(server_module, :subscribe) do
-      dispatch_callback(
-        id,
-        fn -> server_module.handle_subscribe_resource(conn, uri) end,
-        "handle_subscribe_resource"
-      )
-    else
-      Protocol.error_response(
-        id,
-        Protocol.method_not_found(),
-        "Resource subscriptions not supported"
-      )
-    end
-  end
-
-  defp dispatch_subscription(id, server_module, conn, :unsubscribe, uri) do
-    if ServerMeta.has?(server_module, :unsubscribe) do
-      dispatch_callback(
-        id,
-        fn -> server_module.handle_unsubscribe_resource(conn, uri) end,
-        "handle_unsubscribe_resource"
-      )
-    else
-      Protocol.error_response(
-        id,
-        Protocol.method_not_found(),
-        "Resource subscriptions not supported"
-      )
-    end
-  end
-
-  # The `tasks/*` routes are owner-scoped: the caller's principal is extracted
-  # from `conn` (via `ConduitMcp.Tasks.owner/1`) and passed to the owner-aware
-  # facade arities so a client can't read or cancel another principal's task.
-  # When there is no principal (unauthenticated, or the 2-arg
-  # `handle_request/2` path) the owner is `nil`. `nil` = no principal: sees
-  # only unowned tasks; nothing under `:tasks_require_owner` (see
-  # `ConduitMcp.Tasks.get/2`).
-  defp handle_tasks_get(id, params, conn) do
-    case Map.get(params, "taskId") do
-      nil ->
-        Protocol.error_response(id, Protocol.invalid_params(), "Missing taskId")
-
-      task_id ->
-        case ConduitMcp.Tasks.get(task_id, ConduitMcp.Tasks.owner(conn)) do
-          {:ok, task} -> Protocol.success_response(id, %{"task" => task})
-          {:error, :not_found} -> task_not_found(id, task_id)
-        end
-    end
-  end
-
-  defp handle_tasks_cancel(id, params, conn) do
-    case Map.get(params, "taskId") do
-      nil ->
-        Protocol.error_response(id, Protocol.invalid_params(), "Missing taskId")
-
-      task_id ->
-        case ConduitMcp.Tasks.cancel(task_id, ConduitMcp.Tasks.owner(conn)) do
-          {:ok, task} -> Protocol.success_response(id, %{"task" => task})
-          {:error, :not_found} -> task_not_found(id, task_id)
-        end
-    end
-  end
-
-  defp handle_tasks_result(id, params, conn) do
-    case Map.get(params, "taskId") do
-      nil ->
-        Protocol.error_response(id, Protocol.invalid_params(), "Missing taskId")
-
-      task_id ->
-        case ConduitMcp.Tasks.get(task_id, ConduitMcp.Tasks.owner(conn)) do
-          {:ok, task} ->
-            case Map.get(task, "status") do
-              "completed" ->
-                Protocol.success_response(id, Map.get(task, "result", %{}))
-
-              "failed" ->
-                Protocol.success_response(id, %{"error" => Map.get(task, "error")})
-
-              other ->
-                Protocol.error_response(
-                  id,
-                  ConduitMcp.Errors.task_not_ready(),
-                  "Task not finished (status: #{other})"
-                )
-            end
-
-          {:error, :not_found} ->
-            task_not_found(id, task_id)
-        end
-    end
-  end
-
-  # `tasks/list` used to serialize the whole table into one response with no
-  # client-visible bound at all. The client may now ask for a limit; the
-  # server clamps it either way.
-  @default_tasks_list_limit 100
-
-  defp handle_tasks_list(id, params, conn) do
-    case tasks_list_opts(params) do
-      {:ok, opts} ->
-        tasks = ConduitMcp.Tasks.list(opts, ConduitMcp.Tasks.owner(conn))
-        Protocol.success_response(id, %{"tasks" => tasks})
-
-      {:error, message} ->
-        Protocol.error_response(id, Protocol.invalid_params(), message)
-    end
-  end
-
-  defp tasks_list_opts(params) do
-    with {:ok, status} <- tasks_list_status(Map.get(params, "status")) do
-      opts = [limit: tasks_list_limit(Map.get(params, "limit"))]
-      {:ok, if(status, do: [{:status, status} | opts], else: opts)}
-    end
-  end
-
-  defp tasks_list_status(nil), do: {:ok, nil}
-  defp tasks_list_status(status) when is_binary(status), do: {:ok, status}
-  defp tasks_list_status(_status), do: {:error, "status must be a string"}
-
-  defp tasks_list_limit(limit) when is_integer(limit) and limit > 0 do
-    min(limit, max_tasks_list_limit())
-  end
-
-  defp tasks_list_limit(_limit), do: max_tasks_list_limit()
-
-  defp max_tasks_list_limit do
-    Application.get_env(:conduit_mcp, :tasks_list_max_limit, @default_tasks_list_limit)
-  end
-
-  defp task_not_found(id, task_id) do
-    Protocol.error_response(
-      id,
-      ConduitMcp.Errors.resource_not_found(),
-      "Task not found: #{ConduitMcp.Reflect.text(task_id)}"
-    )
-  end
-
-  defp dispatch_callback(id, callback_fn, callback_name) do
-    case callback_fn.() do
-      {:ok, result} when is_map(result) ->
-        Protocol.success_response(id, result)
-
-      {:error, error} ->
-        Protocol.error_response(
-          id,
-          error["code"] || ConduitMcp.Errors.server_error(),
-          error["message"] || "#{callback_name} failed"
-        )
-
-      other ->
-        Logger.error("Unexpected result from #{callback_name}: #{inspect(other)}")
-        Protocol.error_response(id, Protocol.internal_error(), "Internal server error")
-    end
-  end
-
-  # Adds the request's _meta to the response result when present.
-  #
-  # Only success responses carry a "result" key. Error responses
-  # (%{"error" => ...}) have no "result", so we must not try to write into
-  # ["result", "_meta"] there — doing so raises "could not put/update key on a
-  # nil value", which the caller would mask as a generic "Internal server
-  # error". Clients commonly send a _meta (e.g. a progressToken) on every
-  # tools/call, so this path is hit whenever a tool returns an error.
-  defp maybe_add_meta(response, params) do
-    case Map.get(params, "_meta") do
-      meta when is_map(meta) and is_map_key(response, "result") ->
-        put_in(response, ["result", "_meta"], meta)
-
-      _ ->
-        response
-    end
-  end
-
-  # Calls a list callback, preferring the arity-2 variant (with params for pagination).
-  # Falls back to arity-1 if arity-2 is not implemented.
-  defp call_list_callback(server_module, callback_name, conn, params) do
-    meta_key =
-      case callback_name do
-        :handle_list_tools -> :list_tools_2
-        :handle_list_resources -> :list_resources_2
-        :handle_list_prompts -> :list_prompts_2
-      end
-
-    if ServerMeta.has?(server_module, meta_key) do
-      apply(server_module, callback_name, [conn, params])
-    else
-      apply(server_module, callback_name, [conn])
-    end
-  end
-
-  # Ensures each item in a resource read response includes the "uri" field.
-  # The MCP spec requires "uri" in every content item but resource handlers
-  # often omit it since they don't know the request URI.
-  defp ensure_resource_uri(%{"result" => %{"contents" => contents}} = response, uri)
-       when is_list(contents) do
-    updated =
-      Enum.map(contents, fn item ->
-        Map.put_new(item, "uri", uri)
-      end)
-
-    put_in(response, ["result", "contents"], updated)
-  end
-
-  defp ensure_resource_uri(response, _uri), do: response
-
-  defp build_capabilities(server_module) do
-    base =
-      if ServerMeta.has?(server_module, :capabilities) do
-        server_module.__capabilities__()
-      else
-        %{
-          "tools" => %{"listChanged" => false},
-          "resources" => %{"listChanged" => false},
-          "prompts" => %{"listChanged" => false}
-        }
-      end
-
-    base
-    |> maybe_put_subscribe(server_module)
-    |> maybe_put_completions(server_module)
-    |> maybe_put_logging(server_module)
-  end
-
-  defp maybe_put_subscribe(caps, server_module) do
-    if ServerMeta.has?(server_module, :subscribe) and Map.has_key?(caps, "resources") do
-      Map.update!(caps, "resources", &Map.put(&1, "subscribe", true))
-    else
-      caps
-    end
-  end
-
-  defp maybe_put_completions(caps, server_module) do
-    if ServerMeta.has?(server_module, :complete) do
-      Map.put(caps, "completions", %{})
-    else
-      caps
-    end
-  end
-
-  defp maybe_put_logging(caps, server_module) do
-    if ServerMeta.has?(server_module, :set_log_level) do
-      Map.put(caps, "logging", %{})
-    else
-      caps
-    end
-  end
+  def methods, do: Map.merge(Legacy.methods(), Modern.methods())
+
+  @doc """
+  The methods one era routes (`:legacy` includes its notifications).
+  """
+  @spec methods(Ctx.era()) :: %{optional(String.t()) => atom()}
+  def methods(:legacy), do: Legacy.methods()
+  def methods(:modern), do: Modern.methods()
 end

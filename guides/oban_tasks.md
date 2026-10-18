@@ -1,10 +1,157 @@
 # Using Oban for MCP Tasks
 
-[Oban](https://hexdocs.pm/oban) is a natural fit for MCP's Tasks protocol. Oban job states
-map directly to MCP task statuses, PostgreSQL persistence works across nodes, and
-Oban Pro workflows enable chained task execution.
+[Oban](https://hexdocs.pm/oban) is a natural fit for MCP tasks. Job states map onto task
+statuses, PostgreSQL persistence works across nodes, and Oban Pro workflows enable chained
+task execution.
 
-ConduitMCP makes the storage layer pluggable via the
+ConduitMCP has two task implementations, one per protocol era:
+
+| Era | Module | Status |
+|---|---|---|
+| Modern (`2026-07-28`) | `ConduitMcp.Ext.Tasks`, the `io.modelcontextprotocol/tasks` extension | experimental |
+| Legacy (`2025-11-25`) | `ConduitMcp.Tasks` | frozen: no new features; goes away with the legacy era |
+
+New code should target the [modern path](#modern-era-the-tasks-extension). The
+[legacy section](#legacy-era-conduitmcp-tasks-frozen) documents the frozen store for servers
+that still serve `2025-11-25` clients. A server serving both eras keeps both.
+
+> **Runnable examples**
+>
+> - SQLite (single-node, dependency-light, both eras): [`examples/oban_tasks_server/`](https://github.com/nyo16/conduit_mcp/tree/master/examples/oban_tasks_server) — full mix project; `cd` in and `iex -S mix`. `Examples.ObanTasks.ExtStore` is a modern `ConduitMcp.Ext.Tasks.Store`.
+> - Postgres (multi-node, production shape, legacy store): [`examples/oban_task_store.ex`](https://github.com/nyo16/conduit_mcp/blob/master/examples/oban_task_store.ex) — drop-in reference.
+
+## Modern era: the tasks extension
+
+Enable the extension and, for durability across nodes, point it at your own
+`ConduitMcp.Ext.Tasks.Store` (see [Tasks Extension](tasks_extension.md#storage)):
+
+```elixir
+config :conduit_mcp, :ext_tasks, store: MyApp.ExtTaskStore
+```
+
+### The tool
+
+The tool returns `{:task, attrs}`. The library stores the task first, then calls `:start`
+with its id; enqueue the job there. The job can never see a missing task.
+
+```elixir
+tool "analyze_dataset", "Run a long-running analysis" do
+  param :dataset_id, :string, "Dataset ID", required: true
+
+  handle fn _conn, %{"dataset_id" => dataset_id} ->
+    {:task,
+     ttl_ms: :timer.hours(1),
+     poll_interval_ms: 2_000,
+     status_message: "Queued",
+     start: fn task_id ->
+       {:ok, _job} =
+         %{"task_id" => task_id, "dataset_id" => dataset_id}
+         |> MyApp.AnalysisWorker.new()
+         |> Oban.insert()
+     end}
+  end
+end
+```
+
+The client must declare `io.modelcontextprotocol/tasks` in the request's client capabilities,
+otherwise it gets `-32021`. It then polls `tasks/get`, sending `Mcp-Name: <taskId>`, or
+listens for changes (see [Status notifications](#status-notifications)).
+
+### The worker
+
+The worker reports through `ConduitMcp.Ext.Tasks`, addressing the task by id:
+
+```elixir
+defmodule MyApp.AnalysisWorker do
+  use Oban.Worker, queue: :mcp_tasks, max_attempts: 3, unique: [period: 300, keys: [:task_id]]
+
+  alias ConduitMcp.Ext.Tasks
+
+  @impl Oban.Worker
+  def perform(%Oban.Job{args: %{"task_id" => id, "dataset_id" => dataset_id}}) do
+    case Tasks.status(id) do
+      {:ok, %{status: "cancelled"}} ->
+        {:cancel, "cancelled by client"}
+
+      {:ok, %{status: "working"}} ->
+        :ok = Tasks.progress(id, "Analyzing #{dataset_id}")
+        report = MyApp.Analysis.run(dataset_id)
+        _ = Tasks.complete(id, %{"content" => [%{"type" => "text", "text" => report}]})
+        :ok
+
+      {:ok, %{status: "input_required"}} ->
+        {:snooze, 5}
+
+      _terminal_or_expired ->
+        {:cancel, "task gone"}
+    end
+  end
+end
+```
+
+| Task status | Worker side |
+|---|---|
+| `working` | the job runs; `Tasks.progress/2` updates the status message |
+| `input_required` | `Tasks.require_input/3`, then `{:snooze, seconds}` until the client's `tasks/update` answers |
+| `completed` | `Tasks.complete/2` with the `CallToolResult` |
+| `failed` | `Tasks.fail/2` with a JSON-RPC error, e.g. from an `[:oban, :job, :exception]` handler on the final attempt |
+| `cancelled` | the client's `tasks/cancel`; check `Tasks.cancelled?/1` and return `{:cancel, _}` |
+
+Terminal states are final: after `cancelled`, a late `complete/2` returns
+`{:error, :terminal}` instead of overwriting it. Answers to `require_input/3` arrive in
+`Tasks.status/1`'s `input_responses` once every outstanding key is answered. Each key is
+single-use over the task's life.
+
+### Status notifications
+
+Instead of polling, a modern client can name its tasks in the `taskIds` filter of
+`subscriptions/listen` and receive `notifications/tasks` (the full task state) on every
+change. The default notifier, `ConduitMcp.Ext.Tasks.ListenNotifier`, delivers them only to
+streams whose principal owns the task.
+
+To also wake a snoozed job when the client answers, configure your own notifier and keep
+listen delivery by calling the default from it:
+
+```elixir
+config :conduit_mcp, :ext_tasks, store: MyApp.ExtTaskStore, notifier: MyApp.TaskNotifier
+
+defmodule MyApp.TaskNotifier do
+  @behaviour ConduitMcp.Ext.Tasks.Notifier
+
+  @impl true
+  def task_changed(task) do
+    ConduitMcp.Ext.Tasks.ListenNotifier.task_changed(task)
+    if task.status == "working", do: MyApp.Jobs.wake(task.task_id)
+  end
+end
+```
+
+`task_changed/1` runs in the process that made the change, and an exception in it is logged
+and swallowed. Delivery is node-local; see [Subscriptions](subscriptions.md#multi-node) for
+fan-out across a cluster. `notifier: nil` turns notifications off.
+
+### The store
+
+An Oban-backed `ConduitMcp.Ext.Tasks.Store` keeps the task record next to its job:
+
+- **Owner checks.** `get/2`, `update/3` and `cancel/2` must answer `{:error, :not_found}` for
+  another owner, exactly as for a missing id.
+- **Atomicity.** Every read-modify-write must be atomic (a version column with
+  compare-and-swap, `SELECT … FOR UPDATE`, a transaction). Otherwise a client's
+  `tasks/update` can overwrite the worker's `completed`.
+- **No `list`.** There is no `tasks/list`; task ids are bearer tokens.
+
+`Examples.ObanTasks.ExtStore` in `examples/oban_tasks_server/` implements this over SQLite
+with a version column.
+
+## Legacy era: `ConduitMcp.Tasks` (frozen)
+
+> #### Frozen {: .info}
+>
+> This store serves `2025-11-25` clients only. It is frozen: no new features, and it goes
+> away with the legacy era.
+
+`ConduitMcp.Tasks` makes the storage layer pluggable via the
 `ConduitMcp.Tasks.Store` behaviour — flip the framework from its
 default in-memory ETS store to an Oban-backed store with one config line:
 
@@ -12,16 +159,11 @@ default in-memory ETS store to an Oban-backed store with one config line:
 config :conduit_mcp, :tasks_store, MyApp.ObanTaskStore
 ```
 
-The standard `tasks/get`, `tasks/cancel`, `tasks/result`, and
+The legacy `tasks/get`, `tasks/cancel`, `tasks/result`, and
 `tasks/list` JSON-RPC routes dispatch through the configured store
 without any handler changes.
 
-> **Runnable examples**
->
-> - SQLite (single-node, dependency-light): [`examples/oban_tasks_server/`](https://github.com/nyo16/conduit_mcp/tree/master/examples/oban_tasks_server) — full mix project; `cd` in and `iex -S mix`.
-> - Postgres (multi-node, production shape): [`examples/oban_task_store.ex`](https://github.com/nyo16/conduit_mcp/blob/master/examples/oban_task_store.ex) — drop-in reference.
-
-## Status Mapping
+### Status Mapping
 
 | MCP Task Status | Oban Job State |
 |-----------------|----------------|
@@ -31,7 +173,7 @@ without any handler changes.
 | `failed` | `discarded` |
 | `cancelled` | `cancelled` |
 
-## Setup
+### Setup
 
 Add to your deps:
 
@@ -39,7 +181,7 @@ Add to your deps:
 {:oban, "~> 2.18"}
 ```
 
-### Migration
+#### Migration
 
 ```elixir
 defmodule MyApp.Repo.Migrations.CreateMcpTasks do
@@ -62,7 +204,7 @@ defmodule MyApp.Repo.Migrations.CreateMcpTasks do
 end
 ```
 
-### Schema
+#### Schema
 
 ```elixir
 defmodule MyApp.McpTask do
@@ -88,7 +230,7 @@ defmodule MyApp.McpTask do
 end
 ```
 
-### Worker
+#### Worker
 
 ```elixir
 defmodule MyApp.McpTaskWorker do
@@ -148,7 +290,7 @@ defmodule MyApp.McpTaskWorker do
 end
 ```
 
-### Task Store
+#### Task Store
 
 A `ConduitMcp.Tasks.Store` implementation. The framework dispatches every
 `tasks/*` route through this module once configured.
@@ -229,7 +371,7 @@ defmodule MyApp.ObanTaskStore do
 end
 ```
 
-## Usage in MCP Server
+### Usage in MCP Server
 
 Register the store once in config:
 

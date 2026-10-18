@@ -244,7 +244,7 @@ defmodule ConduitMcp.HandlerTest do
 
       assert response["jsonrpc"] == "2.0"
       assert response["id"] == 9
-      assert response["error"]["code"] == ConduitMcp.Errors.resource_not_found()
+      assert response["error"]["code"] == ConduitMcp.Protocol.Legacy.resource_not_found()
       assert response["error"]["message"] == "Resource not found"
     end
 
@@ -593,6 +593,31 @@ defmodule ConduitMcp.HandlerTest do
       assert response["id"] == 101
       assert response["error"]["code"] == Protocol.method_not_found()
       assert String.contains?(response["error"]["message"], "Method not found")
+    end
+
+    # A JSON-RPC response is not a request: answering it with an error
+    # response is a reply to a reply. It is accepted and dropped, like an
+    # unknown notification, so the transport answers 202.
+    test "a JSON-RPC response is accepted without a reply" do
+      assert :ok =
+               Handler.handle_request(
+                 %{"jsonrpc" => "2.0", "id" => 1, "result" => %{}},
+                 TestServer
+               )
+
+      error = %{"code" => -32_601, "message" => "Method not found"}
+
+      assert :ok =
+               Handler.handle_request(
+                 %{"jsonrpc" => "2.0", "id" => 2, "error" => error},
+                 TestServer
+               )
+    end
+
+    test "a message with both result and error is still invalid" do
+      message = %{"jsonrpc" => "2.0", "id" => 3, "result" => %{}, "error" => %{}}
+
+      assert %{"error" => %{"code" => -32_600}} = Handler.handle_request(message, TestServer)
     end
   end
 

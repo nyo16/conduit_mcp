@@ -78,6 +78,9 @@ defmodule ConduitMcp.Component do
     lacking the scope is rejected before `execute/2` runs, and a request with
     no principal fails closed.
   - `:annotations` — Optional keyword list of tool annotations (e.g., `destructive: true`)
+  - `:cache` — Optional modern-era cache hints, `[ttl_ms: non_neg_integer, scope:
+    :private | :public]`; see `ConduitMcp.CacheHints`. `scope: :public` with a
+    `:scope` is a compile error.
 
   ## Generated Functions
 
@@ -98,10 +101,34 @@ defmodule ConduitMcp.Component do
   For resources: receives URI params (atom-keyed) extracted from the template and the Plug.Conn.
   For prompts: receives validated args (atom-keyed) and the Plug.Conn.
 
-  Must return `{:ok, map()}` or `{:error, map()}`.
+  Must return `{:ok, map()}` or `{:error, map()}`. On a modern-era
+  (`2026-07-28`) request it may instead return
+  `{:input_required, input_requests, state}` to ask the client for input;
+  `ConduitMcp.Endpoint` passes it through, and the retry finds the restored
+  state and the answers in `conn.assigns[:mcp_input]`. See "Multi round-trip
+  requests (MRTR)" in `ConduitMcp.Server`:
+
+      @impl true
+      def execute(%{target: target}, conn) do
+        case conn.assigns[:mcp_input] do
+          nil ->
+            {:input_required,
+             %{"approval" => ConduitMcp.MRTR.elicit("Approve deploy?", @approval_schema)},
+             %{target: target}}
+
+          %{responses: %{"approval" => %{"action" => "accept"}}} ->
+            text("Deployed \#{target}")
+
+          _declined ->
+            text("Cancelled")
+        end
+      end
   """
   @callback execute(params :: map(), conn :: Plug.Conn.t()) ::
-              {:ok, map()} | {:error, map()}
+              {:ok, map()}
+              | {:error, map()}
+              | ConduitMcp.Server.input_required()
+              | ConduitMcp.Server.task()
 
   @doc false
   @callback __component_type__() :: :tool | :resource | :prompt
@@ -156,6 +183,7 @@ defmodule ConduitMcp.Component do
 
     # Build schemas from fields at compile time
     json_schema = build_json_schema(type, name, description, fields, opts)
+    validate_headers!(type, name, json_schema, fields, module)
     validation_schema = build_validation_schema(fields)
 
     quote do
@@ -182,6 +210,15 @@ defmodule ConduitMcp.Component do
       def __component_opts__, do: unquote(opts)
     end
   end
+
+  # `header:` is checked once the schema is final, here rather than in
+  # `ConduitMcp.Component.Schema.field/5`: a duplicate name is a property of
+  # the whole schema, which no single field sees.
+  defp validate_headers!(:tool, _name, json_schema, _fields, module),
+    do: ConduitMcp.DSL.__validate_x_mcp_headers__!(module, json_schema)
+
+  defp validate_headers!(type, name, _json_schema, fields, module),
+    do: ConduitMcp.DSL.__reject_headers__!(module, to_string(type), name, fields)
 
   @doc false
   def __derive_name__(module, nil) do
@@ -215,6 +252,7 @@ defmodule ConduitMcp.Component do
     end
 
     validate_scope!(Keyword.get(opts, :scope), module)
+    ConduitMcp.CacheHints.validate!(Keyword.get(opts, :cache), module, Keyword.get(opts, :scope))
   end
 
   # Delegated so the DSL and Component authoring modes cannot disagree about

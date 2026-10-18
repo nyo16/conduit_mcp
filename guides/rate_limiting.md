@@ -91,6 +91,7 @@ message_rate_limit: [
 - User-aware — default key uses the canonical `ConduitMcp.Principal` when an auth plug is in the pipeline
 - Key prefix — keys are prefixed with `"msg:"` to avoid collision with HTTP rate limiter
 - HTTP 429 — returns JSON-RPC error with code `-32000` and `Retry-After` header
+- Era rejections not counted — a modern (`2026-07-28`) request rejected for its `_meta` or its `Mcp-*` headers, and a legacy request with an unsupported `MCP-Protocol-Version` header, are answered (HTTP 400) before this plug runs, so they don't use up the client's allowance. Authentication and the HTTP rate limiter still run first.
 
 ## Per-user Rate Limiting
 
@@ -168,6 +169,31 @@ end
 
 message_rate_limit: [backend: MyApp.RateLimiter, key_func: &MyApp.RateKeys.message/1]
 ```
+
+## Listen streams
+
+A modern `subscriptions/listen` holds a stream open for a long time, so it is capped separately from the Hammer limiters. These caps are always on and need no backend:
+
+| Transport option | Default | Over the limit |
+|---|---|---|
+| `:max_listens_per_principal` | `4` | admitted; the principal's **oldest** stream is ended gracefully (reason `:superseded`) |
+| `:max_streams` | `1_000` | HTTP **503**, JSON-RPC `-32000`, no stream (shared with streamed `tools/call` responses) |
+| `:listen_idle_timeout` | 30 minutes | the server closes the stream |
+| `:max_stream_lifetime` | 1 hour | the server closes the stream (or earlier, at the OAuth token's `exp`) |
+
+```elixir
+{ConduitMcp.Transport.StreamableHTTP,
+ server_module: MyApp.MCPServer,
+ max_listens_per_principal: 2,
+ max_streams: 500}
+```
+
+- The per-principal key is `ConduitMcp.Principal.rate_limit_key/1`: the authenticated id, otherwise the client bucket (see [Anonymous clients](#anonymous-clients)).
+- Over the per-principal cap the new listen wins: the principal's oldest stream is closed gracefully, so the cap is never a 429. 503 means the server as a whole is full.
+- A listen without `text/event-stream` in `Accept` is answered **406** (`-32600`).
+- The listen POST itself goes through the HTTP and message rate limiters like any other request. A refused listen (406, 503) emits no subscription telemetry.
+
+At the `:max_streams` cap, a streamed `tools/call` is not refused: it is answered as plain JSON without its progress or log notifications. See [Subscriptions](subscriptions.md#limits).
 
 ## Configuration in Endpoint Mode
 

@@ -10,7 +10,115 @@ if Code.ensure_loaded?(PromEx) do
         metrics = PromEx.event_metrics(opts)
 
         assert is_list(metrics)
-        assert length(metrics) == 6
+        assert length(metrics) == 12
+      end
+
+      # Tool names, rule ids and notification methods come from the server or
+      # the operator, and client names may be per tenant: none may become a
+      # label.
+      test "client metrics are tagged with closed sets only" do
+        group =
+          Enum.find(
+            PromEx.event_metrics(otp_app: :test_app),
+            &(&1.group_name == :conduit_mcp_client_metrics)
+          )
+
+        closed =
+          [:method, :status, :error_kind, :is_error, :to, :reason, :kind] ++
+            [:target, :decision, :source, :approval, :api]
+
+        for metric <- group.metrics do
+          assert metric.tags -- closed == [], inspect(metric.name)
+        end
+
+        policy =
+          Enum.find(
+            group.metrics,
+            &(&1.event_name == [:conduit_mcp, :client, :policy, :decision])
+          )
+
+        assert policy.tag_values.(%{
+                 target: :tool,
+                 tool_name: "x",
+                 rule_id: "r",
+                 principal: "u",
+                 decision: :ask,
+                 source: :ask,
+                 reason: :ask_rule,
+                 approval: :once
+               }) == %{
+                 target: "tool",
+                 decision: "ask",
+                 source: "ask",
+                 reason: "ask_rule",
+                 approval: "once"
+               }
+
+        fallback =
+          Enum.find(
+            group.metrics,
+            &(&1.event_name == [:conduit_mcp, :client, :adapter, :strict_fallback])
+          )
+
+        assert fallback.tag_values.(%{
+                 client: {MyApp.Hub, "tenant"},
+                 provider: :openai,
+                 api: :chat,
+                 tool_name: "github__search",
+                 reason: :max_depth
+               }) == %{api: "chat", reason: "max_depth"}
+      end
+
+      # The plugin used to skip rate limiting, cancellation and the janitors,
+      # so those events were invisible in Prometheus.
+      test "every event in Telemetry.events/0 feeds a metric" do
+        metered =
+          [otp_app: :test_app]
+          |> PromEx.event_metrics()
+          |> Enum.flat_map(& &1.metrics)
+          |> MapSet.new(& &1.event_name)
+
+        assert MapSet.new(ConduitMcp.Telemetry.events()) == metered
+      end
+
+      test "subscription metrics are tagged with the stop reason or drop topic only" do
+        group =
+          [otp_app: :test_app]
+          |> PromEx.event_metrics()
+          |> Enum.find(&(&1.group_name == :conduit_mcp_subscription_metrics))
+
+        assert Enum.map(group.metrics, & &1.tags) == [[], [:topic], [:reason], [:reason]]
+
+        [drop] = Enum.filter(group.metrics, &(&1.tags == [:topic]))
+        assert drop.tag_values.(%{topic: :resource}) == %{topic: :resource}
+
+        for metric <- group.metrics, metric.tags == [:reason] do
+          assert metric.tag_values.(%{reason: :idle_timeout, filters: [:tools_list_changed]}) ==
+                   %{reason: :idle_timeout}
+        end
+      end
+
+      test "cancellation and cleanup counts are tagged with low-cardinality values only" do
+        groups = PromEx.event_metrics(otp_app: :test_app)
+
+        for group <- groups,
+            group.group_name in [:conduit_mcp_cancellation_metrics, :conduit_mcp_cleanup_metrics],
+            metric <- group.metrics do
+          # request ids, scopes and client-supplied reasons are unbounded
+          assert metric.tags -- [:store] == [], inspect(metric.name)
+        end
+      end
+
+      test "MRTR metrics are tagged by method only" do
+        [group] =
+          for group <- PromEx.event_metrics(otp_app: :test_app),
+              group.group_name == :conduit_mcp_mrtr_metrics,
+              do: group
+
+        assert Enum.map(group.metrics, & &1.tags) == [[:method], [:method]]
+
+        assert Enum.map(group.metrics, & &1.tag_values.(%{method: "tools/call", round: 3})) ==
+                 [%{method: "tools/call"}, %{method: "tools/call"}]
       end
 
       test "requires otp_app option" do
@@ -101,9 +209,11 @@ if Code.ensure_loaded?(PromEx) do
 
       test "auth metrics group contains counter and distribution" do
         opts = [otp_app: :test_app]
-        [_, _, _, _, _, auth_metrics] = PromEx.event_metrics(opts)
 
-        assert auth_metrics.group_name == :conduit_mcp_auth_metrics
+        auth_metrics =
+          Enum.find(PromEx.event_metrics(opts), &(&1.group_name == :conduit_mcp_auth_metrics))
+
+        assert auth_metrics
         assert length(auth_metrics.metrics) == 2
 
         counter = Enum.at(auth_metrics.metrics, 0)
@@ -127,11 +237,15 @@ if Code.ensure_loaded?(PromEx) do
 
       test "all distributions have appropriate histogram buckets" do
         opts = [otp_app: :test_app]
-        metrics = PromEx.event_metrics(opts)
 
-        # Check that all distributions have buckets defined
-        Enum.each(metrics, fn event ->
-          distribution = Enum.at(event.metrics, 1)
+        distributions =
+          for event <- PromEx.event_metrics(opts),
+              %Telemetry.Metrics.Distribution{} = metric <- event.metrics,
+              do: metric
+
+        assert distributions != []
+
+        Enum.each(distributions, fn distribution ->
           assert is_list(distribution.reporter_options[:buckets])
           assert length(distribution.reporter_options[:buckets]) > 0
         end)

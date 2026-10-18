@@ -247,17 +247,276 @@ defmodule ConduitMcp.TelemetryTest do
   end
 
   describe "Telemetry.events/0" do
-    test "returns all event names" do
+    # The one source-scanning test in the suite, because it guards doc drift:
+    # `events/0` is what `attach_default_handlers/0`, the moduledoc and PromEx
+    # are kept in step with, and it once listed 7 of the 12 events emitted.
+    @lib Path.expand("../../lib", __DIR__)
+    @literal_call ~r/:telemetry\.(?:execute|span)\(\s*\[([^\]]*)\]/
+    @variable_call ~r/:telemetry\.(?:execute|span)\(\s*([a-z_]\w*)/
+    # `ConduitMcp.Session.Janitor` emits a configurable event: its default and
+    # every `telemetry_event:` passed to it are the names it can emit.
+    @configured_event ~r/(?:@default_event|telemetry_event:)\s*\[([^\]]*)\]/
+
+    defp lib_sources do
+      for path <- Path.wildcard(Path.join(@lib, "**/*.ex")),
+          do: {Path.relative_to(path, @lib), File.read!(path)}
+    end
+
+    defp scan_event_lists(regex, source) do
+      for [list] <- Regex.scan(regex, source, capture: :all_but_first) do
+        list
+        |> String.split(",", trim: true)
+        |> Enum.map(&(&1 |> String.trim() |> String.trim_leading(":")))
+        |> Enum.map(&String.to_existing_atom/1)
+      end
+    end
+
+    test "lists exactly the events emitted under lib/" do
+      sources = lib_sources()
+
+      # An emit through a variable is only allowed where the variable's
+      # possible values are themselves literal in the source (scanned below).
+      variable_emits =
+        for {path, source} <- sources,
+            [var] <- Regex.scan(@variable_call, source, capture: :all_but_first),
+            do: {path, var}
+
+      assert variable_emits == [{"conduit_mcp/session/janitor.ex", "event"}]
+
+      emitted =
+        for {_path, source} <- sources,
+            regex <- [@literal_call, @configured_event],
+            event <- scan_event_lists(regex, source),
+            into: MapSet.new(),
+            do: event
+
       events = ConduitMcp.Telemetry.events()
 
-      assert [:conduit_mcp, :request, :stop] in events
-      assert [:conduit_mcp, :tool, :execute] in events
-      assert [:conduit_mcp, :resource, :read] in events
-      assert [:conduit_mcp, :prompt, :get] in events
-      assert [:conduit_mcp, :rate_limit, :check] in events
-      assert [:conduit_mcp, :message_rate_limit, :check] in events
-      assert [:conduit_mcp, :auth, :verify] in events
-      assert length(events) == 7
+      assert MapSet.new(events) == emitted
+      assert length(events) == MapSet.size(emitted), "events/0 lists an event twice"
+    end
+  end
+
+  describe "default handlers on every event" do
+    setup do
+      on_exit(fn -> ConduitMcp.Telemetry.detach_default_handlers() end)
+      :ok
+    end
+
+    # `:telemetry` detaches a handler that raises, from every event it is
+    # attached to; an event in `events/0` without a matching `handle_event/4`
+    # clause would silence the whole default logger on its first emission.
+    test "the default logger survives each event's real measurements" do
+      :ok = ConduitMcp.Telemetry.attach_default_handlers()
+      Logger.put_process_level(self(), :debug)
+
+      ExUnit.CaptureLog.capture_log([level: :debug], fn ->
+        :telemetry.execute([:conduit_mcp, :request, :cancelled], %{count: 1}, %{
+          request_id: 1,
+          scope: "anon",
+          reason: "user\nforged"
+        })
+
+        :telemetry.execute(
+          [:conduit_mcp, :cancellation, :cleanup],
+          %{removed: 1, in_flight_removed: 2},
+          %{}
+        )
+
+        :telemetry.execute([:conduit_mcp, :cancellation, :janitor], %{removed: 1}, %{
+          store: ConduitMcp.Cancellation
+        })
+
+        :telemetry.execute([:conduit_mcp, :session, :cleanup], %{removed: 3}, %{
+          store: ConduitMcp.Session.EtsStore
+        })
+
+        :telemetry.execute([:conduit_mcp, :tasks, :cleanup], %{removed: 0}, %{})
+
+        :telemetry.execute([:conduit_mcp, :mrtr, :input_required], %{count: 2}, %{
+          method: "tools/call",
+          server_module: __MODULE__,
+          round: 1
+        })
+
+        client = %{client: {:client, make_ref()}, server_id: "s", transport: :stdio, era: nil}
+        span = %{duration: 1, monotonic_time: 2}
+
+        for span_name <- [:request, :tool_call] do
+          :telemetry.execute(
+            [:conduit_mcp, :client, span_name, :start],
+            %{monotonic_time: 1, system_time: 1},
+            Map.merge(client, %{method: "tools/call", tool_name: "echo"})
+          )
+
+          :telemetry.execute(
+            [:conduit_mcp, :client, span_name, :exception],
+            span,
+            Map.merge(client, %{method: "tools/call", tool_name: "echo", kind: :error})
+          )
+        end
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :request, :stop],
+          span,
+          Map.merge(client, %{method: "x\nforged", status: :ok, error_kind: nil, request_id: 1})
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :tool_call, :stop],
+          Map.put(span, :rounds, 1),
+          Map.merge(client, %{
+            tool_name: "echo",
+            status: :error,
+            error_kind: :timeout,
+            is_error: nil
+          })
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :connection, :transition],
+          %{system_time: 1},
+          Map.merge(client, %{from: nil, to: :closed, reason: :gave_up, attempt: 3})
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :request, :cancel],
+          %{count: 1},
+          Map.merge(client, %{method: "tools/call", request_id: 4, reason: :timeout})
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :response, :dropped],
+          %{count: 1},
+          Map.put(client, :request_id, nil)
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :notification],
+          %{count: 1},
+          Map.put(client, :method, "notifications/message")
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :cache, :refresh, :start],
+          %{monotonic_time: 1, system_time: 1},
+          Map.merge(client, %{kind: :tools, trigger: :demand})
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :cache, :refresh, :stop],
+          Map.merge(span, %{count: 2, pages: 1, rejected: 1}),
+          Map.merge(client, %{kind: :tools, trigger: :demand, status: :ok, error_kind: nil})
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :tool, :rejected],
+          %{count: 1},
+          Map.merge(client, %{tool_name: nil, reason: :invalid_name})
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :tool, :definition_changed],
+          %{count: 1},
+          Map.put(client, :tool_name, "echo")
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :policy, :decision],
+          %{count: 1},
+          Map.merge(client, %{
+            target: :tool,
+            tool_name: "echo",
+            decision: :deny,
+            source: :deny,
+            reason: :deny_rule,
+            rule_id: {:deny, 0},
+            approval: nil
+          })
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :hook, :stop],
+          Map.delete(span, :rounds),
+          Map.merge(client, %{hook_id: :audit, kind: :pre_tool_call, status: :cont})
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :hook, :exception],
+          Map.delete(span, :rounds),
+          Map.merge(client, %{
+            hook_id: {:post_tool_call, 0},
+            kind: :post_tool_call,
+            reason: :raise
+          })
+        )
+
+        for {suffix, measurements, extra} <- [
+              {:start, %{monotonic_time: 1, system_time: 1}, %{}},
+              {:stop, span, %{status: :error}},
+              {:exception, span, %{kind: :exit}}
+            ] do
+          :telemetry.execute(
+            [:conduit_mcp, :client, :input_request, suffix],
+            measurements,
+            client |> Map.put(:method, "sampling/createMessage") |> Map.merge(extra)
+          )
+        end
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :transport, :mailbox],
+          %{message_queue_len: 1_024},
+          client
+        )
+
+        hub = %{hub: {MyApp.Hub, "tenant\nforged"}, server_id: "github"}
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :hub, :server_failed],
+          %{count: 1, delay: 250},
+          Map.merge(hub, %{attempt: 2, reason: :killed})
+        )
+
+        :telemetry.execute(
+          [:conduit_mcp, :client, :hub, :server_restarted],
+          %{count: 1},
+          Map.put(hub, :attempt, 2)
+        )
+
+        :telemetry.execute([:conduit_mcp, :client, :hub, :collision], %{count: 2}, %{
+          hub: hub.hub,
+          exposed_name: "github__a_b",
+          colliders: [{"github", "a_b"}, {"github", "a_b"}]
+        })
+
+        :telemetry.execute([:conduit_mcp, :client, :adapter, :strict_fallback], %{count: 1}, %{
+          client: hub.hub,
+          provider: :openai,
+          api: :chat,
+          tool_name: "github__search",
+          reason: :unsupported_keyword
+        })
+
+        # The OAuth events, through their real emitter: a stop with an
+        # error reason, and an exception.
+        oauth = %{client: {:client, make_ref()}, server_id: "s", principal: nil}
+
+        for op <- [:discovery, :registration, :token_exchange, :refresh, :step_up] do
+          ConduitMcp.Client.OAuth.Telemetry.span(op, oauth, fn ->
+            {{:error, ConduitMcp.Client.OAuth.Error.new(:invalid_grant)}, %{}}
+          end)
+
+          assert_raise RuntimeError, fn ->
+            ConduitMcp.Client.OAuth.Telemetry.span(op, oauth, fn -> raise "boom" end)
+          end
+        end
+
+        ConduitMcp.Client.OAuth.Telemetry.authorization_required(oauth, :step_up)
+      end)
+
+      for event <- ConduitMcp.Telemetry.events() do
+        assert "conduit-mcp-default-logger" in default_logger_ids(event), inspect(event)
+      end
     end
   end
 

@@ -183,7 +183,8 @@ defmodule ConduitMcp.Session.EtsStore do
 
     Started under `ConduitMcp.Supervisor` by `ConduitMcp.Application`. This is
     the same pattern used by `ConduitMcp.Tasks.EtsStore.Owner`,
-    `ConduitMcp.Cancellation.Owner`, `ConduitMcp.Transport.SSE.Owner` and
+    `ConduitMcp.Cancellation.Owner`, `ConduitMcp.Transport.SSE.Owner`,
+    `ConduitMcp.Transport.SSEStream.Owner` and
     `ConduitMcp.OAuth.KeyProvider.JWKS.Owner`.
 
     The `ConduitMcp.EtsOwner` process deliberately holds no state and answers

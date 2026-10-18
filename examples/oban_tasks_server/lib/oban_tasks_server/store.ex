@@ -2,6 +2,11 @@ defmodule Examples.ObanTasks.Store do
   @moduledoc """
   `ConduitMcp.Tasks.Store` implementation backed by SQLite + Oban.
 
+  **Frozen reference for `2025-11-25` deployments.** `ConduitMcp.Tasks` is
+  legacy-era only and frozen; modern (`2026-07-28`) clients use the tasks
+  extension, whose store here is `Examples.ObanTasks.ExtStore`. Keep this
+  module for legacy clients; do not extend it.
+
   ## How it plays with the rest of the system
 
   The standard `tasks/get`, `tasks/cancel`, `tasks/result`, and

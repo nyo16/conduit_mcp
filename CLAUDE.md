@@ -4,14 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-ConduitMCP is an Elixir library implementing the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) specification (version 2025-06-18). It lets developers build MCP servers that expose tools, resources, and prompts to LLM applications like Claude Desktop and VS Code. The library is published on Hex as `conduit_mcp`.
+ConduitMCP is an Elixir library implementing the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) in two eras at once: modern `2026-07-28` (stateless, per-request `_meta`) and legacy `2025-11-25` / `2025-06-18` (`initialize` + sessions). It lets developers build MCP servers that expose tools, resources, and prompts to LLM applications like Claude Desktop and VS Code, and ships a production MCP client (`ConduitMcp.Client`). The library is published on Hex as `conduit_mcp`.
 
 ## Build & Test Commands
 
 ```bash
 mix deps.get              # Install dependencies
 mix compile               # Compile
-mix test                  # Run all tests (~526 tests)
+mix test                  # Run all tests (~2,400: 2,304 tests, 61 doctests, 40 properties; includes :integration and :stdio)
 mix test test/conduit_mcp/dsl_test.exs           # Run a single test file
 mix test test/conduit_mcp/dsl_test.exs:42        # Run a specific test line
 mix format                # Format code
@@ -26,14 +26,16 @@ MIX_ENV=test mix coveralls.html  # Coverage report
 
 Requires Elixir ~> 1.18. No config directory exists; validation config is set via `Application.put_env(:conduit_mcp, :validation, [...])` in tests or application config.
 
+CI runs on Elixir 1.18.3 / OTP 27.2 (`ELIXIR_VERSION`/`OTP_VERSION` in `.github/workflows/ci.yml`; Dialyzer with `MIX_ENV=dev`). A clean Dialyzer on a newer OTP proves nothing for CI: OTP 28+ changed opaque-type checking, so run it on the CI toolchain too, with its own build path, e.g. `MIX_BUILD_PATH=/tmp/cm_build_118_dev MIX_ENV=dev mix dialyzer` under Elixir 1.18.3/OTP 27.2. In particular, don't pass `Mint.HTTP.t()` or `Secret.t()` (both opaque) through `||`, guards or the `Mint.HTTP` union; use `Mint.HTTP1` and an explicit `nil` match.
+
 ## Architecture
 
 MCP server modules are **stateless** — just compiled functions. Each HTTP request runs in its own Bandit process for maximum concurrency. Rate limiting uses a user-supplied Hammer module.
 
 The library itself does start a supervision tree (`ConduitMcp.Application`, `mod:` in `mix.exs`). It is deliberately small: it owns the long-lived ETS tables that must outlive short-lived request processes, plus the session janitor.
 
-- Always: `ConduitMcp.Cancellation.Owner`, `ConduitMcp.Cancellation.InFlightOwner` (requests in flight; `notifications/cancelled` is recorded only for those), `ConduitMcp.Session.EtsStore.Owner`, `ConduitMcp.Transport.SSE.Owner`, `ConduitMcp.Session.Janitor` (as `ConduitMcp.Session.Janitor.Default`; disable with `config :conduit_mcp, :session_janitor, false`), and a second `ConduitMcp.Session.Janitor` sweeping the cancellation table and dead processes' in-flight rows (as `ConduitMcp.Cancellation.Janitor`; disable with `config :conduit_mcp, :cancellation_janitor, false`).
-- Conditionally: `ConduitMcp.Tasks.EtsStore.Owner` (default tasks store only), `ConduitMcp.OAuth.KeyProvider.JWKS.Owner` (only when `Req` is compiled in).
+- Always: `ConduitMcp.Cancellation.Owner`, `ConduitMcp.Cancellation.InFlightOwner` (requests in flight; `notifications/cancelled` is recorded only for those), `ConduitMcp.Session.EtsStore.Owner`, `ConduitMcp.Transport.SSE.Owner`, `ConduitMcp.Transport.SSEStream.Owner` (slot table for modern response streams), `ConduitMcp.Client.Registry` (a passive unique `Registry`; clients register in it, so names of any term need no atoms — the library starts **no** client processes), `ConduitMcp.Subscriptions` (a duplicate-key `Registry` of `subscriptions/listen` streams by topic), `ConduitMcp.Subscriptions.Admission` (the live `subscriptions/listen` streams of each principal behind `:max_listens_per_principal`; a GenServer streams call once per listen — admission must be serialized, unlike the ETS owners' hot paths), `ConduitMcp.Session.Janitor` (as `ConduitMcp.Session.Janitor.Default`; disable with `config :conduit_mcp, :session_janitor, false`), and a second `ConduitMcp.Session.Janitor` sweeping the cancellation table and dead processes' in-flight rows (as `ConduitMcp.Cancellation.Janitor`; disable with `config :conduit_mcp, :cancellation_janitor, false`).
+- Conditionally: `ConduitMcp.Tasks.EtsStore.Owner` (default tasks store only), `ConduitMcp.Ext.Tasks.EtsStore.Owner` (tasks extension enabled with its default store) and the `ConduitMcp.Ext.Tasks` janitor (tasks extension enabled; `config :conduit_mcp, :ext_tasks`), `ConduitMcp.OAuth.KeyProvider.JWKS.Owner` (only when `Req` is compiled in).
 
 Both janitor keys accept `true`, `false`, or a keyword list of `ConduitMcp.Session.Janitor` options; anything else raises at boot naming the key.
 
@@ -42,8 +44,21 @@ Every owner runs `ConduitMcp.EtsOwner`: a process that creates a `:public` table
 ### Request Flow
 
 ```
-HTTP Request → Transport (StreamableHTTP/SSE) → Auth Plug → Rate Limit Plug → Handler → Server Module callbacks
+HTTP Request → Transport (StreamableHTTP/SSE) → Auth Plug → Rate Limit Plug → classify_era (ConduitMcp.Era) → HeaderValidation (modern only) → Message Rate Limit → Handler.dispatch/3 → Server Module callbacks
 ```
+
+Modern requests never create or look up a session (except the principal check on a supplied session id) and may answer with an SSE stream (`{:stream, StreamSpec}` from `Handler.dispatch/3`, served by `ConduitMcp.Transport.SSEStream`). Legacy requests keep JSON responses and sessions.
+
+### Client Architecture
+
+Users supervise clients themselves: `{ConduitMcp.Client, opts}` or `{ConduitMcp.Client.Hub, opts}`. Options are validated at `child_spec/1` (`ConduitMcp.Client.Config`, `ConduitMcp.Client.Hub.Config`), raising with the key name.
+
+- **`ConduitMcp.Client`** — a `Supervisor` (`:one_for_all`) registered via `ConduitMcp.Client.Registry`: `[Task.Supervisor, transport child specs (e.g. the Finch pool), governance/grants owner, Client.Connection]`. The facade functions talk to the connection with monitor-alias requests (`ConduitMcp.Client.Request`), not `GenServer.call`; spans, deadlines and progress callbacks run in the caller.
+- **`ConduitMcp.Client.Connection`** — a `:gen_statem` (`:handle_event_function`, `:state_enter`, trap_exit), one per server. States `:connecting → :discovering → :initializing → :ready`, plus `:authorizing`, `:reconnecting`, `:closed`. Boot never blocks; requests before ready are postponed. It owns the pending map (monitors callers, cancels on timeout or caller death), the era pin (`protocol: :auto` probes `server/discover`, falls back to `initialize`), the per-connection cache (`ConduitMcp.Client.Cache`) and reconnect backoff. **The connection never runs user code**: handlers, hooks, policy and progress callbacks run in tasks or in the caller. Per-state logic lives in helper modules under `client/connection/`.
+- **Transports** — `ConduitMcp.Client.Transport` behaviour (state lives in the connection): `Transport.Stdio` (+ an internal port owner; `:spawn_executable`, env allowlist, EOF → TERM → KILL), `Transport.StreamableHTTP` (Finch-gated; one Exchange task per request answering the caller directly, plus a listener for the legacy GET stream / modern listen), `Transport.InProcess` (calls `Era.classify` + `Handler.dispatch/3` on a server module; tests and dev).
+- **Governance** — `ConduitMcp.Client.Pipeline`, run in the caller once `:policy`/`:hooks`/`:tools`/`:validate` is set: resolve → select (`ToolFilter`) → fingerprint → pre-hooks → schema-validate (`SchemaValidator`, optional JSV) → policy (`Policy`, deny > pin > ask > allow > default) → ask (`on_ask`, `Grants`) → encode → send/MRTR → output-validate → post/failure hooks → LLM shaping. Hooks and approvers run in supervised tasks with deadlines and fail closed.
+- **Hub** — `ConduitMcp.Client.Hub`, a `Supervisor` of `[token store, Task.Supervisor, DynamicSupervisor of per-server clients (restart: :temporary), Hub.Manager]`. The manager re-adds crashed servers with backoff. Tool lists are aggregated on read from each client's cache (`Client.Naming`/`Client.ToolSet`, `server__tool`); `:policy` is required. `ConduitMcp.Client.Adapters` turns tool sets and calls into Anthropic/OpenAI/Gemini shapes.
+- **OAuth** — `ConduitMcp.Client.OAuth` (Finch-gated): discovery, registration (pre-registered → CIMD → DCR), code flow with host-managed `Pending`, refresh (single-flight via `TokenStore.transaction/3`), step-up, client credentials, `Loopback`. A 401 moves the connection to `:authorizing`; the token work runs in a task.
 
 ### Key Modules
 
@@ -92,9 +107,11 @@ Tools can carry `_meta` metadata via the `meta/1` macro (generic map) or `ui/1` 
 
 ### Test Infrastructure
 
-- `test/support/test_server.ex` — `ConduitMcp.TestServer` using `dsl: false` mode for testing core behavior
-- `test/support/telemetry_test.ex` — `ConduitMcp.TelemetryTestHelper` for capturing telemetry events in tests
-- Test helpers are loaded via `Code.require_file` in `test/test_helper.exs`
+- `test/support/` is compiled in the test env via `elixirc_paths(:test)` in `mix.exs` (no `Code.require_file`). Notable helpers: `test_server.ex` (`ConduitMcp.TestServer`, `dsl: false`), `telemetry_test.ex` (`ConduitMcp.TelemetryTestHelper`), `mcp_schema.ex` (`ConduitMcp.Test.McpSchema`, validates against the vendored `test/fixtures/mcp_schema/*/schema.json`), and `client/` (fake transports, scripted Bandit plugs, an OAuth fake, stdio fixtures).
+- Real-socket tests start Bandit on `port: 0`, `ip: :loopback` and read the port from `ThousandIsland.listener_info/1`. They are tagged `:integration` (HTTP) or `:stdio` (child processes); neither tag is excluded, so plain `mix test` runs them.
+- No `Process.sleep` in tests: tiny timeouts plus `assert_receive`.
+- Test timeouts, deadlines and intervals are **≥ 200 ms** unless the timeout itself is what the test exercises (a 20 ms hook timeout in a "timed out" case is fine; a 20 ms timeout on a case that should succeed or fail for another reason flakes under load).
+- Hub tests wait for readiness as the hub sees it (`await_hub_ready/3` in `test/support/client/harness.ex`, i.e. `Hub.status/1`), not a client's own `await_ready/2`: the manager marks a server running only after its client started. After killing a process, wait for its replacement — the Registry drops a dead process's entry asynchronously.
 
 ### Conventions
 
@@ -104,3 +121,12 @@ Tools can carry `_meta` metadata via the `meta/1` macro (generic map) or `ui/1` 
 - Resource URI templates use `{param}` syntax (e.g., `"user://{id}"`) — `ConduitMcp.DSL.extract_uri_params/2` handles matching
 - `ui://` scheme resources serve self-contained HTML for MCP Apps (e.g., `"ui://dashboard/app.html"`)
 - NimbleOptions version is pinned to exactly `1.1.1`
+- **Secrets** travel as `%ConduitMcp.Client.Secret{}`: `inspect` prints `#Secret<redacted>`, there is no `String.Chars`, and JSON-encoding one **raises**. Call `Secret.expose/1` only at the wire.
+- Every stateful process that may hold secrets or credentials implements `format_status/1` and redacts them (connection, stdio port owner, `TokenStore.ETS`).
+- ETS owners stay create-and-idle `ConduitMcp.EtsOwner` with `:public` tables, with three documented `:protected` exceptions: the OAuth `TokenStore.ETS` (only its owner writes), the client's governance/grants owner (writes via `GenServer.call`), and the client cache (written only by its connection, read directly by callers).
+- Long-lived state machines use `:gen_statem` (see `Client.Connection`), split into per-state helper modules to keep credo happy.
+- **The client connection process never calls user callbacks** (handler modules, hooks, policy predicates, progress callbacks). Anything derived from user modules is precomputed at config time (e.g. handler capabilities in `Config.new!/1`); user code runs in the caller or in a Task.Supervisor task. The one documented exception is the `:backoff` fun ("must be pure and fast"), guarded in `Data.backoff/2` with a fall back to `Backoff.full_jitter/1`.
+- `ConduitMcp.Subscriptions.Admission` is the third documented `handle_call`-style coordinator (rare path, needs serialization), alongside the OAuth `TokenStore.ETS` owner and the governance/grants owner.
+- Optional deps are gated with `if Code.ensure_loaded?(Dep)` plus an `OptionalDeps.*!/0` check that raises `OptionalDependencyError` **at init**, never per request.
+- Telemetry: `ConduitMcp.Telemetry.events/0` is the single source of truth for every emitted event and its metadata keys; tests pin it to what the code emits, so add a new event there (and to `ConduitMcp.PromEx` where useful). Client metadata comes from an allowlist and never carries secrets. Arguments and results appear only as the optional `:arguments`/`:result` keys on `tool_call` spans when a client opts in with `telemetry: [capture_payloads: [redact: fun]]` (TL-2). They are always passed through the host's `redact/1`, size-capped (`{:truncated, n}`) and fail closed (`:redaction_failed`), and never hashed.
+- New public modules go in `mix.exs` `groups_for_modules`; new guides go in both `extras` and `groups_for_extras`. `mix docs` must stay warning-free (reference hidden modules in prose, not as backticked links; use `c:` for callbacks).

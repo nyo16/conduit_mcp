@@ -26,7 +26,7 @@ Key points:
 - `description:` is required for tools
 - `schema do ... end` defines input parameters — generates JSON Schema and validation automatically
 - `execute/2` receives **atom-keyed** params and a `Plug.Conn`
-- Response helpers (`text/1`, `json/1`, `error/1`, `image/1`) are imported automatically
+- Response helpers (`text/1`, `json/1`, `error/1`, `image/1`, `image/2`) are imported automatically
 
 ### Resource Component
 
@@ -107,6 +107,7 @@ end
 | `min_length: n` / `max_length: n` | string | String length bounds |
 | `validator: fn` | All | Custom validator function |
 | `additional_properties: bool` | object | Allow keys the block did not declare |
+| `header: "Name"` | string, integer, boolean (tools only) | Mirror the argument into an `Mcp-Param-Name` header on the modern era; checked at compile time (see [Protocol Eras](protocol_eras.md#request-headers)) |
 
 ### Nested Objects
 
@@ -172,6 +173,7 @@ end
 | `:rate_limit` | HTTP rate limiting config |
 | `:message_rate_limit` | Message-level rate limiting config |
 | `:auth` | Authentication config |
+| `:instructions` | Guidance for clients, returned by `initialize` and `server/discover` |
 
 ### Component Registration
 
@@ -233,9 +235,24 @@ use ConduitMcp.Component,
   annotations: [readOnlyHint: true, idempotent: true]
 ```
 
+### Cache Hints
+
+Modern list and read results carry `ttlMs` and `cacheScope`. Override the global default per component:
+
+```elixir
+use ConduitMcp.Component,
+  type: :tool,
+  description: "Public catalog",
+  cache: [ttl_ms: 5_000, scope: :public]
+```
+
+The Endpoint collects every component's `:cache`. `scope: :public` together with a `:scope` is a compile error. See [Protocol Eras](protocol_eras.md#results-and-cache-hints).
+
 ## Responses
 
 All `execute/2` callbacks must return `{:ok, map()}` or `{:error, map()}`. Helper macros are imported automatically.
+
+On a modern-era request, `execute/2` may also return `{:input_required, input_requests, state}` to ask the client for input (see [MRTR](mrtr.md)), and a tool may return `{:task, attrs}` (see [Tasks Extension](tasks_extension.md)).
 
 ### Tool Response Helpers
 
@@ -246,8 +263,11 @@ text("Hello!")
 # JSON-encoded data
 json(%{users: [%{id: 1, name: "Alice"}]})
 
-# Image (base64)
-image(Base.encode64(png_data))
+# Image: base64 data and its MIME type
+image(Base.encode64(png_data), "image/png")
+
+# Image: a URL becomes a resource_link; base64 PNG/JPEG/GIF/WebP gets its MIME type detected
+image("https://example.com/chart.png")
 
 # Audio
 audio(Base.encode64(wav_data), "audio/wav")
@@ -305,7 +325,7 @@ You can always skip helpers and return the tuple directly:
 def execute(%{id: id}, _conn) do
   case MyApp.Repo.get(User, id) do
     nil ->
-      {:error, %{"code" => -32002, "message" => "User #{id} not found"}}
+      {:error, %{"code" => ConduitMcp.Errors.invalid_params(), "message" => "User #{id} not found"}}
 
     user ->
       {:ok, %{
@@ -322,6 +342,8 @@ def execute(%{id: id}, _conn) do
 end
 ```
 
+A resource component that can't find its resource returns `ConduitMcp.Protocol.Legacy.resource_not_found()` (`-32002`). Legacy clients see `-32002`; modern clients see `-32602`, because `2026-07-28` forbids `-32002`.
+
 ## Accessing Request Context
 
 The `Plug.Conn` is passed as the second argument to `execute/2`:
@@ -329,11 +351,13 @@ The `Plug.Conn` is passed as the second argument to `execute/2`:
 ```elixir
 def execute(_params, conn) do
   user = conn.assigns[:current_user]
-  session = conn.private[:mcp_session_data]
+  session = conn.private[:mcp_session_data]  # legacy era only; modern requests have no session
   text("Hello #{user}")
 end
 ```
 
 ## Capabilities
 
-The Endpoint auto-detects capabilities from registered components. If you only register tools, only `tools` is advertised in the `initialize` response. No manual configuration needed.
+The Endpoint auto-detects capabilities from registered components. If you only register tools, only `tools` is advertised in the `initialize` response and the `server/discover` result. No manual configuration needed. On the modern era each advertised list also gets `listChanged: true` (see [Subscriptions](subscriptions.md)).
+
+Completions (`completion/complete`) aren't available in Endpoint mode: components have no completion hook. Use DSL `complete` or a manual `handle_complete/3`.

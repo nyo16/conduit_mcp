@@ -1,5 +1,12 @@
 # Multi-Node Session Stores
 
+> #### Legacy era only {: .info}
+>
+> Sessions belong to the legacy protocol era (`2025-11-25`, `2025-06-18`).
+> Modern (`2026-07-28`) requests never create, require or look up a
+> session. See [Multi-node on the modern era](#multi-node-on-the-modern-era)
+> for how to run modern clients across nodes.
+
 Sessions are off unless the transport is given a `:session` option. With
 `session: []`, ConduitMCP stores sessions in ETS (`ConduitMcp.Session.EtsStore`)
 — fast but local to each node. For multi-node deployments, implement the
@@ -224,3 +231,79 @@ end
 
 - **Sticky sessions**: Configure your load balancer to route by `Mcp-Session-Id` header. ETS works fine.
 - **No sessions**: Omit `:session` (or set `session: false`) for fully stateless mode.
+
+A session records the principal that created it (`ConduitMcp.Principal.id/1`).
+A legacy request or `DELETE` that presents it from a different principal is
+answered 404, exactly like an unknown session id, so a leaked id can't be
+used, used to cancel the owner's requests, or used to end the session.
+
+## Multi-node on the modern era
+
+A modern request carries everything the server needs in its own `_meta`, so
+any node can serve any modern request. There is nothing to replicate and
+nothing to make sticky. `Mcp-Session-Id` is ignored, except that a modern
+request may not present a live session bound to a different principal
+(`-32600`, HTTP 400).
+
+### State across tool calls: opaque handles
+
+Without sessions, a server that needs to remember something between calls
+hands the client a handle and takes it back as a tool argument. Mint the
+handle server-side, make it unguessable, and bind it to the caller:
+
+```elixir
+tool "open_cart", "Start a shopping cart" do
+  handle fn conn, _params ->
+    cart = Base.url_encode64(:crypto.strong_rand_bytes(24), padding: false)
+    :ok = MyApp.Carts.create(cart, owner: ConduitMcp.Principal.id(conn))
+    json(%{cart: cart})
+  end
+end
+
+tool "add_item", "Add an item to a cart" do
+  param :cart, :string, "Cart handle returned by open_cart", required: true
+  param :sku, :string, "SKU", required: true
+
+  handle fn conn, %{"cart" => cart, "sku" => sku} ->
+    case MyApp.Carts.add(cart, ConduitMcp.Principal.id(conn), sku) do
+      :ok -> text("Added #{sku}")
+      {:error, :not_found} -> error("Unknown cart", ConduitMcp.Errors.invalid_params())
+    end
+  end
+end
+```
+
+- **Shared storage.** Keep handle state in storage every node can read:
+  the database, Redis, Mnesia. The backends above suit it.
+- **Owner-scoped lookups.** Look handles up by owner as well as id
+  (`ConduitMcp.Principal.id/1`), and answer a foreign handle exactly like an
+  unknown one.
+- **Expiry.** Give handles a TTL: nothing tells the server when a client is
+  done.
+- **The handle is a credential.** Keep it out of logs.
+
+### What else to share
+
+| Feature | Across nodes |
+|---|---|
+| [MRTR](mrtr.md) `requestState` | Travels with the client, so a retry can land on any node. Every node needs the same `:mrtr_keys`. |
+| [Subscriptions](subscriptions.md) | Node-local. Broadcast changes on your own PubSub and call `ConduitMcp.notify_*` on every node (below). |
+| [Tasks extension](tasks_extension.md) | `ConduitMcp.Ext.Tasks.EtsStore` is single-node. Configure a shared `ConduitMcp.Ext.Tasks.Store`. Status notifications are node-local too. |
+| Streamed `tools/call` and cancellation | Stay on the node serving the request: closing the stream cancels the tool on that node. |
+
+A `subscriptions/listen` stream only receives what is published on the node
+serving it. Fan changes out with PubSub:
+
+```elixir
+# wherever the change happens
+Phoenix.PubSub.broadcast(MyApp.PubSub, "mcp", :tools_changed)
+
+# in a GenServer subscribed to "mcp" on every node
+def handle_info(:tools_changed, state) do
+  ConduitMcp.notify_tools_changed()
+  {:noreply, state}
+end
+```
+
+The full recipe, including `notify_resource_updated/1`, is in
+[Subscriptions](subscriptions.md#multi-node).

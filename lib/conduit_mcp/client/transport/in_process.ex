@@ -1,0 +1,220 @@
+defmodule ConduitMcp.Client.Transport.InProcess do
+  @moduledoc """
+  A `ConduitMcp.Client.Transport` that serves requests from a server module
+  in the same VM, for tests and development.
+
+      {ConduitMcp.Client,
+       name: :local,
+       transport: {ConduitMcp.Client.Transport.InProcess, server: MyApp.MCPServer}}
+
+  Each request runs `ConduitMcp.Handler.dispatch/3` against the server
+  module, which classifies its era (`ConduitMcp.Era.classify/2`) exactly as
+  the HTTP transports do, in its own task under the client's
+  `Task.Supervisor`; the result comes back to the connection as a
+  transport event. The server module (`dsl: false`, DSL or
+  `ConduitMcp.Endpoint`) is the one you would mount behind
+  `ConduitMcp.Transport.StreamableHTTP`; no HTTP stack, socket or optional
+  dependency is involved.
+
+  There are no sessions and no HTTP headers, so plugs (authentication, rate
+  limiting, `ConduitMcp.Plugs.HeaderValidation`) do not run. Give the
+  server a caller identity with `:principal` instead.
+
+  Cancelling a request kills its task. The server never sends
+  server-to-client requests over this transport.
+
+  A modern `tools/call` sent with `:on_progress` (or after `set_log_level/2`)
+  runs to its response with the tool's `notifications/progress` and
+  `notifications/message` delivered as they happen, as over Streamable HTTP.
+  `subscriptions/listen` needs a stream this transport cannot hold and is
+  answered `-32601`.
+
+  ## Options
+
+    * `:server` (required) - the server module.
+    * `:assigns` - `conn.assigns` for every request (default `%{}`).
+    * `:principal` - a `ConduitMcp.Principal` map put on every request's
+      conn with `ConduitMcp.Principal.put/2` (default: none).
+    * `:remote_ip` - the conn's `remote_ip` (default `{127, 0, 0, 1}`).
+    * `:server_name`, `:server_version`, `:instructions` - as for
+      `ConduitMcp.Transport.StreamableHTTP` (an Endpoint's `:name` and
+      `:version` are used when unset).
+  """
+
+  @behaviour ConduitMcp.Client.Transport
+
+  alias ConduitMcp.Handler
+  alias ConduitMcp.Handler.Pipeline
+  alias ConduitMcp.Principal
+  alias ConduitMcp.Protocol
+  alias ConduitMcp.StreamSpec
+  alias ConduitMcp.Transport.Shared
+
+  @schema NimbleOptions.new!(
+            server: [type: :atom, required: true],
+            assigns: [type: :map, default: %{}],
+            principal: [type: {:or, [:map, nil]}, default: nil],
+            remote_ip: [type: :any, default: {127, 0, 0, 1}],
+            server_name: [type: {:or, [:string, nil]}, default: nil],
+            server_version: [type: {:or, [:string, nil]}, default: nil],
+            instructions: [type: {:or, [:string, nil]}, default: nil]
+          )
+
+  @impl true
+  def kind, do: :in_process
+
+  @impl true
+  def init(opts, %{owner: owner, task_sup: task_sup}) do
+    with {:ok, opts} <- NimbleOptions.validate(opts, @schema),
+         :ok <- check_server(opts[:server]) do
+      {:ok,
+       %{
+         server: opts[:server],
+         conn: build_conn(opts),
+         owner: owner,
+         task_sup: task_sup,
+         ref: make_ref(),
+         # task monitor ref => request id (or :notification)
+         tasks: %{}
+       }}
+    end
+  end
+
+  defp check_server(server) do
+    if Code.ensure_loaded?(server) and function_exported?(server, :handle_list_tools, 1),
+      do: :ok,
+      else: {:error, {:not_a_server_module, server}}
+  end
+
+  defp build_conn(opts) do
+    endpoint = Shared.endpoint_config(opts[:server])
+
+    conn = %Plug.Conn{
+      remote_ip: opts[:remote_ip],
+      assigns: opts[:assigns],
+      private: %{
+        server_module: opts[:server],
+        server_name: opts[:server_name] || Keyword.get(endpoint, :name),
+        server_version: opts[:server_version] || Keyword.get(endpoint, :version),
+        instructions: opts[:instructions]
+      }
+    }
+
+    case opts[:principal] do
+      nil -> conn
+      principal -> Principal.put(conn, principal)
+    end
+  end
+
+  @impl true
+  def connect(state) do
+    send(state.owner, {__MODULE__, state.ref, :connected})
+    {:ok, state}
+  end
+
+  @impl true
+  def request(state, %{"id" => id} = message, _reply_to, _wire_opts) do
+    task = run(state, message)
+    {:ok, task.pid, %{state | tasks: Map.put(state.tasks, task.ref, {id, task.pid})}}
+  end
+
+  @impl true
+  def notify(state, message) do
+    task = run(state, message)
+    {:ok, %{state | tasks: Map.put(state.tasks, task.ref, {:notification, task.pid})}}
+  end
+
+  defp run(%{server: server, conn: conn, task_sup: task_sup, owner: owner, ref: ref}, message) do
+    Task.Supervisor.async_nolink(task_sup, fn ->
+      message |> Handler.dispatch(server, conn) |> serve(owner, ref)
+    end)
+  end
+
+  # A modern `tools/call` carrying a progress token or log level comes back
+  # as a `:response` stream: run it here, in the task, with its progress and
+  # log notifications sent to the connection as frames.
+  defp serve({:stream, %StreamSpec{kind: :response} = spec}, owner, ref) do
+    {:reply,
+     Pipeline.in_flight(spec.conn, spec.request_id, fn work_conn ->
+       spec.run.(StreamSpec.put_sink(work_conn, owner, ref, spec.progress_token))
+     end)}
+  end
+
+  defp serve(reply, _owner, _ref), do: reply
+
+  @impl true
+  def cancel(state, id, _handle, _reason) do
+    case Enum.find(state.tasks, fn {_ref, {task_id, _pid}} -> task_id == id end) do
+      {ref, {_id, pid}} ->
+        stop_task(ref, pid)
+        {:ok, %{state | tasks: Map.delete(state.tasks, ref)}}
+
+      nil ->
+        {:ok, state}
+    end
+  end
+
+  @impl true
+  def handle_info({__MODULE__, ref, :connected}, %{ref: ref} = state),
+    do: {:ok, [{:connected, %{}}], state}
+
+  def handle_info({StreamSpec, ref, {:frame, frame}}, %{ref: ref} = state),
+    do: {:ok, frame_events(frame), state}
+
+  def handle_info({ref, reply}, %{tasks: tasks} = state) when is_map_key(tasks, ref) do
+    Process.demonitor(ref, [:flush])
+    {{id, _pid}, tasks} = Map.pop(tasks, ref)
+    {:ok, reply_events(id, reply), %{state | tasks: tasks}}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{tasks: tasks} = state)
+      when is_map_key(tasks, ref) do
+    {{id, _pid}, tasks} = Map.pop(tasks, ref)
+
+    events =
+      if id == :notification, do: [], else: [{:exchange_done, id, {:error, :server_exited}}]
+
+    {:ok, events, %{state | tasks: tasks}}
+  end
+
+  def handle_info(_message, _state), do: :unknown
+
+  defp reply_events(:notification, _reply), do: []
+  defp reply_events(id, {:reply, response}), do: [{:response, id, response}]
+
+  defp reply_events(id, {:stream, %StreamSpec{kind: :listen}}),
+    do: [
+      {:response, id,
+       Protocol.error_response(
+         id,
+         Protocol.method_not_found(),
+         "Method not found: needs a streaming transport"
+       )}
+    ]
+
+  defp reply_events(id, :noreply), do: [{:exchange_done, id, {:error, :no_response}}]
+
+  # `ConduitMcp.StreamSpec.notify/2` encodes each notification as an SSE
+  # frame (`ConduitMcp.Transport.SSEStream.frame/1`); take the JSON back out.
+  defp frame_events(frame) do
+    with "event: message\ndata: " <> rest <- IO.iodata_to_binary(frame),
+         {:ok, %{"method" => method} = message} when is_binary(method) <-
+           JSON.decode(String.trim_trailing(rest)) do
+      [{:notification, method, Map.get(message, "params") || %{}}]
+    else
+      _other -> []
+    end
+  end
+
+  @impl true
+  def close(state, _reason) do
+    Enum.each(state.tasks, fn {ref, {_id, pid}} -> stop_task(ref, pid) end)
+  end
+
+  # Never waits on the task: it runs host code, which may trap exits.
+  defp stop_task(ref, pid) do
+    Process.demonitor(ref, [:flush])
+    Process.exit(pid, :kill)
+    :ok
+  end
+end

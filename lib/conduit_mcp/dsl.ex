@@ -58,6 +58,36 @@ defmodule ConduitMcp.DSL do
   - Input validation (JSON Schema)
   - handle_list_* callbacks
   - handle_call_tool/handle_get_prompt/handle_read_resource callbacks
+  - handle_complete, when any block declares `complete/2`
+
+  ## Completions
+
+  `complete/2` inside a `prompt` or `resource` block makes one prompt
+  argument or resource template parameter answer `completion/complete`:
+
+      prompt "code_review", "Code review assistant" do
+        arg :language, :string, "Language"
+        get fn _conn, args -> [user("Review my \#{args["language"]}")] end
+
+        complete :language, fn _conn, prefix ->
+          Enum.filter(~w(elixir erlang python), &String.starts_with?(&1, prefix))
+        end
+      end
+
+      resource "file:///{path}" do
+        read MyFiles, :read
+        complete :path, MyFiles, :complete_path
+      end
+
+  The client's `ref` selects the block (`ref/prompt` by prompt name,
+  `ref/resource` by the URI template exactly as declared) and
+  `argument.name` the completion; the handler gets the conn and
+  `argument.value` and returns a list of strings. The answer carries the
+  first 100 values, `total` and `hasMore`. An argument without a
+  completion answers no values; an unknown prompt or resource is `-32602`.
+  A block's `scope/1` also guards its completions. Declaring any completion
+  generates `handle_complete/3`, which advertises the `completions`
+  capability (`ConduitMcp.Capabilities`).
   """
 
   @doc false
@@ -114,6 +144,7 @@ defmodule ConduitMcp.DSL do
       @mcp_current_tool_icons nil
       @mcp_current_tool_output_schema nil
       @mcp_current_tool_task_support nil
+      @mcp_current_cache nil
 
       unquote(block)
 
@@ -129,7 +160,8 @@ defmodule ConduitMcp.DSL do
         title: @mcp_current_tool_title,
         icons: @mcp_current_tool_icons,
         output_schema: @mcp_current_tool_output_schema,
-        task_support: @mcp_current_tool_task_support
+        task_support: @mcp_current_tool_task_support,
+        cache: @mcp_current_cache
       }
 
       # Clean up
@@ -144,6 +176,7 @@ defmodule ConduitMcp.DSL do
       Module.delete_attribute(__MODULE__, :mcp_current_tool_icons)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_output_schema)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_task_support)
+      Module.delete_attribute(__MODULE__, :mcp_current_cache)
     end
   end
 
@@ -254,6 +287,29 @@ defmodule ConduitMcp.DSL do
     quote do
       ConduitMcp.DSL.__assert_in_declaration__(__MODULE__, :scope)
       @mcp_current_scope unquote(scope_string)
+    end
+  end
+
+  @doc """
+  Declares cache hints for the enclosing tool, resource or prompt on the
+  modern (`2026-07-28`) era: `ttl_ms` (non-negative integer) and `scope`
+  (`:private` or `:public`), each falling back to the global
+  `config :conduit_mcp, cache_ttl_ms: ..., cache_scope: ...`.
+
+      tool "catalog", "Lists the public catalog" do
+        cache ttl_ms: 5_000, scope: :public
+        handle fn _conn, _params -> text("...") end
+      end
+
+  A list result takes the minimum TTL of its items and is private if any
+  item is private or scoped; see `ConduitMcp.CacheHints`. `scope: :public`
+  together with `scope/1` is a compile error (a scoped response must stay
+  private).
+  """
+  defmacro cache(opts) do
+    quote do
+      ConduitMcp.DSL.__assert_in_declaration__(__MODULE__, :cache)
+      @mcp_current_cache unquote(opts)
     end
   end
 
@@ -415,6 +471,21 @@ defmodule ConduitMcp.DSL do
   - `:enum` - List of allowed values
   - `:default` - Default value if not provided
 
+  ## Header Option (`2026-07-28`)
+
+  - `:header` - Mirrors the argument into an `Mcp-Param-{Name}` HTTP request
+    header: `param :region, :string, "Region", header: "Region"` publishes
+    `"x-mcp-header": "Region"` on the property. Modern clients then send the
+    argument as `Mcp-Param-Region`, so intermediaries can route on it, and
+    `ConduitMcp.Plugs.HeaderValidation` rejects a request whose header
+    disagrees with the body. The build fails (`CompileError`) unless the
+    annotation is valid: the param must be a `:string`, `:integer` or
+    `:boolean` reachable through object properties only (never inside array
+    `items`), and the name must be an RFC 9110 token unique
+    case-insensitively within the tool. Not a validation rule: the argument
+    is validated as usual. A browser client also needs the header name in
+    the transport's `:cors_headers`.
+
   ## Enhanced Validation Options (NimbleOptions)
 
   - `:min` - Minimum value for numbers (inclusive)
@@ -508,6 +579,7 @@ defmodule ConduitMcp.DSL do
 
   defmacro param(name, type, description, opts) when is_list(opts) do
     assert_no_block!(:param, name, description, opts, __CALLER__)
+    {description, opts} = split_blockless_opts(description, opts)
 
     quote do
       param_def = %{
@@ -606,6 +678,13 @@ defmodule ConduitMcp.DSL do
   defp split_description_opts([{key, _} | _] = opts) when is_atom(key), do: {nil, opts}
   defp split_description_opts(description), do: {description, []}
 
+  # The blockless form has the same trap: `param :region, :string, header:
+  # "Region"` puts the keywords in the description position and leaves `opts`
+  # empty, so the option was ignored and the keyword list became the
+  # `"description"`.
+  defp split_blockless_opts(description, []), do: split_description_opts(description)
+  defp split_blockless_opts(description, opts), do: {description, opts}
+
   # The clauses that route a trailing `[do: ...]` to the block form depend on
   # argument positions that only the default-injecting header produces. Change a
   # default and they quietly stop matching, and a block silently falls through to
@@ -655,6 +734,7 @@ defmodule ConduitMcp.DSL do
 
   defmacro field(name, type, description, opts) when is_list(opts) do
     assert_no_block!(:field, name, description, opts, __CALLER__)
+    {description, opts} = split_blockless_opts(description, opts)
 
     quote do
       field_def = %{
@@ -836,6 +916,28 @@ defmodule ConduitMcp.DSL do
 
       # Function capture
       handle &MyModule.my_function/2
+
+  ## Asking the client for input (MRTR)
+
+  On a modern-era (`2026-07-28`) request the handler may return
+  `{:input_required, input_requests, state}`; the retry finds the restored
+  state and the client's answers in `conn.assigns[:mcp_input]`. See
+  "Multi round-trip requests (MRTR)" in `ConduitMcp.Server`.
+
+      handle fn conn, params ->
+        case conn.assigns[:mcp_input] do
+          nil ->
+            {:input_required,
+             %{"approval" => ConduitMcp.MRTR.elicit("Approve deploy?", schema)},
+             %{step: :awaiting_approval, target: params["target"]}}
+
+          %{state: %{"target" => target}, responses: %{"approval" => %{"action" => "accept"}}} ->
+            text("Deployed \#{target}")
+
+          _declined ->
+            text("Cancelled")
+        end
+      end
   """
   defmacro handle({:fn, _, _} = fun) do
     # Capture the AST of the anonymous function
@@ -888,6 +990,7 @@ defmodule ConduitMcp.DSL do
       @mcp_current_prompt_handler nil
       @mcp_current_prompt_completions []
       @mcp_current_scope nil
+      @mcp_current_cache nil
 
       unquote(block)
 
@@ -896,8 +999,9 @@ defmodule ConduitMcp.DSL do
         description: @mcp_current_prompt_description,
         args: Enum.reverse(@mcp_current_prompt_args),
         handler: @mcp_current_prompt_handler,
-        completions: @mcp_current_prompt_completions,
-        scope: @mcp_current_scope
+        completions: Enum.reverse(@mcp_current_prompt_completions),
+        scope: @mcp_current_scope,
+        cache: @mcp_current_cache
       }
 
       Module.delete_attribute(__MODULE__, :mcp_current_prompt_name)
@@ -906,6 +1010,7 @@ defmodule ConduitMcp.DSL do
       Module.delete_attribute(__MODULE__, :mcp_current_prompt_handler)
       Module.delete_attribute(__MODULE__, :mcp_current_prompt_completions)
       Module.delete_attribute(__MODULE__, :mcp_current_scope)
+      Module.delete_attribute(__MODULE__, :mcp_current_cache)
     end
   end
 
@@ -934,7 +1039,10 @@ defmodule ConduitMcp.DSL do
   @doc """
   Defines the get handler for a prompt.
 
-  The handler should return a list of message objects.
+  The handler should return a list of message objects. On a modern-era
+  request it may instead return `{:input_required, input_requests, state}`,
+  which is passed through unwrapped; see "Multi round-trip requests (MRTR)"
+  in `ConduitMcp.Server`.
 
   ## Examples
 
@@ -966,24 +1074,99 @@ defmodule ConduitMcp.DSL do
   end
 
   @doc """
-  Defines an autocomplete handler for a prompt argument.
+  Declares the autocompletion of one argument of the enclosing prompt, or
+  one parameter of the enclosing resource template, for
+  `completion/complete`.
 
-  ## Example
+  The handler receives the conn and the value typed so far (`""` when the
+  client sent none) and returns a list of strings; the server answers with
+  the first 100, `total` set to the length of the list and `hasMore` set
+  when it was longer. Give it as an anonymous function, a capture, or a
+  module and function name (called as `module.function(conn, value)`).
 
-      complete :language, fn _conn, prefix ->
-        ~w(elixir python javascript rust)
-        |> Enum.filter(&String.starts_with?(&1, prefix))
+  ## Examples
+
+      prompt "code_review", "Code review assistant" do
+        arg :language, :string, "Language"
+        get fn _conn, args -> [user("Review my \#{args["language"]}")] end
+
+        complete :language, fn _conn, prefix ->
+          ~w(elixir python javascript rust)
+          |> Enum.filter(&String.starts_with?(&1, prefix))
+        end
       end
-  """
-  defmacro complete(arg_name, fun) do
-    quote do
-      completion_def = %{
-        arg: unquote(arg_name),
-        handler: unquote(fun)
-      }
 
-      @mcp_current_prompt_completions completion_def
+      resource "file:///{path}" do
+        read MyFiles, :read
+        complete :path, &MyFiles.autocomplete/2
+      end
+
+      resource "user://{id}" do
+        read MyUsers, :read
+        complete :id, MyUsers, :complete_id
+      end
+
+  The name must be one of the prompt's `arg`s or one of the template's
+  `{params}` (a compile error otherwise), at most once per block.
+  """
+  defmacro complete(arg_name, {:fn, _, _} = fun) do
+    quote do
+      ConduitMcp.DSL.__put_completion__(
+        __MODULE__,
+        unquote(arg_name),
+        {:fn_ast, unquote(Macro.escape(fun))}
+      )
     end
+  end
+
+  defmacro complete(arg_name, {:&, _, _} = fun) do
+    quote do
+      ConduitMcp.DSL.__put_completion__(
+        __MODULE__,
+        unquote(arg_name),
+        {:fn_ast, unquote(Macro.escape(fun))}
+      )
+    end
+  end
+
+  defmacro complete(arg_name, module, function) do
+    quote do
+      ConduitMcp.DSL.__put_completion__(
+        __MODULE__,
+        unquote(arg_name),
+        {:mfa, {unquote(module), unquote(function)}}
+      )
+    end
+  end
+
+  # Adds a completion to the enclosing `prompt` or `resource` block - the
+  # block's own attribute, so a resource's completions are not read as a
+  # prompt's.
+  @doc false
+  def __put_completion__(module, arg_name, handler) do
+    attribute =
+      cond do
+        Module.has_attribute?(module, :mcp_current_prompt_name) ->
+          :mcp_current_prompt_completions
+
+        Module.has_attribute?(module, :mcp_current_resource_uri) ->
+          :mcp_current_resource_completions
+
+        true ->
+          raise CompileError,
+            description:
+              "#{inspect(module)}: complete/2 must be called inside a prompt or resource block"
+      end
+
+    arg = to_string(arg_name)
+    completions = Module.get_attribute(module, attribute) || []
+
+    if Enum.any?(completions, &(&1.arg == arg)) do
+      raise CompileError,
+        description: "#{inspect(module)}: complete/2 for #{inspect(arg)} is declared twice"
+    end
+
+    Module.put_attribute(module, attribute, [%{arg: arg, handler: handler} | completions])
   end
 
   # ============ RESOURCES ============
@@ -1017,6 +1200,7 @@ defmodule ConduitMcp.DSL do
       @mcp_current_resource_handler nil
       @mcp_current_resource_completions []
       @mcp_current_scope nil
+      @mcp_current_cache nil
 
       unquote(block)
 
@@ -1025,8 +1209,9 @@ defmodule ConduitMcp.DSL do
         description: @mcp_current_resource_description,
         mime_type: @mcp_current_resource_mime_type,
         handler: @mcp_current_resource_handler,
-        completions: @mcp_current_resource_completions,
-        scope: @mcp_current_scope
+        completions: Enum.reverse(@mcp_current_resource_completions),
+        scope: @mcp_current_scope,
+        cache: @mcp_current_cache
       }
 
       Module.delete_attribute(__MODULE__, :mcp_current_resource_uri)
@@ -1035,6 +1220,7 @@ defmodule ConduitMcp.DSL do
       Module.delete_attribute(__MODULE__, :mcp_current_resource_handler)
       Module.delete_attribute(__MODULE__, :mcp_current_resource_completions)
       Module.delete_attribute(__MODULE__, :mcp_current_scope)
+      Module.delete_attribute(__MODULE__, :mcp_current_cache)
     end
   end
 
@@ -1073,7 +1259,9 @@ defmodule ConduitMcp.DSL do
   @doc """
   Defines the read handler for a resource.
 
-  Handler signature: `(conn, uri_params, opts) -> result`
+  Handler signature: `(conn, uri_params, opts) -> result`. On a modern-era
+  request `result` may be `{:input_required, input_requests, state}`; see
+  "Multi round-trip requests (MRTR)" in `ConduitMcp.Server`.
 
   ## Examples
 
@@ -1156,6 +1344,7 @@ defmodule ConduitMcp.DSL do
       @mcp_current_scope nil
       @mcp_current_tool_meta nil
       @mcp_current_app_view nil
+      @mcp_current_cache nil
 
       unquote(block)
 
@@ -1184,7 +1373,8 @@ defmodule ConduitMcp.DSL do
         handler: @mcp_current_tool_handler,
         annotations: @mcp_current_tool_annotations,
         scope: @mcp_current_scope,
-        meta: @mcp_current_tool_meta
+        meta: @mcp_current_tool_meta,
+        cache: @mcp_current_cache
       }
 
       # Store the resource for the UI HTML — use :app_view handler type which
@@ -1198,7 +1388,8 @@ defmodule ConduitMcp.DSL do
         mime_type: "text/html;profile=mcp-app",
         handler: {:app_view, app_view_path},
         completions: [],
-        scope: @mcp_current_scope
+        scope: @mcp_current_scope,
+        cache: @mcp_current_cache
       }
 
       # Clean up
@@ -1210,6 +1401,7 @@ defmodule ConduitMcp.DSL do
       Module.delete_attribute(__MODULE__, :mcp_current_scope)
       Module.delete_attribute(__MODULE__, :mcp_current_tool_meta)
       Module.delete_attribute(__MODULE__, :mcp_current_app_view)
+      Module.delete_attribute(__MODULE__, :mcp_current_cache)
     end
   end
 
@@ -1255,6 +1447,9 @@ defmodule ConduitMcp.DSL do
 
     tool_schemas = Enum.map(reversed_tools, &ConduitMcp.DSL.SchemaBuilder.build_tool_schema/1)
 
+    Enum.each(tool_schemas, &__validate_x_mcp_headers__!(env.module, &1))
+    Enum.each(reversed_prompts, &__reject_headers__!(env.module, "prompt", &1.name, &1.args))
+
     prompt_schemas =
       Enum.map(reversed_prompts, &ConduitMcp.DSL.SchemaBuilder.build_prompt_schema/1)
 
@@ -1271,6 +1466,7 @@ defmodule ConduitMcp.DSL do
 
     tool_clauses = generate_tool_clauses(reversed_tools)
     prompt_clauses = generate_prompt_clauses(reversed_prompts)
+    completion_clauses = generate_completion_clauses(env.module, reversed_prompts, resources)
 
     # Dispatch and the scope lookup are both built from this one list, so the
     # lookup answers for exactly the resource `handle_read_resource/2` serves.
@@ -1282,6 +1478,12 @@ defmodule ConduitMcp.DSL do
     tool_scopes = scope_entries(reversed_tools, &to_string(&1.name))
     prompt_scopes = scope_entries(reversed_prompts, &to_string(&1.name))
     resource_scopes = scope_entries(readable_resources, & &1.uri)
+
+    cache_hints = %{
+      tools: cache_hint_map(reversed_tools, &to_string(&1.name)),
+      prompts: cache_hint_map(reversed_prompts, &to_string(&1.name)),
+      resources: Enum.map(readable_resources, &{&1.uri, cache_hint(&1, &1.uri)})
+    }
 
     templated_resource_clause? =
       Enum.any?(readable_resources, &ConduitMcp.DSL.SchemaBuilder.templated?/1)
@@ -1320,6 +1522,10 @@ defmodule ConduitMcp.DSL do
       unquote(
         ConduitMcp.DSL.__generate_scope_clauses__(tool_scopes, prompt_scopes, resource_scopes)
       )
+
+      # Per-declaration cache hints, resolved by `ConduitMcp.CacheHints`.
+      @doc false
+      def __cache_hints__, do: unquote(Macro.escape(cache_hints))
 
       # Always generate handle_list_tools (empty list if no tools)
       def handle_list_tools(_conn) do
@@ -1382,12 +1588,152 @@ defmodule ConduitMcp.DSL do
         def handle_read_resource(_conn, uri) do
           {:error,
            %{
-             "code" => ConduitMcp.Errors.resource_not_found(),
+             "code" => ConduitMcp.Protocol.Legacy.resource_not_found(),
              "message" => "Resource not found: #{ConduitMcp.Reflect.text(uri)}"
            }}
         end
       end
+
+      # `completion/complete`, only when a block declared a `complete`: its
+      # presence is what advertises the `completions` capability.
+      unquote(completion_clauses)
     end
+  end
+
+  # One `handle_complete/3` clause per `complete` declaration, keyed by the
+  # ref (`ref/prompt` + name, `ref/resource` + URI template) and the argument
+  # name, then a fallback: a known prompt or resource whose argument has no
+  # completion answers empty, an unknown one -32602.
+  defp generate_completion_clauses(module, reversed_prompts, resources) do
+    resources = Enum.reverse(resources)
+
+    entries =
+      for(
+        %{name: name, args: args, completions: completions} <- reversed_prompts,
+        completion <- completions,
+        do:
+          {"ref/prompt", "name", to_string(name), Enum.map(args, &to_string(&1.name)), completion}
+      ) ++
+        for(
+          %{uri: uri, completions: completions} <- resources,
+          completion <- completions,
+          do: {"ref/resource", "uri", uri, template_params(uri), completion}
+        )
+
+    if entries == [] do
+      []
+    else
+      prompt_names = Enum.map(reversed_prompts, &to_string(&1.name))
+      resource_uris = Enum.map(resources, & &1.uri)
+
+      Enum.map(entries, &generate_completion_clause(module, &1)) ++
+        [
+          quote do
+            def handle_complete(_conn, ref, _argument) do
+              ConduitMcp.DSL.__complete_fallback__(
+                ref,
+                unquote(prompt_names),
+                unquote(resource_uris)
+              )
+            end
+          end
+        ]
+    end
+  end
+
+  defp generate_completion_clause(
+         module,
+         {type, key, target, names, %{arg: arg, handler: handler}}
+       ) do
+    unless arg in names do
+      raise CompileError,
+        description:
+          "#{inspect(module)}: complete/2 names #{inspect(arg)}, which is not an argument " <>
+            "of #{type} #{inspect(target)} (#{Enum.map_join(names, ", ", &inspect/1)})"
+    end
+
+    call =
+      case handler do
+        {:fn_ast, handler_ast} ->
+          quote do: unquote(handler_ast).(conn, ConduitMcp.DSL.__completion_value__(argument))
+
+        {:mfa, {mod, fun}} ->
+          quote do
+            apply(unquote(mod), unquote(fun), [
+              conn,
+              ConduitMcp.DSL.__completion_value__(argument)
+            ])
+          end
+      end
+
+    quote do
+      def handle_complete(
+            conn,
+            %{"type" => unquote(type), unquote(key) => unquote(target)},
+            %{"name" => unquote(arg)} = argument
+          ) do
+        ConduitMcp.DSL.__completion_result__(unquote(call))
+      end
+    end
+  end
+
+  defp template_params(uri), do: for([_, name] <- Regex.scan(~r/\{([^}]+)\}/, uri), do: name)
+
+  @max_completion_values 100
+
+  @doc false
+  # The value typed so far: `argument.value`, `""` when absent.
+  @spec __completion_value__(map()) :: String.t()
+  def __completion_value__(%{"value" => value}) when is_binary(value), do: value
+  def __completion_value__(_argument), do: ""
+
+  @doc false
+  # A `complete` handler's list as the `completion/complete` result: at most
+  # 100 values (the specification's cap), the full count
+  # in `total`, `hasMore` when values were cut.
+  @spec __completion_result__(term()) :: {:ok, map()}
+  def __completion_result__(values) when is_list(values) do
+    unless Enum.all?(values, &is_binary/1) do
+      raise ArgumentError,
+            "a complete handler must return a list of strings, got: " <>
+              ConduitMcp.Reflect.text(values, 200)
+    end
+
+    total = length(values)
+
+    {:ok,
+     %{
+       "completion" => %{
+         "values" => Enum.take(values, @max_completion_values),
+         "total" => total,
+         "hasMore" => total > @max_completion_values
+       }
+     }}
+  end
+
+  def __completion_result__(other) do
+    raise ArgumentError,
+          "a complete handler must return a list of strings, got: " <>
+            ConduitMcp.Reflect.text(other, 200)
+  end
+
+  @doc false
+  @spec __complete_fallback__(map(), [String.t()], [String.t()]) :: {:ok, map()} | {:error, map()}
+  def __complete_fallback__(%{"type" => "ref/prompt", "name" => name}, prompts, _resources),
+    do: known_or_unknown(name in prompts, "prompt", name)
+
+  def __complete_fallback__(%{"type" => "ref/resource", "uri" => uri}, _prompts, resources),
+    do: known_or_unknown(uri in resources, "resource", uri)
+
+  defp known_or_unknown(true, _kind, _name),
+    do: {:ok, %{"completion" => %{"values" => [], "total" => 0, "hasMore" => false}}}
+
+  defp known_or_unknown(false, kind, name) do
+    {:error,
+     %{
+       "code" => ConduitMcp.Errors.invalid_params(),
+       "message" => "Unknown #{kind}: #{ConduitMcp.Reflect.text(name)}"
+     }}
   end
 
   defp partition_resources(resources) do
@@ -1412,6 +1758,19 @@ defmodule ConduitMcp.DSL do
     |> Enum.filter(&(&1.handler != nil))
   end
 
+  # `%{name => hint}` for the declarations that declared a `cache`; also
+  # validates every declaration's hint (`ConduitMcp.CacheHints.validate!/3`).
+  defp cache_hint_map(entries, name_fun) do
+    for entry <- entries,
+        hint = cache_hint(entry, name_fun.(entry)),
+        hint != nil,
+        into: %{},
+        do: {name_fun.(entry), hint}
+  end
+
+  defp cache_hint(entry, subject),
+    do: ConduitMcp.CacheHints.validate!(Map.get(entry, :cache), subject, Map.get(entry, :scope))
+
   # One `{name, scope | nil}` entry per declaration, in the order given, which
   # is dispatch order. `__generate_scope_clauses__/4` decides which unscoped
   # entries it can drop: resource lookups need them to mirror dispatch.
@@ -1424,6 +1783,41 @@ defmodule ConduitMcp.DSL do
         scope -> {name, __validate_scope__!(scope, name)}
       end
     end)
+  end
+
+  @doc false
+  # The 2026-07-28 spec tells clients to drop a tool whose `x-mcp-header`
+  # annotations are invalid, so a bad `header:` would make the tool vanish
+  # from every conforming client without a word. The schema is final here,
+  # so the build refuses it instead. Shared with `ConduitMcp.Component`.
+  def __validate_x_mcp_headers__!(module, %{"name" => name, "inputSchema" => schema}) do
+    case ConduitMcp.Headers.validate_x_mcp_header(schema) do
+      :ok ->
+        :ok
+
+      {:error, errors} ->
+        raise CompileError,
+          description:
+            "#{inspect(module)}: tool #{inspect(name)} has an invalid `header:` " <>
+              "(x-mcp-header) annotation:\n  * " <> Enum.join(errors, "\n  * ")
+    end
+  end
+
+  @doc false
+  # `header:` mirrors a *tool* argument into an `Mcp-Param-*` header. A prompt
+  # argument has no such header, and `ConduitMcp.Validation.SchemaConverter`
+  # drops the option, so accepting it here would silently do nothing.
+  def __reject_headers__!(module, kind, name, params) do
+    case Enum.find(params || [], &Keyword.has_key?(&1.opts || [], :header)) do
+      nil ->
+        :ok
+
+      param ->
+        raise CompileError,
+          description:
+            "#{inspect(module)}: #{kind} #{inspect(to_string(name))} argument " <>
+              "#{inspect(param.name)}: the header: option is only valid on tool parameters"
+    end
   end
 
   @doc false
@@ -1630,16 +2024,14 @@ defmodule ConduitMcp.DSL do
       {:fn_ast, handler_ast} ->
         quote do
           def handle_get_prompt(conn, unquote(prompt_name), args) do
-            messages = unquote(handler_ast).(conn, args)
-            {:ok, %{"messages" => messages}}
+            ConduitMcp.DSL.__prompt_result__(unquote(handler_ast).(conn, args))
           end
         end
 
       {:mfa, {mod, fun}} ->
         quote do
           def handle_get_prompt(conn, unquote(prompt_name), args) do
-            messages = apply(unquote(mod), unquote(fun), [conn, args])
-            {:ok, %{"messages" => messages}}
+            ConduitMcp.DSL.__prompt_result__(apply(unquote(mod), unquote(fun), [conn, args]))
           end
         end
 
@@ -1649,6 +2041,49 @@ defmodule ConduitMcp.DSL do
             "Prompt '#{prompt_name}' has no get handler defined. Use 'get fn ... end' or 'get Module, :function'"
     end
   end
+
+  # A DSL `get` handler returns the message list, which is wrapped into the
+  # `prompts/get` result - except an MRTR `{:input_required, ...}`, which
+  # `ConduitMcp.Handler` must see untouched.
+  @doc false
+  @spec __prompt_result__(term()) :: {:ok, map()} | ConduitMcp.Server.input_required()
+  def __prompt_result__({:input_required, _input_requests, _state} = input_required),
+    do: input_required
+
+  def __prompt_result__(messages), do: {:ok, %{"messages" => messages}}
+
+  # A DSL `read` handler may answer with the tool-shaped helpers (`text/1`,
+  # `json/1`, `image/2`, `audio/2`), whose `"content"` blocks are not a
+  # `ReadResourceResult`. Those become `"contents"` for `uri`, typed with the
+  # resource's `mime_type` (text) or the block's own (image, audio). Anything
+  # else - `"contents"` results, errors, MRTR `{:input_required, ...}`, or a
+  # block with no resource-contents form - passes through untouched.
+  @doc false
+  @spec __resource_result__(term(), String.t(), String.t() | nil) :: term()
+  def __resource_result__({:ok, %{"content" => blocks} = result} = reply, uri, mime_type)
+      when is_list(blocks) and not is_map_key(result, "contents") do
+    contents = Enum.map(blocks, &resource_contents(&1, uri, mime_type))
+
+    if Enum.all?(contents),
+      do: {:ok, result |> Map.delete("content") |> Map.put("contents", contents)},
+      else: reply
+  end
+
+  def __resource_result__(reply, _uri, _mime_type), do: reply
+
+  defp resource_contents(%{"type" => "text", "text" => text}, uri, nil)
+       when is_binary(text),
+       do: %{"uri" => uri, "text" => text}
+
+  defp resource_contents(%{"type" => "text", "text" => text}, uri, mime_type)
+       when is_binary(text),
+       do: %{"uri" => uri, "mimeType" => mime_type, "text" => text}
+
+  defp resource_contents(%{"type" => type, "data" => data, "mimeType" => mime}, uri, _mime_type)
+       when type in ["image", "audio"] and is_binary(data),
+       do: %{"uri" => uri, "mimeType" => mime, "blob" => data}
+
+  defp resource_contents(_block, _uri, _mime_type), do: nil
 
   # `readable_resources` is already in dispatch order.
   # Static URIs are tried before any template, then templates in order.
@@ -1661,18 +2096,28 @@ defmodule ConduitMcp.DSL do
   end
 
   # Static URIs get direct pattern-match clauses — O(1) dispatch
-  defp generate_static_resource_clause(%{uri: res_uri, handler: {:fn_ast, handler_ast}}) do
+  defp generate_static_resource_clause(%{uri: res_uri, mime_type: mime, handler: {:fn_ast, ast}}) do
     quote do
       def handle_read_resource(conn, unquote(res_uri)) do
-        unquote(handler_ast).(conn, %{}, %{})
+        ConduitMcp.DSL.__resource_result__(
+          unquote(ast).(conn, %{}, %{}),
+          unquote(res_uri),
+          unquote(mime)
+        )
       end
     end
   end
 
-  defp generate_static_resource_clause(%{uri: res_uri, handler: {:mfa, {mod, fun}}}) do
+  defp generate_static_resource_clause(%{uri: res_uri, mime_type: mime, handler: {:mfa, mfa}}) do
+    {mod, fun} = mfa
+
     quote do
       def handle_read_resource(conn, unquote(res_uri)) do
-        apply(unquote(mod), unquote(fun), [conn, %{}, %{}])
+        ConduitMcp.DSL.__resource_result__(
+          apply(unquote(mod), unquote(fun), [conn, %{}, %{}]),
+          unquote(res_uri),
+          unquote(mime)
+        )
       end
     end
   end
@@ -1697,7 +2142,7 @@ defmodule ConduitMcp.DSL do
       quote do
         {:error,
          %{
-           "code" => ConduitMcp.Errors.resource_not_found(),
+           "code" => ConduitMcp.Protocol.Legacy.resource_not_found(),
            "message" => "Resource not found: #{ConduitMcp.Reflect.text(uri)}"
          }}
       end
@@ -1713,8 +2158,8 @@ defmodule ConduitMcp.DSL do
     ]
   end
 
-  defp generate_templated_resource_match(%{uri: res_uri, handler: handler}, no_match) do
-    {params_pattern, serve} = templated_resource_handler(handler)
+  defp generate_templated_resource_match(%{uri: res_uri} = resource, no_match) do
+    {params_pattern, serve} = templated_resource_handler(resource)
 
     quote do
       {param_names, regex} = ConduitMcp.DSL.template_regex(__MODULE__, unquote(res_uri))
@@ -1726,15 +2171,29 @@ defmodule ConduitMcp.DSL do
     end
   end
 
-  defp templated_resource_handler({:fn_ast, handler_ast}) do
-    {quote(do: params), quote(do: unquote(handler_ast).(conn, params, %{}))}
+  defp templated_resource_handler(%{mime_type: mime, handler: {:fn_ast, handler_ast}}) do
+    {quote(do: params),
+     quote do
+       ConduitMcp.DSL.__resource_result__(
+         unquote(handler_ast).(conn, params, %{}),
+         uri,
+         unquote(mime)
+       )
+     end}
   end
 
-  defp templated_resource_handler({:mfa, {mod, fun}}) do
-    {quote(do: params), quote(do: apply(unquote(mod), unquote(fun), [conn, params, %{}]))}
+  defp templated_resource_handler(%{mime_type: mime, handler: {:mfa, {mod, fun}}}) do
+    {quote(do: params),
+     quote do
+       ConduitMcp.DSL.__resource_result__(
+         apply(unquote(mod), unquote(fun), [conn, params, %{}]),
+         uri,
+         unquote(mime)
+       )
+     end}
   end
 
-  defp templated_resource_handler({:app_view, view_path}) do
+  defp templated_resource_handler(%{handler: {:app_view, view_path}}) do
     {quote(do: _params), app_view_result(view_path)}
   end
 

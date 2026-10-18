@@ -19,6 +19,19 @@ defmodule ConduitMcp.Application do
     * `ConduitMcp.Session.EtsStore.Owner` — always started.
     * `ConduitMcp.Transport.SSE.Owner` — always started; owns the slot table
       (one row per live stream) behind `Transport.SSE`'s `:max_connections`.
+    * `ConduitMcp.Transport.SSEStream.Owner` — always started; owns the slot
+      table (one row per open stream) behind the HTTP transports'
+      `:max_streams` cap on streamed POST responses.
+    * `ConduitMcp.Subscriptions` — always started; a `Registry` (duplicate
+      keys) of the `subscriptions/listen` streams served by this node, keyed
+      by the notification topics they deliver. The registry's own processes
+      only clean up after streams that die; publishing and registering go
+      straight to its ETS tables from the calling process.
+    * `ConduitMcp.Subscriptions.Admission` — always started; the live
+      `subscriptions/listen` streams of each principal behind
+      `:max_listens_per_principal`. Unlike the table owners it is called:
+      admitting a stream (once per listen) counts, supersedes and records in
+      one serialized step. It runs no user code.
     * `ConduitMcp.Session.Janitor` — always started against
       `ConduitMcp.Session.EtsStore`, under the name
       `ConduitMcp.Session.Janitor.Default` so it cannot collide with a janitor
@@ -27,20 +40,38 @@ defmodule ConduitMcp.Application do
       `config :conduit_mcp, :session_janitor, ttl: ..., interval: ...`.
     * `ConduitMcp.Tasks.EtsStore.Owner` — started only when the default
       in-memory tasks store is in use (skipped for a custom `:tasks_store`).
+    * `ConduitMcp.Ext.Tasks.EtsStore.Owner` and the Ext.Tasks janitor (a
+      `ConduitMcp.Session.Janitor` named `ConduitMcp.Ext.Tasks.Janitor`) —
+      only when `config :conduit_mcp, :ext_tasks` enables the experimental
+      tasks extension; the owner only for the default store, the janitor
+      unless `janitor: false`. See `ConduitMcp.Ext.Tasks`.
     * `ConduitMcp.OAuth.KeyProvider.JWKS.Owner` — started when the JWKS key
       provider is compiled in (i.e. when `Req` is available).
 
   Every table above is `:public`; the owners create the table and then idle.
   Reads and writes go directly to ETS from the calling process — the owners
   are not `handle_call` gateways and must not become ones.
+  (`ConduitMcp.Subscriptions.Admission` owns no table; see its moduledoc for
+  why a process answering calls is right there.)
+
+  It also starts `ConduitMcp.Client.Registry`, a passive unique `Registry`
+  (partitioned by scheduler) in which every `ConduitMcp.Client` registers
+  its processes under tuple keys of its `:name`. The application starts no
+  client processes: you supervise `{ConduitMcp.Client, opts}` yourself.
 
   `start/2` also seeds the validation config into `:persistent_term` for O(1)
-  reads on every request.
+  reads on every request; when `config :conduit_mcp, :mrtr_keys` is set,
+  validates that keyring with `ConduitMcp.MRTR.State.validate_keys!/1` so a
+  malformed key fails at boot rather than on the first MRTR request; and
+  validates `:ext_tasks` (`ConduitMcp.Ext.Tasks.validate_config!/1`) and the
+  `:cache_ttl_ms` / `:cache_scope` defaults
+  (`ConduitMcp.CacheHints.validate_config!/0`).
   """
 
   use Application
 
   alias ConduitMcp.Cancellation
+  alias ConduitMcp.Ext
   alias ConduitMcp.OAuth.KeyProvider
   alias ConduitMcp.Session
   alias ConduitMcp.Tasks
@@ -50,10 +81,13 @@ defmodule ConduitMcp.Application do
     # Seed validation config into persistent_term for O(1) reads on every request
     config = Application.get_env(:conduit_mcp, :validation, [])
     :persistent_term.put({ConduitMcp, :validation_config}, config)
+    validate_mrtr_keys!()
+    ConduitMcp.CacheHints.validate_config!()
 
     children =
       always_started() ++
-        session_janitor() ++ cancellation_janitor() ++ tasks_children() ++ jwks_children()
+        session_janitor() ++
+        cancellation_janitor() ++ tasks_children() ++ ext_tasks_children() ++ jwks_children()
 
     # See https://hexdocs.pm/elixir/Supervisor.html
     # for other strategies and supported options
@@ -61,16 +95,32 @@ defmodule ConduitMcp.Application do
     Supervisor.start_link(children, opts)
   end
 
+  # Only when configured: MRTR is opt-in, and `MRTR.State.seal/3` raises its own
+  # clear error when a server uses it without keys.
+  defp validate_mrtr_keys! do
+    case Application.fetch_env(:conduit_mcp, :mrtr_keys) do
+      {:ok, keys} -> ConduitMcp.MRTR.State.validate_keys!(keys)
+      :error -> :ok
+    end
+  end
+
   # Own the cancellation, in-flight and session ETS tables from long-lived
   # processes so concurrent Bandit request handlers don't race on
   # `:ets.new/2` and — more importantly — so the tables survive the exit of
-  # whichever request process happened to touch them first.
+  # whichever request process happened to touch them first. The client
+  # registry is passive: clients register in it, so names of any term need no
+  # atoms (`ConduitMcp.Client.Registry` keys).
   defp always_started do
     [
       Cancellation.Owner,
       Cancellation.InFlightOwner,
       Session.EtsStore.Owner,
-      ConduitMcp.Transport.SSE.Owner
+      ConduitMcp.Transport.SSE.Owner,
+      ConduitMcp.Transport.SSEStream.Owner,
+      {Registry,
+       keys: :unique, name: ConduitMcp.Client.Registry, partitions: System.schedulers_online()},
+      ConduitMcp.Subscriptions,
+      ConduitMcp.Subscriptions.Admission
     ]
   end
 
@@ -124,22 +174,21 @@ defmodule ConduitMcp.Application do
   #
   # Public (but undocumented) so the config contract can be tested without
   # restarting the application.
-  def janitor(key, defaults, id) do
-    case Application.get_env(:conduit_mcp, key, []) do
-      false ->
-        []
+  def janitor(key, defaults, id),
+    do: janitor_spec(inspect(key), Application.get_env(:conduit_mcp, key, []), defaults, id)
 
-      true ->
-        [Supervisor.child_spec({Session.Janitor, defaults}, id: id)]
+  defp janitor_spec(_label, false, _defaults, _id), do: []
 
-      opts when is_list(opts) ->
-        [Supervisor.child_spec({Session.Janitor, Keyword.merge(defaults, opts)}, id: id)]
+  defp janitor_spec(_label, true, defaults, id),
+    do: [Supervisor.child_spec({Session.Janitor, defaults}, id: id)]
 
-      other ->
-        raise ArgumentError,
-              "config :conduit_mcp, #{inspect(key)} accepts true, false or a keyword " <>
-                "list of ConduitMcp.Session.Janitor options; got #{inspect(other)}"
-    end
+  defp janitor_spec(_label, opts, defaults, id) when is_list(opts),
+    do: [Supervisor.child_spec({Session.Janitor, Keyword.merge(defaults, opts)}, id: id)]
+
+  defp janitor_spec(label, other, _defaults, _id) do
+    raise ArgumentError,
+          "config :conduit_mcp, #{label} accepts true, false or a keyword " <>
+            "list of ConduitMcp.Session.Janitor options; got #{inspect(other)}"
   end
 
   # When the default in-memory store is configured (or no store is
@@ -150,6 +199,39 @@ defmodule ConduitMcp.Application do
       [Tasks.EtsStore.Owner]
     else
       []
+    end
+  end
+
+  @doc false
+  # The experimental tasks extension is opt-in: nothing starts unless
+  # `:ext_tasks` enables it. `Ext.Tasks.validate_config!/1` raises at boot for
+  # a malformed value, naming the key. Public (but undocumented) so the
+  # config contract can be tested without restarting the application.
+  def ext_tasks_children do
+    case Ext.Tasks.validate_config!(Application.get_env(:conduit_mcp, :ext_tasks, false)) do
+      false ->
+        []
+
+      opts ->
+        store = Keyword.get(opts, :store, Ext.Tasks.EtsStore)
+        owner = if store == Ext.Tasks.EtsStore, do: [Ext.Tasks.EtsStore.Owner], else: []
+
+        defaults = [
+          store: store,
+          ttl: :timer.hours(1),
+          interval: :timer.minutes(1),
+          name: Ext.Tasks.Janitor,
+          telemetry_event: [:conduit_mcp, :ext_tasks, :cleanup],
+          noun: "expired tasks-extension tasks"
+        ]
+
+        owner ++
+          janitor_spec(
+            ":ext_tasks janitor:",
+            Keyword.get(opts, :janitor, true),
+            defaults,
+            Ext.Tasks.Janitor
+          )
     end
   end
 

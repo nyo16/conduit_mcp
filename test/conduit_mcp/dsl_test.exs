@@ -424,10 +424,11 @@ defmodule ConduitMcp.DSLTest do
 
       {:ok, result} = DSLTestServer.handle_read_resource(conn, "user://{id}")
 
-      # Should return JSON content
+      # Should return JSON contents, typed with the declared mime_type
       assert is_map(result)
-      content = hd(result["content"])
-      assert content["type"] == "text"
+      content = hd(result["contents"])
+      assert content["mimeType"] == "application/json"
+      assert content["uri"] == "user://{id}"
 
       # Verify it's valid JSON
       assert {:ok, data} = JSON.decode(content["text"])
@@ -439,8 +440,12 @@ defmodule ConduitMcp.DSLTest do
 
       {:ok, result} = DSLTestServer.handle_read_resource(conn, "static://readme")
 
-      assert result["content"] == [
-               %{"type" => "text", "text" => "# README\n\nThis is a test README."}
+      assert result["contents"] == [
+               %{
+                 "uri" => "static://readme",
+                 "mimeType" => "text/markdown",
+                 "text" => "# README\n\nThis is a test README."
+               }
              ]
     end
 
@@ -450,8 +455,8 @@ defmodule ConduitMcp.DSLTest do
       # Test with actual user ID
       {:ok, result} = DSLTestServer.handle_read_resource(conn, "user://123")
 
-      content = hd(result["content"])
-      assert content["type"] == "text"
+      content = hd(result["contents"])
+      assert content["uri"] == "user://123"
 
       # Verify parameter was extracted and used
       {:ok, data} = JSON.decode(content["text"])
@@ -466,7 +471,7 @@ defmodule ConduitMcp.DSLTest do
       # Test with different ID
       {:ok, result} = DSLTestServer.handle_read_resource(conn, "user://456")
 
-      content = hd(result["content"])
+      content = hd(result["contents"])
       {:ok, data} = JSON.decode(content["text"])
       assert data["id"] == "456"
       assert data["name"] == "User 456"
@@ -478,7 +483,7 @@ defmodule ConduitMcp.DSLTest do
       # Test with URI that doesn't match any template
       {:error, error} = DSLTestServer.handle_read_resource(conn, "unknown://resource")
 
-      assert error["code"] == ConduitMcp.Errors.resource_not_found()
+      assert error["code"] == ConduitMcp.Protocol.Legacy.resource_not_found()
       assert error["message"] =~ "Resource not found"
     end
 
@@ -604,7 +609,7 @@ defmodule ConduitMcp.DSLTest do
       conn = %Plug.Conn{}
       {:ok, result} = DSLTestServer.handle_read_resource(conn, "user://{id}")
 
-      content_text = hd(result["content"])["text"]
+      content_text = hd(result["contents"])["text"]
       assert {:ok, _data} = JSON.decode(content_text)
     end
   end
@@ -1264,6 +1269,65 @@ defmodule ConduitMcp.DSLTest do
       assert result["content"] == [
                %{"type" => "audio", "data" => "AAAA", "mimeType" => "audio/wav"}
              ]
+    end
+  end
+
+  describe "image helper macros" do
+    alias ConduitMcp.Test.McpSchema
+
+    # `ImageContent` requires base64 `data` and a `mimeType`. image/1 used to
+    # put a URL in `data` with no `mimeType`, which every spec version rejects.
+    test "image/2 builds a conformant ImageContent" do
+      import ConduitMcp.DSL.Helpers
+
+      assert {:ok, %{"content" => [content]} = result} = image("iVBORw0KGgo=", "image/png")
+
+      assert content == %{"type" => "image", "data" => "iVBORw0KGgo=", "mimeType" => "image/png"}
+      assert :ok = McpSchema.validate("2025-11-25", "ImageContent", content)
+      assert :ok = McpSchema.validate("2025-11-25", "CallToolResult", result)
+    end
+
+    test "image/1 links the URL as a conformant resource_link" do
+      import ConduitMcp.DSL.Helpers
+
+      url = "https://charts.example/q3.png"
+      assert {:ok, %{"content" => [content]} = result} = image(url)
+
+      assert %{"type" => "resource_link", "uri" => ^url} = content
+      assert :ok = McpSchema.validate("2025-11-25", "ResourceLink", content)
+      assert :ok = McpSchema.validate("2025-11-25", "CallToolResult", result)
+    end
+
+    # The README and guides showed image/1 taking base64 data; that use keeps
+    # working, now with the mimeType the spec requires.
+    test "image/1 with base64 image data builds a conformant ImageContent" do
+      import ConduitMcp.DSL.Helpers
+
+      png = Base.encode64(<<0x89, "PNG", 0x0D, 0x0A, 0x1A, 0x0A, 0::64, "IHDR">>)
+      jpeg = Base.encode64(<<0xFF, 0xD8, 0xFF, 0xE0, 0::160>>)
+      gif = Base.encode64("GIF89a" <> <<0::160>>)
+      webp = Base.encode64("RIFF" <> <<0::32>> <> "WEBPVP8 " <> <<0::64>>)
+
+      for {data, mime_type} <- [
+            {png, "image/png"},
+            {jpeg, "image/jpeg"},
+            {gif, "image/gif"},
+            {webp, "image/webp"}
+          ] do
+        assert {:ok, %{"content" => [content]} = result} = image(data)
+        assert content == %{"type" => "image", "data" => data, "mimeType" => mime_type}
+        assert :ok = McpSchema.validate("2025-11-25", "CallToolResult", result)
+      end
+    end
+
+    test "image/1 rejects data whose type it cannot tell, pointing at image/2" do
+      import ConduitMcp.DSL.Helpers
+
+      assert_raise ArgumentError, ~r/image\(data, mime_type\)/, fn ->
+        image(Base.encode64("definitely not an image at all"))
+      end
+
+      assert_raise ArgumentError, ~r/URL or base64/, fn -> image(42) end
     end
   end
 end

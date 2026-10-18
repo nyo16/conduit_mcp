@@ -1,153 +1,95 @@
-#!/usr/bin/env elixir
+# Exercises the simple tools server with ConduitMcp.Client.
+#
+# Start the server in one terminal (from the repo root):
+#
+#     mix run --no-halt examples/simple_tools_server/run.exs
+#
+# then, in another:
+#
+#     mix run examples/simple_tools_server/client_test.exs
+#
+# URL defaults to http://localhost:4001/ (the server's default PORT). The
+# client negotiates the protocol era itself (`protocol: :auto`): the server
+# answers the modern `server/discover`, so this runs on 2026-07-28; pass
+# PROTOCOL=legacy to force the 2025-11-25 `initialize` handshake.
 
-# Simple MCP client to test the server
-# Usage: elixir examples/simple_tools_server/client_test.exs
+alias ConduitMcp.Client
+alias ConduitMcp.Client.Transport.StreamableHTTP
 
-defmodule SimpleMCPClient do
-  @server_url "http://localhost:4001"
+url = System.get_env("URL", "http://localhost:4001/")
 
-  def test_server do
-    IO.puts("\n=== Testing MCP Server ===\n")
-
-    # Step 1: Connect to SSE endpoint to get message endpoint
-    IO.puts("1. Connecting to SSE endpoint...")
-    {:ok, endpoint_url} = get_endpoint_from_sse()
-    IO.puts("   ✓ Got endpoint: #{endpoint_url}\n")
-
-    # Step 2: Initialize
-    IO.puts("2. Initializing connection...")
-
-    init_response =
-      send_request(endpoint_url, %{
-        "jsonrpc" => "2.0",
-        "id" => 1,
-        "method" => "initialize",
-        "params" => %{
-          "protocolVersion" => "2025-06-18",
-          "capabilities" => %{},
-          "clientInfo" => %{
-            "name" => "test-client",
-            "version" => "1.0.0"
-          }
-        }
-      })
-
-    IO.puts("   ✓ Server: #{init_response["result"]["serverInfo"]["name"]}")
-    IO.puts("   ✓ Protocol: #{init_response["result"]["protocolVersion"]}\n")
-
-    # Step 3: List tools
-    IO.puts("3. Listing available tools...")
-
-    tools_response =
-      send_request(endpoint_url, %{
-        "jsonrpc" => "2.0",
-        "id" => 2,
-        "method" => "tools/list",
-        "params" => %{}
-      })
-
-    tools = tools_response["result"]["tools"]
-    IO.puts("   ✓ Found #{length(tools)} tools:")
-
-    Enum.each(tools, fn tool ->
-      IO.puts("     - #{tool["name"]}: #{tool["description"]}")
-    end)
-
-    IO.puts("")
-
-    # Step 4: Test echo tool
-    IO.puts("4. Testing echo tool...")
-    test_message = "Hello from Elixir MCP client!"
-
-    echo_response =
-      send_request(endpoint_url, %{
-        "jsonrpc" => "2.0",
-        "id" => 3,
-        "method" => "tools/call",
-        "params" => %{
-          "name" => "echo",
-          "arguments" => %{
-            "message" => test_message
-          }
-        }
-      })
-
-    echo_result = echo_response["result"]["content"] |> List.first()
-    IO.puts("   Input:  \"#{test_message}\"")
-    IO.puts("   Output: \"#{echo_result["text"]}\"")
-    IO.puts("   ✓ Echo tool works!\n")
-
-    # Step 5: Test reverse_string tool
-    IO.puts("5. Testing reverse_string tool...")
-    test_text = "Elixir MCP"
-
-    reverse_response =
-      send_request(endpoint_url, %{
-        "jsonrpc" => "2.0",
-        "id" => 4,
-        "method" => "tools/call",
-        "params" => %{
-          "name" => "reverse_string",
-          "arguments" => %{
-            "text" => test_text
-          }
-        }
-      })
-
-    reverse_result = reverse_response["result"]["content"] |> List.first()
-    IO.puts("   Input:  \"#{test_text}\"")
-    IO.puts("   Output: \"#{reverse_result["text"]}\"")
-    IO.puts("   ✓ Reverse tool works!\n")
-
-    IO.puts("=== All Tests Passed! ===\n")
+protocol =
+  case System.get_env("PROTOCOL", "auto") do
+    "auto" -> :auto
+    "modern" -> :modern
+    "legacy" -> :legacy
   end
 
-  defp get_endpoint_from_sse do
-    # Connect to SSE endpoint and read the endpoint URL
-    {output, exit_code} = System.cmd("curl", ["-N", "-s", "-m", "2", "#{@server_url}/sse"])
+check = fn
+  true, what ->
+    IO.puts("   ✓ #{what}")
 
-    # Parse SSE message even if curl times out (exit code 28)
-    # Format: "event: endpoint\ndata: <URL>\n\n"
-    endpoint =
-      output
-      |> String.split("\n")
-      |> Enum.find_value(fn line ->
-        if String.starts_with?(line, "data:") do
-          String.trim_leading(line, "data:") |> String.trim()
-        end
-      end)
-
-    if endpoint do
-      {:ok, endpoint}
-    else
-      IO.puts("   ✗ Failed to parse endpoint from SSE output")
-      IO.puts("   Output: #{output}")
-      {:error, :connection_failed}
-    end
-  end
-
-  defp send_request(url, payload) do
-    json = Jason.encode!(payload)
-
-    case System.cmd("curl", [
-           "-s",
-           "-X",
-           "POST",
-           url,
-           "-H",
-           "Content-Type: application/json",
-           "-d",
-           json
-         ]) do
-      {response, 0} ->
-        Jason.decode!(response)
-
-      {error, code} ->
-        IO.puts("   ✗ Request failed (#{code}): #{error}")
-        %{"error" => %{"message" => error}}
-    end
-  end
+  false, what ->
+    IO.puts(:stderr, "   ✗ #{what}")
+    System.halt(1)
 end
 
-# Run the tests
-SimpleMCPClient.test_server()
+text = fn %ConduitMcp.Client.ToolResult{content: content} ->
+  Enum.map_join(content, "", &(&1["text"] || ""))
+end
+
+IO.puts("\n=== Testing MCP Server at #{url} ===\n")
+
+{:ok, _pid} =
+  Client.start_link(
+    name: :simple_tools,
+    transport: {StreamableHTTP, url: url},
+    protocol: protocol
+  )
+
+IO.puts("1. Connecting...")
+
+case Client.await_ready(:simple_tools, 5_000) do
+  :ok ->
+    :ok
+
+  {:error, error} ->
+    IO.puts(:stderr, "   ✗ not ready: #{Exception.message(error)} (is the server running?)")
+    System.halt(1)
+end
+
+{:ok, %{server_info: info, era: era, version: version}} = Client.server_info(:simple_tools)
+IO.puts("   ✓ Server: #{info.name} #{info.version}")
+IO.puts("   ✓ Era: #{era} (#{version})\n")
+
+IO.puts("2. Listing tools...")
+{:ok, tools} = Client.list_all_tools(:simple_tools)
+for tool <- tools, do: IO.puts("     - #{tool.name}: #{tool.description}")
+
+check.(
+  Enum.map(tools, & &1.name) |> Enum.sort() == ["echo", "reverse_string"],
+  "found echo and reverse_string\n"
+)
+
+IO.puts("3. Calling echo...")
+message = "Hello from ConduitMcp.Client!"
+{:ok, result} = Client.call_tool(:simple_tools, "echo", %{"message" => message})
+
+check.(
+  not result.is_error and text.(result) == message,
+  "echo returned #{inspect(text.(result))}\n"
+)
+
+IO.puts("4. Calling reverse_string...")
+{:ok, result} = Client.call_tool(:simple_tools, "reverse_string", %{"text" => "Elixir MCP"})
+check.(text.(result) == "PCM rixilE", "reverse_string returned #{inspect(text.(result))}\n")
+
+IO.puts("5. Calling echo without its required argument...")
+# The server rejects the arguments before running the tool: a JSON-RPC
+# error, so `{:error, %Error{}}`. (A tool that runs and fails returns
+# `{:ok, %ToolResult{is_error: true}}` instead.)
+{:error, error} = Client.call_tool(:simple_tools, "echo", %{})
+check.(error.reason == {:jsonrpc, -32602}, "#{Exception.message(error)}\n")
+
+:ok = Client.close(:simple_tools)
+IO.puts("=== All Tests Passed! ===\n")
