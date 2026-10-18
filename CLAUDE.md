@@ -11,7 +11,7 @@ ConduitMCP is an Elixir library implementing the [Model Context Protocol (MCP)](
 ```bash
 mix deps.get              # Install dependencies
 mix compile               # Compile
-mix test                  # Run all tests (~2,360: 2,256 tests, 61 doctests, 40 properties; includes :integration and :stdio)
+mix test                  # Run all tests (~2,400: 2,304 tests, 61 doctests, 40 properties; includes :integration and :stdio)
 mix test test/conduit_mcp/dsl_test.exs           # Run a single test file
 mix test test/conduit_mcp/dsl_test.exs:42        # Run a specific test line
 mix format                # Format code
@@ -123,7 +123,7 @@ Tools can carry `_meta` metadata via the `meta/1` macro (generic map) or `ui/1` 
 - Every stateful process that may hold secrets or credentials implements `format_status/1` and redacts them (connection, stdio port owner, `TokenStore.ETS`).
 - ETS owners stay create-and-idle `ConduitMcp.EtsOwner` with `:public` tables, with three documented `:protected` exceptions: the OAuth `TokenStore.ETS` (only its owner writes), the client's governance/grants owner (writes via `GenServer.call`), and the client cache (written only by its connection, read directly by callers).
 - Long-lived state machines use `:gen_statem` (see `Client.Connection`), split into per-state helper modules to keep credo happy.
-- **The client connection process never calls user callbacks** (handler modules, `:backoff` funs, hooks, policy predicates, progress callbacks). Anything derived from user modules is precomputed at config time; user code runs in the caller or in a Task.Supervisor task.
+- **The client connection process never calls user callbacks** (handler modules, hooks, policy predicates, progress callbacks). Anything derived from user modules is precomputed at config time (e.g. handler capabilities in `Config.new!/1`); user code runs in the caller or in a Task.Supervisor task. The one documented exception is the `:backoff` fun ("must be pure and fast"), guarded in `Data.backoff/2` with a fall back to `Backoff.full_jitter/1`.
 - `ConduitMcp.Subscriptions.Admission` is the third documented `handle_call`-style coordinator (rare path, needs serialization), alongside the OAuth `TokenStore.ETS` owner and the governance/grants owner.
 - Optional deps are gated with `if Code.ensure_loaded?(Dep)` plus an `OptionalDeps.*!/0` check that raises `OptionalDependencyError` **at init**, never per request.
 - Telemetry: `ConduitMcp.Telemetry.events/0` is the single source of truth for every emitted event and its metadata keys; tests pin it to what the code emits, so add a new event there (and to `ConduitMcp.PromEx` where useful). Client metadata comes from an allowlist and never carries arguments, results or secrets.

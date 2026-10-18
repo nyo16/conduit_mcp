@@ -601,6 +601,14 @@ To give a model the tools of several servers, run a `ConduitMcp.Client.Hub`. It 
 {:ok, result} = ConduitMcp.Client.Hub.call_tool(MyApp.Hub, "github__get_issue", %{"number" => 1}, toolset: toolset)
 ```
 
+Safe defaults, each documented in [Client security](guides/client_security.md):
+
+- **Secrets.** Credentials are `ConduitMcp.Client.Secret` values that never print and refuse to JSON-encode. Crash reports and telemetry carry no tokens, tool arguments or results.
+- **Tokens.** A token must be visible ASCII; a trailing newline from `File.read!/1` is refused instead of leaking into an error.
+- **Address checks.** `server_url_policy: :public_only` connects to the address it checked, so DNS rebinding can't redirect the request.
+- **Credential-scoped cache.** Private results are cached per credential, and `ConduitMcp.Client.set_auth/3` switches credentials at runtime.
+- **Hub limits.** A hub restarts a failed server with jittered backoff (at most 30 s) and runs at most 16 stdio servers (`max_stdio_servers`).
+
 Guides: [Client](guides/client.md), [Permissions and hooks](guides/client_permissions_and_hooks.md), [Hub](guides/client_hub.md), [LLM adapters](guides/client_llm_adapters.md) (Anthropic, OpenAI, Gemini), [OAuth](guides/client_oauth.md), [Security](guides/client_security.md).
 
 ## MCP Spec Coverage
