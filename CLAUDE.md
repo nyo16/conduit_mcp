@@ -26,6 +26,8 @@ MIX_ENV=test mix coveralls.html  # Coverage report
 
 Requires Elixir ~> 1.18. No config directory exists; validation config is set via `Application.put_env(:conduit_mcp, :validation, [...])` in tests or application config.
 
+CI runs on Elixir 1.18.3 / OTP 27.2 (`ELIXIR_VERSION`/`OTP_VERSION` in `.github/workflows/ci.yml`; Dialyzer with `MIX_ENV=dev`). A clean Dialyzer on a newer OTP proves nothing for CI: OTP 28+ changed opaque-type checking, so run it on the CI toolchain too, with its own build path, e.g. `MIX_BUILD_PATH=/tmp/cm_build_118_dev MIX_ENV=dev mix dialyzer` under Elixir 1.18.3/OTP 27.2. In particular, don't pass `Mint.HTTP.t()` or `Secret.t()` (both opaque) through `||`, guards or the `Mint.HTTP` union; use `Mint.HTTP1` and an explicit `nil` match.
+
 ## Architecture
 
 MCP server modules are **stateless** — just compiled functions. Each HTTP request runs in its own Bandit process for maximum concurrency. Rate limiting uses a user-supplied Hammer module.

@@ -18,7 +18,7 @@ if Code.ensure_loaded?(Finch) do
     # it falls in `:allow_private`.
     #
     # The connection then goes to exactly the vetted address: a dedicated
-    # Mint connection (`Mint.HTTP.connect/4` with the IP tuple as the
+    # Mint HTTP/1 connection (`Mint.HTTP1.connect/4` with the IP tuple as the
     # address and `hostname:` set to the URL's host, so SNI, certificate
     # hostname verification and the `Host` header all use the original
     # name). Nothing resolves the name a second time, which closes the DNS
@@ -126,7 +126,7 @@ if Code.ensure_loaded?(Finch) do
         try do
           send_and_read(conn, method, path(uri), headers, body, ctx, deadline)
         after
-          Mint.HTTP.close(conn)
+          Mint.HTTP1.close(conn)
         end
       end
     end
@@ -165,14 +165,18 @@ if Code.ensure_loaded?(Finch) do
       port = uri.port || URI.default_port(uri.scheme)
       timeout = max(deadline - now_ms(), 1)
 
-      opts = [mode: :passive, protocols: [:http1], hostname: uri.host]
+      # HTTP/1 only, through `Mint.HTTP1` directly: what `Mint.HTTP.connect/4`
+      # with `protocols: [:http1]` delegates to anyway, and it keeps the
+      # connection's type concrete (OTP 27's Dialyzer rejects `Mint.HTTP`'s
+      # opaque union and then treats every request as failing).
+      opts = [mode: :passive, hostname: uri.host]
 
       opts =
         if scheme == :https,
           do: opts ++ [transport_opts: Keyword.put(tls_opts(ctx), :timeout, timeout)],
           else: opts ++ [transport_opts: [timeout: timeout]]
 
-      case Mint.HTTP.connect(scheme, address, port, opts) do
+      case Mint.HTTP1.connect(scheme, address, port, opts) do
         {:ok, conn} ->
           {:ok, conn}
 
@@ -198,7 +202,7 @@ if Code.ensure_loaded?(Finch) do
     end
 
     defp send_and_read(conn, method, path, headers, body, ctx, deadline) do
-      case Mint.HTTP.request(conn, method, path, headers, body) do
+      case Mint.HTTP1.request(conn, method, path, headers, body) do
         {:ok, conn, ref} ->
           max = Map.get(ctx, :max_bytes, @default_max_bytes)
           read(conn, ref, %{status: nil, headers: [], body: [], size: 0}, max, deadline)
@@ -214,7 +218,7 @@ if Code.ensure_loaded?(Finch) do
       if timeout <= 0 do
         {:error, :timeout}
       else
-        case Mint.HTTP.recv(conn, 0, timeout) do
+        case Mint.HTTP1.recv(conn, 0, timeout) do
           {:ok, conn, responses} ->
             case collect(responses, ref, acc, max) do
               {:done, acc} -> finish(acc)

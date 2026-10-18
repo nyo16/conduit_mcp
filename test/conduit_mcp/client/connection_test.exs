@@ -147,10 +147,11 @@ defmodule ConduitMcp.Client.ConnectionTest do
 
     for pid <- Task.Supervisor.children(task_sup) do
       ref = Process.monitor(pid)
-      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
     end
 
-    assert Task.Supervisor.children(task_sup) == []
+    # `:DOWN` can beat the child's `EXIT` to the supervisor.
+    eventually(fn -> Task.Supervisor.children(task_sup) == [] end)
   end
 
   # --- discovery ---------------------------------------------------------------------

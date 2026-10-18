@@ -6,6 +6,7 @@ defmodule ConduitMcp.Client.PipelineTest do
   # LLM shaping (PI-2), and the resource/prompt gates.
   use ExUnit.Case, async: true
 
+  import ConduitMcp.Test.Client.Harness, only: [eventually: 1]
   import ExUnit.CaptureLog
 
   alias ConduitMcp.Client
@@ -108,7 +109,8 @@ defmodule ConduitMcp.Client.PipelineTest do
       assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
     end
 
-    assert Task.Supervisor.children(task_sup) == []
+    # `:DOWN` can beat the child's `EXIT` to the supervisor.
+    eventually(fn -> Task.Supervisor.children(task_sup) == [] end)
   end
 
   defp tool_names(tools), do: tools |> Enum.map(& &1.name) |> Enum.sort()

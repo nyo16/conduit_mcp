@@ -161,6 +161,9 @@ defmodule ConduitMcp.Test.Client.Harness do
       assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
     end
 
-    assert Task.Supervisor.children(task_sup) == []
+    # A child's `:DOWN` can reach us before its `EXIT` reaches the
+    # supervisor (signal order holds per sender/receiver pair only), so the
+    # supervisor may still list it for a moment.
+    eventually(fn -> Task.Supervisor.children(task_sup) == [] end)
   end
 end

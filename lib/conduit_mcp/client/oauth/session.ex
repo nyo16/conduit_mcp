@@ -270,8 +270,15 @@ if Code.ensure_loaded?(Finch) do
                    tokens.scopes
                  ) do
               {:ok, new, _scopes} ->
-                # The server may rotate the refresh token, or keep it.
-                new = %{new | refresh_token: new.refresh_token || tokens.refresh_token}
+                # The server may rotate the refresh token, or keep it. (A
+                # `nil` match, not `||`: `||` guard-tests the opaque Secret.)
+                kept =
+                  case new.refresh_token do
+                    nil -> tokens.refresh_token
+                    rotated -> rotated
+                  end
+
+                new = %{new | refresh_token: kept}
                 persist(config, key, new)
 
               error ->
