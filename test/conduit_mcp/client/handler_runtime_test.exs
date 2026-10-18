@@ -28,6 +28,13 @@ defmodule ConduitMcp.Client.HandlerRuntimeTest do
         "crash" ->
           raise "boom"
 
+        "trap" ->
+          Process.flag(:trap_exit, true)
+
+          receive do
+            :never -> :ok
+          end
+
         "hang" ->
           receive do
             :never -> :ok
@@ -483,6 +490,32 @@ defmodule ConduitMcp.Client.HandlerRuntimeTest do
       assert_no_leaks(name, conn)
     end
 
+    test "killing a handler that traps exits does not block the connection", %{name: name} do
+      conn = start(name, protocol: :legacy)
+      ready_legacy(name, conn)
+      call = pending_call(name, conn)
+      {_task, call_id} = call
+
+      server_request(
+        conn,
+        "s1",
+        "sampling/createMessage",
+        sampling(%{"systemPrompt" => "trap"}),
+        call_id
+      )
+
+      assert_receive {:sampling, _, _, handler}
+      ref = Process.monitor(handler)
+
+      FakeTransport.push(conn, {:notification, "notifications/cancelled", %{"requestId" => "s1"}})
+      # Well under the task's 5 s shutdown a graceful terminate_child would wait.
+      assert {_state, _data} = :sys.get_state(conn, 1_000)
+      assert_receive {:DOWN, ^ref, :process, ^handler, :killed}
+
+      finish_call(conn, call)
+      assert_no_leaks(name, conn)
+    end
+
     test "a crash answers -32603 and a timeout kills the task", %{name: name} do
       conn = start(name, protocol: :legacy, handler_timeout: [sampling: 50])
       ready_legacy(name, conn)
@@ -673,6 +706,24 @@ defmodule ConduitMcp.Client.HandlerRuntimeTest do
       assert_receive {:log, "info", pid}
       assert pid != conn
       assert_receive {:notified, "notifications/resources/updated", ^pid}
+    end
+
+    test "a notifier that dies is restarted, with a warning" do
+      name = {__MODULE__, make_ref(), self()}
+      conn = start_client(name, handler: Listener)
+      ready_modern(name, conn)
+      notifier = state(conn).notifier
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          Process.exit(notifier, :kill)
+          eventually(fn -> state(conn).notifier not in [nil, notifier] end)
+        end)
+
+      assert log =~ "notification handler process exited (:killed); restarted"
+      FakeTransport.push(conn, {:notification, "notifications/resources/updated", %{}})
+      assert_receive {:notified, "notifications/resources/updated", pid}
+      assert pid == state(conn).notifier
     end
   end
 

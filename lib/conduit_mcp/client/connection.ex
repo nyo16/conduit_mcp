@@ -12,7 +12,12 @@ defmodule ConduitMcp.Client.Connection do
   map, enforces deadlines and limits, routes cancellations and progress,
   and fans notifications out to subscribers. It **never runs user code**:
   no handler callbacks, no progress callbacks (progress goes to the caller,
-  which runs them), no policy or hooks. The transport's callbacks run here,
+  which runs them), no policy or hooks; the client capabilities derived
+  from the handler are computed once, by `ConduitMcp.Client.Config.new!/1`.
+  The one exception is the `:backoff` fun, which must be pure and fast: one
+  that raises or returns anything but a non-negative integer is replaced
+  by `ConduitMcp.Client.Backoff.full_jitter/1`. Tasks it stops (handler
+  tasks, in-process requests) are killed, never waited on. The transport's callbacks run here,
   and must not block (`ConduitMcp.Client.Transport`).
 
   ## States
@@ -62,7 +67,10 @@ defmodule ConduitMcp.Client.Connection do
   A request that arrives before `:ready` is postponed (at most
   `:max_queued` of them) and replayed on entering `:ready`, where its
   deadline is checked again: a request whose caller already gave up is
-  answered `kind: :timeout` and never sent. In `:ready` a request beyond
+  answered `kind: :timeout` and never sent. `ConduitMcp.Client.await_ready/2`
+  and `subscribe/2`/`unsubscribe/2` made before `:ready` wait the same way
+  and count against the same `:max_queued`; one whose caller timed out or
+  exited is dropped on replay, never applied. In `:ready` a request beyond
   `:max_in_flight` is refused with `kind: :overloaded`.
 
   Ids are integers from a counter that is never reset, so a late frame
@@ -152,9 +160,11 @@ defmodule ConduitMcp.Client.Connection do
   ## Crash reports
 
   `format_status/1` replaces the transport state, the transport options,
-  the params of queued requests and every `assigns` (the client's and each
-  pending call's) with `:redacted`, so a crash report never carries
-  credentials, session ids, host data or tool arguments.
+  the params of queued requests, every request's HTTP `:headers` (which
+  carry `Mcp-Param-*` copies of tool arguments), the credentials of a
+  queued `ConduitMcp.Client.set_auth/3` and every `assigns` (the client's
+  and each pending or queued call's) with `:redacted`, so a crash report
+  never carries credentials, session ids, host data or tool arguments.
   """
 
   @behaviour :gen_statem
@@ -216,10 +226,7 @@ defmodule ConduitMcp.Client.Connection do
       {:ok, tstate} ->
         data = config |> Data.new(task_sup, tstate) |> Authorize.push()
 
-        notifier =
-          Notifier.start(config.handler, %{client: config.name, server_id: config.server_id})
-
-        data = %{data | notifier: notifier}
+        data = %{data | notifier: start_notifier(config)}
         :ok = Data.register(data)
         :ok = Data.publish(data, :connecting)
         {:ok, :connecting, data, [{:next_event, :internal, :connect}]}
@@ -250,8 +257,14 @@ defmodule ConduitMcp.Client.Connection do
     end
   end
 
-  def handle_event(:info, {:"$mcp_call", mref, op}, state, data),
-    do: control(op, mref, state, data)
+  # A call replayed after its caller gave up (timed out or exited) is
+  # dropped unanswered: nobody is waiting, and applying it would contradict
+  # the error the caller already returned.
+  def handle_event(:info, {:"$mcp_call", mref, op, caller, deadline}, state, data) do
+    if live_call?(caller, deadline),
+      do: control(op, mref, state, data),
+      else: :keep_state_and_data
+  end
 
   def handle_event(:info, {:DOWN, ref, :process, _pid, _reason} = message, state, data),
     do: down(ref, message, state, data)
@@ -273,10 +286,33 @@ defmodule ConduitMcp.Client.Connection do
   def handle_event(:info, {:"$mcp_refetch", kind}, _state, data),
     do: {:keep_state, Refresh.drop_deferred(kind, data)}
 
+  # The handler's notification process died (killed, or an exit it could
+  # not catch): start another so later notifications still reach the handler.
+  def handle_event(:info, {:EXIT, pid, reason}, _state, %Data{notifier: pid} = data) do
+    Logger.warning(
+      "MCP client notification handler process exited " <>
+        "(#{inspect(Telemetry.reason_tag(reason))}); restarted"
+    )
+
+    {:keep_state, %{data | notifier: start_notifier(data.config)}}
+  end
+
   def handle_event(:info, message, state, data), do: transport_info(message, state, data)
 
   def handle_event({:timeout, {:req, id}}, id, _state, data),
     do: result(Requests.timeout(id, data))
+
+  # One of the connection's own fire-and-forget requests went unanswered.
+  def handle_event({:timeout, {:internal, id}}, handle, state, data) do
+    case Map.fetch(data.internal, id) do
+      {:ok, purpose} ->
+        data = Data.cancel(data, id, handle, :timeout)
+        internal_outcome(id, purpose, {:error, Error.new(:timeout)}, state, data)
+
+      :error ->
+        :keep_state_and_data
+    end
+  end
 
   def handle_event({:timeout, {:list_changed, method}}, nil, _state, data),
     do: result(Inbound.window_end(method, data))
@@ -291,6 +327,9 @@ defmodule ConduitMcp.Client.Connection do
 
   def handle_event(:state_timeout, content, state, data),
     do: Handshake.state_timeout(state, content, data)
+
+  defp start_notifier(config),
+    do: Notifier.start(config.handler, %{client: config.name, server_id: config.server_id})
 
   # --- state enter -------------------------------------------------------------
 
@@ -483,7 +522,7 @@ defmodule ConduitMcp.Client.Connection do
   defp control(:await_ready, mref, :closed, data),
     do: reply(mref, {:error, Requests.closed_error(data)})
 
-  defp control(:await_ready, _mref, _state, _data), do: {:keep_state_and_data, [:postpone]}
+  defp control(:await_ready, mref, _state, data), do: postpone(mref, data)
 
   defp control(:close, mref, :closed, _data), do: reply(mref, :ok)
 
@@ -517,8 +556,8 @@ defmodule ConduitMcp.Client.Connection do
   defp control({:resource_subscription, _op, _uri}, mref, :closed, data),
     do: reply(mref, {:error, Requests.closed_error(data)})
 
-  defp control({:resource_subscription, _op, _uri}, _mref, _state, _data),
-    do: {:keep_state_and_data, [:postpone]}
+  defp control({:resource_subscription, _op, _uri}, mref, _state, data),
+    do: postpone(mref, data)
 
   defp control({:refresh, kind, opts}, mref, _state, data),
     do: {:keep_state, Refresh.demand(kind, mref, opts, data)}
@@ -569,6 +608,18 @@ defmodule ConduitMcp.Client.Connection do
     :keep_state_and_data
   end
 
+  defp live_call?(caller, deadline),
+    do:
+      Process.alive?(caller) and
+        (deadline == :infinity or System.monotonic_time(:millisecond) < deadline)
+
+  # Waits for the next state like a queued request, within `:max_queued`.
+  defp postpone(mref, data) do
+    if data.queued >= data.config.max_queued,
+      do: reply(mref, {:error, Error.new(:overloaded, :max_queued)}),
+      else: {:keep_state, %{data | queued: data.queued + 1}, [:postpone]}
+  end
+
   defp result({data, actions}), do: {:keep_state, data, actions}
 
   # The modern listen filter follows the client's consumers.
@@ -605,7 +656,13 @@ defmodule ConduitMcp.Client.Connection do
         input: :redacted,
         pending:
           Map.new(data.pending, fn {id, entry} ->
-            {id, %{entry | assigns: :redacted, params: :redacted}}
+            {id,
+             %{
+               entry
+               | assigns: :redacted,
+                 params: :redacted,
+                 wire_opts: redact_opts(entry.wire_opts, [:headers])
+             }}
           end),
         auth: if(data.auth, do: :redacted),
         config: %{config | transport: {transport, :redacted}, assigns: :redacted}
@@ -614,11 +671,25 @@ defmodule ConduitMcp.Client.Connection do
 
   defp redact_data(other), do: other
 
+  # `:headers` carry `Mcp-Param-*` copies of tool arguments (and any header
+  # a caller passed); `:assigns` is host data.
+  defp redact_opts(opts, keys) when is_list(opts),
+    do: Enum.reduce(keys, opts, &Keyword.replace(&2, &1, :redacted))
+
+  defp redact_opts(other, _keys), do: other
+
   defp redact_events(events) when is_list(events), do: Enum.map(events, &redact_event/1)
   defp redact_events(other), do: other
 
   defp redact_event({type, {:"$mcp_request", mref, caller, op, _params, opts}}),
-    do: {type, {:"$mcp_request", mref, caller, op, :redacted, opts}}
+    do:
+      {type,
+       {:"$mcp_request", mref, caller, op, :redacted, redact_opts(opts, [:assigns, :headers])}}
+
+  defp redact_event(
+         {type, {:"$mcp_call", mref, {:set_auth, _auth, credential_id}, caller, deadline}}
+       ),
+       do: {type, {:"$mcp_call", mref, {:set_auth, :redacted, credential_id}, caller, deadline}}
 
   defp redact_event({type, {:transport, _event}}), do: {type, {:transport, :redacted}}
   defp redact_event(event), do: event

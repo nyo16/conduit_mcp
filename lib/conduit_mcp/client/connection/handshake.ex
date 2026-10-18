@@ -308,7 +308,7 @@ defmodule ConduitMcp.Client.Connection.Handshake do
     if exceeded?(data.attempt, data.config.max_reconnects) do
       give_up(%{data | reason: {:gave_up, reason}}, actions)
     else
-      delay = data.config.backoff.(data.attempt)
+      delay = Data.backoff(data, data.attempt)
       {:next_state, :reconnecting, data, actions ++ [{:state_timeout, delay, :reconnect}]}
     end
   end
@@ -355,6 +355,8 @@ defmodule ConduitMcp.Client.Connection.Handshake do
   defp closed_error(reason), do: Error.new(:closed, Telemetry.reason_tag(reason))
 
   defp teardown(data, reason, %Error{} = error) do
+    :ok = Listen.fail_legacy(data.internal, error)
+
     data = %{
       data
       | reason: reason,

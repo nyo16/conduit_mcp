@@ -4,11 +4,13 @@ defmodule ConduitMcp.Client.Connection.Data do
   # The connection's state data, the caller view it publishes into the
   # registry, and the wrappers that thread transport state through it.
 
+  require Logger
+
+  alias ConduitMcp.Client.Backoff
   alias ConduitMcp.Client.Cache
   alias ConduitMcp.Client.Config
   alias ConduitMcp.Client.Connection.Authorize
   alias ConduitMcp.Client.Connection.Listen
-  alias ConduitMcp.Client.Negotiation
   alias ConduitMcp.Client.RateLimit
   alias ConduitMcp.Client.Registry
   alias ConduitMcp.Client.Request
@@ -148,7 +150,7 @@ defmodule ConduitMcp.Client.Connection.Data do
       transport: data.kind,
       request_timeout: config.request_timeout,
       max_total_timeout: config.max_total_timeout,
-      client_capabilities: capabilities(config, :modern),
+      client_capabilities: config.capabilities.modern,
       cache: data.cache,
       input: data.input
     }
@@ -183,21 +185,43 @@ defmodule ConduitMcp.Client.Connection.Data do
   def telemetry(data),
     do: Telemetry.base(data.config.name, data.config.server_id, data.kind, data.era)
 
-  @doc "The client capabilities for `era`."
-  @spec client_capabilities(t(), :modern | :legacy) :: map()
-  def client_capabilities(%__MODULE__{config: config}, era), do: capabilities(config, era)
+  @doc "The client capabilities for `era`, computed once by `ConduitMcp.Client.Config.new!/1`."
+  @spec client_capabilities(t(), :modern | :legacy | nil) :: map()
+  def client_capabilities(%__MODULE__{config: %{capabilities: caps}}, :legacy), do: caps.legacy
+  def client_capabilities(%__MODULE__{config: %{capabilities: caps}}, _era), do: caps.modern
 
-  # Derived from the handler's callbacks; `roots.listChanged` (legacy only)
-  # is promised when configured: the host announces changes with
-  # `ConduitMcp.Client.notify_roots_changed/1`.
-  defp capabilities(config, era) do
-    Negotiation.client_capabilities(config.handler,
-      era: era,
-      sampling_tools: config.sampling[:tools],
-      sampling_context: config.sampling[:context],
-      roots_list_changed: config.roots[:list_changed]
-    )
+  @doc """
+  The delay before attempt `attempt`, from the configured `:backoff`. A fun
+  that raises, or returns anything but a non-negative integer, must not
+  take the connection down: `ConduitMcp.Client.Backoff.full_jitter/1` is
+  used instead, with a warning.
+  """
+  @spec backoff(t(), pos_integer()) :: non_neg_integer()
+  def backoff(%__MODULE__{config: %{backoff: fun}}, attempt) do
+    case fun.(attempt) do
+      delay when is_integer(delay) and delay >= 0 -> delay
+      other -> default_backoff(attempt, "returned #{inspect(other)}")
+    end
+  catch
+    kind, reason -> default_backoff(attempt, Exception.format_banner(kind, reason))
   end
+
+  defp default_backoff(attempt, problem) do
+    Logger.warning(
+      "ConduitMcp.Client :backoff #{problem}; expected a non-negative integer, " <>
+        "using ConduitMcp.Client.Backoff.full_jitter/1"
+    )
+
+    Backoff.full_jitter(attempt)
+  end
+
+  @doc """
+  The deadline of one of the connection's own fire-and-forget requests
+  (`:request_timeout`); `handle` is the transport's, to cancel it.
+  """
+  @spec internal_timer(t(), pos_integer(), term()) :: :gen_statem.action()
+  def internal_timer(data, id, handle),
+    do: {{:timeout, {:internal, id}}, data.config.request_timeout, handle}
 
   @doc "Takes the next request id."
   @spec take_id(t()) :: {pos_integer(), t()}

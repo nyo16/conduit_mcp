@@ -125,7 +125,7 @@ defmodule ConduitMcp.Client.Connection.ServerRequests do
   def timeout(id, data) do
     case Map.fetch(data.server_requests, id) do
       {:ok, entry} ->
-        kill(data, entry)
+        kill(entry)
         finish(id, data, &error(&1, id, @internal_error, "Client handler timed out"))
 
       :error ->
@@ -138,7 +138,7 @@ defmodule ConduitMcp.Client.Connection.ServerRequests do
   def cancelled(%{"requestId" => id}, data) do
     case Map.fetch(data.server_requests, id) do
       {:ok, entry} ->
-        kill(data, entry)
+        kill(entry)
         finish(id, data, & &1)
 
       :error ->
@@ -153,16 +153,17 @@ defmodule ConduitMcp.Client.Connection.ServerRequests do
   def stop_all(data) do
     actions =
       for {id, entry} <- data.server_requests do
-        kill(data, entry)
+        kill(entry)
         cancel_timer(id)
       end
 
     {%{data | server_requests: %{}}, actions}
   end
 
-  defp kill(data, entry) do
-    _ = Task.Supervisor.terminate_child(data.task_sup, entry.pid)
+  # Never waits on the task: it runs the host's handler, which may trap exits.
+  defp kill(entry) do
     Process.demonitor(entry.ref, [:flush])
+    Process.exit(entry.pid, :kill)
     :ok
   end
 

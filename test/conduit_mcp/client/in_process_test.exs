@@ -40,6 +40,25 @@ defmodule ConduitMcp.Client.InProcessTest do
       end)
     end
 
+    tool "trap", "Traps exits and never returns" do
+      handle(fn conn, _params ->
+        Process.flag(:trap_exit, true)
+        send(conn.assigns[:test_pid], {:tool_running, self()})
+
+        receive do
+          :never -> text("unreachable")
+        end
+      end)
+    end
+
+    tool "chatty", "Reports progress and logs" do
+      handle(fn conn, _params ->
+        ConduitMcp.Progress.report(conn, 1, total: 2)
+        ConduitMcp.Log.log(conn, :warning, "half way")
+        text("done")
+      end)
+    end
+
     resource "test://resource1" do
       description("Static resource")
       mime_type("text/plain")
@@ -249,6 +268,44 @@ defmodule ConduitMcp.Client.InProcessTest do
     assert_received {:tool_running, tool}
     ref = Process.monitor(tool)
     assert_receive {:DOWN, ^ref, :process, ^tool, _reason}
+    assert_no_leaks(name)
+  end
+
+  test "a modern tools/call with on_progress receives the tool's progress" do
+    name = start_client(DslServer, protocol: :modern)
+
+    assert {:ok, %ToolResult{content: [%{"text" => "done"}]}} =
+             Client.call_tool(name, "chatty", %{}, on_progress: self())
+
+    assert_received {:mcp_progress, ^name, %{"progress" => 1, "total" => 2}}
+    assert_no_leaks(name)
+  end
+
+  test "a modern tools/call after set_log_level succeeds and delivers the log" do
+    name = start_client(DslServer, protocol: :modern)
+    :ok = Client.subscribe_notifications(name)
+    assert :ok = Client.set_log_level(name, :debug)
+
+    assert {:ok, %ToolResult{content: [%{"text" => "hi"}]}} =
+             Client.call_tool(name, "echo", %{"message" => "hi"})
+
+    assert {:ok, %ToolResult{content: [%{"text" => "done"}]}} = Client.call_tool(name, "chatty")
+
+    assert_receive {:mcp_notification, ^name, "notifications/message",
+                    %{"level" => "warning", "data" => "half way"}}
+
+    assert_no_leaks(name)
+  end
+
+  test "cancelling a task that traps exits does not block the connection" do
+    name = start_client(DslServer, transport_opts: [assigns: %{test_pid: self()}])
+
+    assert {:error, %Error{kind: :timeout}} = Client.call_tool(name, "trap", %{}, timeout: 200)
+    assert_received {:tool_running, tool}
+    ref = Process.monitor(tool)
+    # Well under the 5 s shutdown a graceful terminate_child would wait.
+    assert :ok = Client.ping(name, timeout: 1_000)
+    assert_receive {:DOWN, ^ref, :process, ^tool, reason} when reason in [:killed, :noproc]
     assert_no_leaks(name)
   end
 

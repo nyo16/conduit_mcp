@@ -78,8 +78,10 @@ defmodule ConduitMcp.Client.Connection.Authorize do
     return_to: :ready,
     # caller request ids refused with 401, waiting for the check
     parked: [],
-    # `$mcp_request` messages that arrived in `:authorizing`, in order
+    # `$mcp_request` messages that arrived in `:authorizing`, newest first,
+    # and how many (admission stays O(1))
     waiting: [],
+    waiting_count: 0,
     # the Bearer challenge of the last 401, and the fingerprint of the
     # token it refused (never the token)
     challenge: nil,
@@ -213,11 +215,11 @@ defmodule ConduitMcp.Client.Connection.Authorize do
   """
   @spec admit(tuple(), Data.t()) :: result()
   def admit({_tag, mref, _caller, _op, _params, _opts} = request, %Data{auth: auth} = data) do
-    if length(auth.waiting) >= data.config.max_queued do
+    if auth.waiting_count >= data.config.max_queued do
       Requests.reply(mref, {:error, Error.new(:overloaded, :max_queued)})
       :keep_state_and_data
     else
-      auth = %{auth | waiting: auth.waiting ++ [request]}
+      auth = %{auth | waiting: [request | auth.waiting], waiting_count: auth.waiting_count + 1}
       auth = if auth.phase == :awaiting, do: start_check(auth, data), else: auth
       {:keep_state, %{data | auth: auth}}
     end
@@ -284,8 +286,8 @@ defmodule ConduitMcp.Client.Connection.Authorize do
     auth = %{auth | session: session, scopes: scopes, phase: :idle, notified?: false}
     data = push(%{data | auth: auth})
     {data, resent} = resend(auth.parked, data)
-    replay = Enum.map(auth.waiting, &{:next_event, :info, &1})
-    data = %{data | auth: %{data.auth | parked: [], waiting: []}}
+    replay = auth.waiting |> Enum.reverse() |> Enum.map(&{:next_event, :info, &1})
+    data = %{data | auth: %{data.auth | parked: [], waiting: [], waiting_count: 0}}
 
     cond do
       state != :authorizing -> {:keep_state, data, resent ++ replay}
@@ -298,16 +300,16 @@ defmodule ConduitMcp.Client.Connection.Authorize do
     auth = %{auth | session: session, phase: :awaiting}
     error = required_error(auth)
     {data, actions} = fail_ids(auth.parked, error, %{data | auth: auth})
-    Enum.each(auth.waiting, &reply_error(&1, error))
-    data = %{data | auth: %{data.auth | parked: [], waiting: []}}
+    auth.waiting |> Enum.reverse() |> Enum.each(&reply_error(&1, error))
+    data = %{data | auth: %{data.auth | parked: [], waiting: [], waiting_count: 0}}
     data = if auth.notified?, do: data, else: notify(data, auth.challenge, :unauthorized)
     {:keep_state, data, actions}
   end
 
   defp checked({:error, %OAuthError{} = oauth_error, session}, _state, %Data{auth: auth} = data) do
     error = Error.new(:auth, oauth_error.reason, oauth_error)
-    Enum.each(auth.waiting, &reply_error(&1, error))
-    auth = %{auth | session: session, phase: :idle, parked: [], waiting: []}
+    auth.waiting |> Enum.reverse() |> Enum.each(&reply_error(&1, error))
+    auth = %{auth | session: session, phase: :idle, parked: [], waiting: [], waiting_count: 0}
     data = %{data | auth: auth}
 
     if oauth_error.reason in @transient,
@@ -395,9 +397,9 @@ defmodule ConduitMcp.Client.Connection.Authorize do
   """
   @spec reset(Data.t(), Error.t()) :: Data.t()
   def reset(%Data{auth: %__MODULE__{} = auth} = data, error) do
-    Enum.each(auth.waiting, &reply_error(&1, error))
+    auth.waiting |> Enum.reverse() |> Enum.each(&reply_error(&1, error))
     Enum.each(Map.keys(auth.tasks), &Process.demonitor(&1, [:flush]))
-    %{data | auth: %{auth | phase: :idle, tasks: %{}, parked: [], waiting: []}}
+    %{data | auth: %{auth | phase: :idle, tasks: %{}, parked: [], waiting: [], waiting_count: 0}}
   end
 
   def reset(data, _error), do: data

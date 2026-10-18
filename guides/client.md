@@ -488,7 +488,7 @@ When the transport fails, the connection fails every pending request with
 
 | Option | Default | Meaning |
 |---|---|---|
-| `:backoff` | `&ConduitMcp.Client.Backoff.full_jitter/1` | `fn attempt -> ms end`. The default is a random delay between 1 ms and `min(30_000, 500 * 2 ** attempt)` |
+| `:backoff` | `&ConduitMcp.Client.Backoff.full_jitter/1` | `fn attempt -> ms end`. The default is a random delay between 1 ms and `min(30_000, 500 * 2 ** attempt)`. Runs in the connection process, so keep it pure and fast; one that raises or returns anything but a non-negative integer falls back to the default, with a warning |
 | `:max_reconnects` | `:infinity` | Consecutive failed attempts before giving up |
 | `:stable_after` | 30 000 | Milliseconds the connection must stay ready before the attempt count resets |
 | `:on_give_up` | `:stay` | `:stay` keeps the client `:closed` (so `status/1` explains why and `reconnect/1` can retry); `:stop` exits so a supervisor restarts it |
@@ -742,7 +742,10 @@ end
 the server's `ConduitMcp.Transport.StreamableHTTP`. Plugs (authentication,
 rate limiting, header validation) do not run, so give the server an identity
 with `:principal`. The server never sends server-to-client requests over
-this transport.
+this transport. A modern `tools/call` made with `:on_progress`, or after
+`set_log_level/2`, receives the tool's progress and log notifications as it
+runs; `subscriptions/listen` needs an HTTP transport and is answered
+`-32601`. Cancelling a request kills its task.
 
 To exercise the real stdio transport, write a small `.exs` script that reads
 newline-delimited JSON-RPC from stdin, passes each message to

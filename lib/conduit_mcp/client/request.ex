@@ -193,7 +193,7 @@ defmodule ConduitMcp.Client.Request do
     case Registry.lookup({:client, client}) do
       {:ok, pid, _value} ->
         mref = :erlang.monitor(:process, pid, [{:alias, :demonitor}])
-        send(pid, {:"$mcp_call", mref, op})
+        send(pid, {:"$mcp_call", mref, op, self(), deadline(timeout)})
 
         try do
           receive do
@@ -210,6 +210,11 @@ defmodule ConduitMcp.Client.Request do
         {:error, Error.new(:unavailable, :not_started)}
     end
   end
+
+  # Absolute, so a call the connection postponed is dropped on replay once
+  # the caller has stopped waiting for it.
+  defp deadline(:infinity), do: :infinity
+  defp deadline(timeout), do: System.monotonic_time(:millisecond) + timeout
 
   @doc """
   The wire `params` of a request: `params` with the era's reserved `_meta`
