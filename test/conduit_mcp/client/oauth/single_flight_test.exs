@@ -49,9 +49,13 @@ defmodule ConduitMcp.Client.OAuth.SingleFlightTest do
     Enum.each(callers, &send(&1.pid, :go))
     results = Task.await_many(callers, 30_000)
 
+    assert length(results) == 50
+
+    assert Enum.all?(results, &match?({:ok, _}, &1)),
+           inspect(Enum.reject(results, &match?({:ok, _}, &1)))
+
     access = for {:ok, tokens} <- results, uniq: true, do: Secret.expose(tokens.access_token)
     assert length(access) == 1
-    assert length(results) == 50
 
     refreshes =
       Enum.count(OAuthFake.requests(fake), &(&1.params["grant_type"] == "refresh_token"))

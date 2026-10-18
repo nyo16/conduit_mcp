@@ -677,7 +677,10 @@ defmodule ConduitMcp.Client.ConnectionTest do
     end
 
     test "an answered health check keeps the connection", %{name: name} do
-      conn = start_client(name, health_check_interval: 20)
+      # Two missed checks in a row close the transport, so a short interval
+      # turns two scheduler hiccups into a false miss; this test is about the
+      # answered path, not the timing.
+      conn = start_client(name, health_check_interval: 200)
       ready_modern(name, conn)
 
       for _check <- 1..3 do

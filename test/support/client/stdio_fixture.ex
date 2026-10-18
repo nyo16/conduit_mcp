@@ -72,10 +72,15 @@ defmodule ConduitMcp.Test.Client.StdioFixture do
   @doc """
   Waits for `port_owner` to stop - it stops only after the server process
   is gone or was killed - and returns how long that took, in ms.
+
+  Options: `:since`, a `System.monotonic_time(:millisecond)` reading to
+  measure from (take it before the call that starts the shutdown, so the
+  time that call itself blocks is counted); `:timeout` (default 6 000 ms).
   """
-  @spec await_reaped(pid(), timeout()) :: non_neg_integer()
-  def await_reaped(port_owner, timeout \\ 6_000) do
-    started = System.monotonic_time(:millisecond)
+  @spec await_reaped(pid(), keyword()) :: non_neg_integer()
+  def await_reaped(port_owner, opts \\ []) do
+    started = Keyword.get_lazy(opts, :since, fn -> System.monotonic_time(:millisecond) end)
+    timeout = Keyword.get(opts, :timeout, 6_000)
     ref = Process.monitor(port_owner)
 
     receive do

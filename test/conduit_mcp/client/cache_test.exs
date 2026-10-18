@@ -368,8 +368,9 @@ defmodule ConduitMcp.Client.CacheTest do
       assert_receive {[:conduit_mcp, :client, :tool, :definition_changed], ^ref, %{count: 1},
                       %{tool_name: "a", server_id: _}}
 
-      refute_received {[:conduit_mcp, :client, :tool, :definition_changed], ^ref, _, _}
+      # The events are emitted in a loop: refute only once the refresh is done.
       eventually(fn -> state(conn).refreshes == %{} end)
+      refute_received {[:conduit_mcp, :client, :tool, :definition_changed], ^ref, _, _}
       assert {:ok, %Tool{fingerprint: now}} = Client.tool(name, "a")
       assert now != before
       assert {:ok, %Tool{name: "c"}} = Client.tool(name, "c")
@@ -398,8 +399,9 @@ defmodule ConduitMcp.Client.CacheTest do
       FakeTransport.push(conn, {:notification, "notifications/resources/list_changed", %{}})
       {id, _, _} = expect_request(conn, "resources/templates/list")
       reply(conn, id, %{"resourceTemplates" => []})
-      refute_receive {:fake_transport, ^conn, {:request, %{"method" => "resources/list"}, _}}
+      # Once no refresh is in flight, every request it made has been sent.
       eventually(fn -> state(conn).refreshes == %{} end)
+      refute_received {:fake_transport, ^conn, {:request, %{"method" => "resources/list"}, _}}
       assert_no_leaks(name, conn)
     end
 

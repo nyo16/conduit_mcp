@@ -101,18 +101,29 @@ defmodule ConduitMcp.Test.Client.Harness do
   end
 
   @doc """
-  Retries a synchronous `:sys` read until it holds, for at most 2 s (a
-  deadline rather than an attempt count, so a loaded runner that schedules
-  the other process late does not fail the test).
+  Retries a check until it holds, for at most 2 s (a deadline rather than
+  an attempt count, so a loaded runner that schedules the other process
+  late does not fail the test). Sleeps 5 ms between attempts so the
+  poller does not hold a scheduler the awaited process needs.
   """
   def eventually(fun, timeout_ms \\ 2_000),
     do: eventually_until(fun, System.monotonic_time(:millisecond) + timeout_ms)
 
   defp eventually_until(fun, deadline) do
     cond do
-      fun.() -> :ok
-      System.monotonic_time(:millisecond) > deadline -> flunk("condition never held")
-      true -> eventually_until(fun, deadline)
+      fun.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("condition never held")
+
+      true ->
+        receive do
+        after
+          5 -> :ok
+        end
+
+        eventually_until(fun, deadline)
     end
   end
 

@@ -32,7 +32,9 @@ defmodule ConduitMcp.Test.Client.OAuthFake do
   Starts the fake. Options: `:issuer_path` (default `""`), `:expires_in`
   (default 3600), `:iss` (send `iss` in the authorization response, default
   true), `:jwt` (mint JWT access tokens with an ES256 key, default false),
-  `:sub` (default `"user-1"`), `:rotate` (rotate refresh tokens, default true).
+  `:sub` (default `"user-<unique>"`: a principal of its own, so async tests
+  never share a per-principal listen bucket), `:rotate` (rotate refresh
+  tokens, default true).
   """
   def start(opts \\ []) do
     jwk = JOSE.JWK.generate_key({:ec, "P-256"})
@@ -47,7 +49,13 @@ defmodule ConduitMcp.Test.Client.OAuthFake do
       jwk: jwk,
       opts:
         Map.merge(
-          %{expires_in: 3600, iss: true, jwt: false, sub: "user-1", rotate: true},
+          %{
+            expires_in: 3600,
+            iss: true,
+            jwt: false,
+            sub: "user-#{System.unique_integer([:positive])}",
+            rotate: true
+          },
           Map.new(opts)
         )
     }
