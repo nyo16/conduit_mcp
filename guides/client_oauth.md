@@ -71,7 +71,7 @@ naming it. The transport fills in `:server_url` from its `:url`.
 | `:max_step_up_attempts` | `2` | Step-up authorizations per resource and scope set |
 | `:refresh_skew` | `30` | Seconds before expiry at which an access token is refreshed |
 | `:expected_issuers` | `nil` | An allowlist of authorization-server issuers (exact strings). `nil` accepts the one the server names |
-| `:principal` | `nil` | The user or tenant this client acts for. Part of every token-store key |
+| `:principal` | `nil` | The user or tenant this client acts for. Part of every token-store key and of the identity private cached results are keyed by; switch with `ConduitMcp.Client.set_auth/3` (see "Private results and credentials" in [client.md](client.md)) |
 | `:scopes` | `[]` | Scopes to request when neither the challenge nor the server's metadata names any |
 | `:allow_insecure_oauth` | `false` | Development and tests: admit plain `http` metadata and authorization-server URLs on loopback hosts |
 | `:allow_private` | `[]` | CIDRs the URL policy admits for OAuth requests although they are private |

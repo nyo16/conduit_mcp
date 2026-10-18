@@ -47,6 +47,7 @@ defmodule ConduitMcp.Client.Connection.Authorize do
   # task and sends the request again.
 
   alias ConduitMcp.Client.Config, as: ClientConfig
+  alias ConduitMcp.Client.Connection.Credential
   alias ConduitMcp.Client.Connection.Data
   alias ConduitMcp.Client.Connection.Handshake
   alias ConduitMcp.Client.Connection.Requests
@@ -111,16 +112,22 @@ defmodule ConduitMcp.Client.Connection.Authorize do
     end
   end
 
-  @doc "Hands the session to the transport (after every transport `init/2`)."
+  @doc """
+  Hands the session to the transport (after every transport `init/2`), and
+  records the identity of the credentials sent from now on, which keys the
+  private cached results (HT-11).
+  """
   @spec push(Data.t()) :: Data.t()
-  def push(%Data{auth: %__MODULE__{session: session}, tstate: tstate} = data)
-      when tstate != nil do
+  def push(%Data{} = data), do: data |> hand_over() |> Credential.sync()
+
+  defp hand_over(%Data{auth: %__MODULE__{session: session}, tstate: tstate} = data)
+       when tstate != nil do
     if function_exported?(data.transport, :set_auth, 2),
       do: %{data | tstate: data.transport.set_auth(tstate, session)},
       else: data
   end
 
-  def push(data), do: data
+  defp hand_over(data), do: data
 
   # --- a refused request -------------------------------------------------------
 

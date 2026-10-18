@@ -10,8 +10,9 @@ defmodule ConduitMcp.Client.HubTest do
 
   alias ConduitMcp.Client
   alias ConduitMcp.Client.{Error, Hub, Policy, Tool, ToolResult, ToolSet}
-  alias ConduitMcp.Client.Transport.InProcess
+  alias ConduitMcp.Client.Transport.{InProcess, Stdio}
   alias ConduitMcp.TelemetryTestHelper
+  alias ConduitMcp.Test.Client.FakeTransport
 
   doctest ConduitMcp.Client.Hub
 
@@ -454,6 +455,90 @@ defmodule ConduitMcp.Client.HubTest do
       assert_raise ArgumentError, ~r/:server_id is set by the hub/, fn ->
         Hub.add_server(hub, "delta", [server_id: "x"] ++ opts)
       end
+    end
+  end
+
+  # Config only: never started.
+  defp stdio(id), do: {id, [transport: {Stdio, command: "mcp-server"}]}
+
+  # Counted as stdio (`kind/0` is `:stdio`), with no OS process behind it.
+  defp fake_stdio(id), do: {id, [transport: {FakeTransport, test_pid: self()}]}
+
+  describe "limits (ST-8)" do
+    test "the default restart backoff is full jitter from 1 s, doubling, capped at 30 s",
+         %{hub: hub} do
+      %Hub.Config{restart_backoff: backoff} = Hub.Config.new!(name: hub, policy: :allow_all)
+
+      for attempt <- 1..40, _sample <- 1..25 do
+        assert backoff.(attempt) in 1..min(30_000, 1_000 * 2 ** attempt)
+      end
+    end
+
+    test "more stdio servers than :max_stdio_servers fail start, naming the option",
+         %{hub: hub} do
+      for start <- [&Hub.child_spec/1, &Hub.start_link/1] do
+        assert_raise ArgumentError,
+                     ~r/:max_stdio_servers is 1 but 2 servers use a stdio transport/,
+                     fn ->
+                       start.(
+                         name: hub,
+                         policy: :allow_all,
+                         max_stdio_servers: 1,
+                         servers: [stdio("one"), stdio("two")]
+                       )
+                     end
+      end
+
+      seventeen = for i <- 1..17, do: stdio("s#{i}")
+
+      assert_raise ArgumentError, ~r/:max_stdio_servers is 16 but 17/, fn ->
+        Hub.child_spec(name: hub, policy: :allow_all, servers: seventeen)
+      end
+
+      assert %{id: {Hub, ^hub}} =
+               Hub.child_spec(
+                 name: hub,
+                 policy: :allow_all,
+                 max_stdio_servers: :infinity,
+                 servers: seventeen
+               )
+
+      # Only local-process transports count.
+      assert %{id: {Hub, ^hub}} =
+               Hub.child_spec(
+                 name: hub,
+                 policy: :allow_all,
+                 max_stdio_servers: 0,
+                 servers: [server("alpha", [])]
+               )
+    end
+
+    test "add_server/3 beyond :max_stdio_servers is :overloaded and starts nothing",
+         %{hub: hub} do
+      start_hub(hub, [server("alpha", [tool("echo")])], max_stdio_servers: 1)
+
+      {one, one_opts} = fake_stdio("one")
+      assert :ok = Hub.add_server(hub, one, one_opts)
+      assert_receive {:fake_transport, _conn, {:init, _opts}}
+
+      {two, two_opts} = fake_stdio("two")
+
+      assert {:error, %Error{kind: :overloaded, reason: :max_stdio_servers}} =
+               Hub.add_server(hub, two, two_opts)
+
+      refute_received {:fake_transport, _conn, {:init, _opts}}
+      assert {:ok, ["alpha", "one"]} = Hub.servers(hub)
+      assert :error = Client.Registry.lookup({:supervisor, Hub.client(hub, "two")})
+
+      # Re-adding a present server stays idempotent; other transports do not count.
+      assert :ok = Hub.add_server(hub, one, one_opts)
+      {gamma, gamma_opts} = server("gamma", [tool("echo")])
+      assert :ok = Hub.add_server(hub, gamma, gamma_opts)
+
+      # Removing one frees its slot.
+      assert :ok = Hub.remove_server(hub, "one")
+      assert :ok = Hub.add_server(hub, two, two_opts)
+      assert_receive {:fake_transport, _conn, {:init, _opts}}
     end
   end
 

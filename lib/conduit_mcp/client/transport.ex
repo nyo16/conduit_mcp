@@ -19,6 +19,10 @@ defmodule ConduitMcp.Client.Transport do
        raises an `ArgumentError` naming it in `child_spec/1` or
        `start_link/1` instead of failing the connection later. It returns
        the options `c:init/2` will get (with defaults filled in).
+       `ConduitMcp.Client.set_auth/3` runs it on the options with a new
+       `:auth` (and `:credential_id`); a transport without it takes no
+       `:auth`. The connection reads those two keys to key private cached
+       results by credential (`ConduitMcp.Client.Cache`).
        `c:child_specs/2` (optional) - processes the client supervisor starts
        before the connection and keeps across connection attempts (an HTTP
        pool), stopped with the client.

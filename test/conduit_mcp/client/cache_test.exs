@@ -43,10 +43,10 @@ defmodule ConduitMcp.Client.CacheTest do
       {:ok, a} = Tool.from_wire("s", tool("a"))
       {:ok, b} = Tool.from_wire("s", tool("b"))
 
-      v1 = Cache.put_list(tid, :tools, [a, b], 1_000, 0)
+      v1 = Cache.put_list(tid, :tools, [a, b], 1_000, 0, :public)
       assert {:ok, ^b} = Cache.lookup(tid, :tools, "b")
 
-      v2 = Cache.put_list(tid, :tools, [a], 1_000, 10)
+      v2 = Cache.put_list(tid, :tools, [a], 1_000, 10, :public)
       assert v2 > v1
 
       assert {:ok, %{items: [^a], version: ^v2, fetched_at: 10, expires_at: 1_010}} =
@@ -58,7 +58,7 @@ defmodule ConduitMcp.Client.CacheTest do
 
     test "freshness: stale or expired lists are not fresh" do
       tid = Cache.new()
-      Cache.put_list(tid, :prompts, [], 100, 0)
+      Cache.put_list(tid, :prompts, [], 100, 0, :public)
       {:ok, entry} = Cache.list(tid, :prompts)
       assert Cache.fresh?(entry, 99)
       refute Cache.fresh?(entry, 100)
@@ -71,16 +71,54 @@ defmodule ConduitMcp.Client.CacheTest do
 
     test "only the owner writes; any process reads" do
       tid = Cache.new()
-      Cache.put_list(tid, :tools, [], 0, 0)
+      Cache.put_list(tid, :tools, [], 0, 0, :public)
 
       reader =
         Task.async(fn ->
           read = Cache.list(tid, :tools)
-          write = catch_error(:ets.insert(tid, {:tools, 0, [], 0, 0, false}))
+          write = catch_error(:ets.insert(tid, {:tools, 0, [], 0, 0, false, :public}))
           {read, write}
         end)
 
       assert {{:ok, %{items: []}}, :badarg} = Task.await(reader)
+    end
+
+    test "a private list is served only while its credential is the connection's (HT-11)" do
+      tid = Cache.new()
+      {:ok, a} = Tool.from_wire("s", tool("a"))
+      alice = {:bearer, :crypto.hash(:sha256, "alice")}
+      bob = {:bearer, :crypto.hash(:sha256, "bob")}
+
+      assert Cache.put_credential(tid, alice)
+      Cache.put_list(tid, :tools, [a], 1_000, 0, {:private, alice})
+      Cache.put_list(tid, :prompts, [], 1_000, 0, :public)
+      assert {:ok, %{items: [^a], scope: :private}} = Cache.list(tid, :tools)
+      assert {:ok, ^a} = Cache.lookup(tid, :tools, "a")
+
+      # The same identity again changes nothing.
+      refute Cache.put_credential(tid, alice)
+      assert {:ok, _} = Cache.list(tid, :tools)
+
+      # Another one deletes every private list at once; public ones stay.
+      assert Cache.put_credential(tid, bob)
+      assert :miss = Cache.list(tid, :tools)
+      assert :miss = Cache.lookup(tid, :tools, "a")
+      refute :ets.member(tid, :tools)
+      assert :ets.match_object(tid, {{:tool, :_}, :_, :_}) == []
+      assert {:ok, %{scope: :public}} = Cache.list(tid, :prompts)
+
+      # A list written for another credential (a fetch that raced the
+      # change) is never served.
+      Cache.put_list(tid, :tools, [a], 1_000, 0, {:private, alice})
+      assert :miss = Cache.list(tid, :tools)
+      assert :miss = Cache.lookup(tid, :tools, "a")
+
+      # An unknown identity (an `:auth` function) matches nothing.
+      assert Cache.put_credential(tid, :unshared)
+      refute Cache.shared?(tid)
+      Cache.put_list(tid, :tools, [a], 1_000, 0, {:private, :unshared})
+      assert :miss = Cache.list(tid, :tools)
+      assert {:ok, _} = Cache.list(tid, :prompts)
     end
 
     test "a dead table reads as :unavailable" do

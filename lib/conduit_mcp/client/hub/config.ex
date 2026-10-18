@@ -74,8 +74,22 @@ defmodule ConduitMcp.Client.Hub.Config do
               doc: """
               `fn attempt -> milliseconds end`: the wait before starting a
               failed server again, `attempt` counting consecutive failures
-              from 1. Default: full jitter from 1 s, capped at 5 minutes
-              (`ConduitMcp.Client.Backoff.full_jitter/2`).
+              from 1 (a server that ran for a minute starts over at 1).
+              Default: full jitter from 1 s, doubling, capped at 30 s
+              (`ConduitMcp.Client.Backoff.full_jitter/2` with `base: 1_000,
+              cap: 30_000`; ST-8).
+              """
+            ],
+            max_stdio_servers: [
+              type: {:or, [:non_neg_integer, {:in, [:infinity]}]},
+              default: 16,
+              doc: """
+              The most servers whose transport is a local process
+              (`kind/0` `:stdio`, such as `ConduitMcp.Client.Transport.Stdio`)
+              the hub runs at once (ST-8). More in `servers:` raises when the
+              hub starts; `add_server/3` beyond it returns `{:error,
+              %ConduitMcp.Client.Error{kind: :overloaded, reason:
+              :max_stdio_servers}}`. `:infinity` lifts the cap.
               """
             ],
             refetch_interval: [
@@ -133,7 +147,8 @@ defmodule ConduitMcp.Client.Hub.Config do
     :prefix,
     :restart_backoff,
     refetch_interval: 1_000,
-    breaker_threshold: 3
+    breaker_threshold: 3,
+    max_stdio_servers: 16
   ]
 
   @type t :: %__MODULE__{
@@ -143,7 +158,8 @@ defmodule ConduitMcp.Client.Hub.Config do
           prefix: String.t(),
           restart_backoff: (pos_integer() -> non_neg_integer()),
           refetch_interval: non_neg_integer(),
-          breaker_threshold: pos_integer()
+          breaker_threshold: pos_integer(),
+          max_stdio_servers: non_neg_integer() | :infinity
         }
 
   @doc """
@@ -166,10 +182,12 @@ defmodule ConduitMcp.Client.Hub.Config do
           prefix: valid[:prefix],
           restart_backoff: valid[:restart_backoff] || (&default_backoff/1),
           refetch_interval: valid[:refetch_interval],
-          breaker_threshold: valid[:breaker_threshold]
+          breaker_threshold: valid[:breaker_threshold],
+          max_stdio_servers: valid[:max_stdio_servers]
         }
 
         servers = for {id, opts} <- valid[:servers], do: {id, server_config!(config, id, opts)}
+        check_stdio_cap!(config, servers)
         %{config | servers: servers}
 
       {:error, %NimbleOptions.ValidationError{} = error} ->
@@ -182,7 +200,29 @@ defmodule ConduitMcp.Client.Hub.Config do
           "ConduitMcp.Client.Hub options must be a keyword list, got: #{inspect(other)}"
   end
 
-  defp default_backoff(attempt), do: Backoff.full_jitter(attempt, base: 1_000, cap: 300_000)
+  defp default_backoff(attempt), do: Backoff.full_jitter(attempt, base: 1_000, cap: 30_000)
+
+  defp check_stdio_cap!(config, servers) do
+    count = Enum.count(servers, fn {_id, client_config} -> stdio?(client_config) end)
+
+    unless within_stdio_cap?(config, count) do
+      raise ArgumentError,
+            "invalid ConduitMcp.Client.Hub option: :max_stdio_servers is " <>
+              "#{config.max_stdio_servers} but #{count} servers use a stdio transport"
+    end
+  end
+
+  @doc false
+  # Whether `client_config` runs its server as a local process (its
+  # transport's `kind/0` is `:stdio`): what `:max_stdio_servers` counts.
+  @spec stdio?(Config.t()) :: boolean()
+  def stdio?(%Config{transport: {transport, _opts}}), do: transport.kind() == :stdio
+
+  @doc false
+  # Whether `count` stdio servers are within the hub's `:max_stdio_servers`.
+  @spec within_stdio_cap?(t(), non_neg_integer()) :: boolean()
+  def within_stdio_cap?(%__MODULE__{max_stdio_servers: :infinity}, _count), do: true
+  def within_stdio_cap?(%__MODULE__{max_stdio_servers: max}, count), do: count <= max
 
   @doc """
   The `ConduitMcp.Client` config of server `server_id` of the hub: the hub's

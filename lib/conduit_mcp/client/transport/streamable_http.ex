@@ -74,6 +74,19 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
               configuration raises.
               """
             ],
+            credential_id: [
+              type: :any,
+              default: nil,
+              doc: """
+              With an `:auth` function only: any term naming whose tokens
+              the function returns (a user id, a service name). Results the
+              server marks `cacheScope: "private"` are cached for this
+              identity (HT-11, see `ConduitMcp.Client.Cache`). Without it,
+              the function may return anyone's token from one request to
+              the next, so private results fetched with it are never served
+              from the cache.
+              """
+            ],
             finch: [
               type: {:or, [:atom, nil]},
               default: nil,
@@ -251,6 +264,7 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
 
     with {:ok, opts} <- schema_validate(opts),
          :ok <- check_credentials(opts),
+         :ok <- check_credential_id(opts),
          :ok <- check_tls(opts),
          :ok <- check_allow_private(opts) do
       oauth_config(opts)
@@ -301,6 +315,13 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
         {:error,
          "invalid value for :auth option: credentials are never sent over plain http " <>
            "to a host that is not loopback; use an https :url"},
+      else: :ok
+  end
+
+  # Other `:auth` forms carry their own identity (`ConduitMcp.Client.Cache`).
+  defp check_credential_id(opts) do
+    if opts[:credential_id] != nil and not is_function(opts[:auth], 1),
+      do: {:error, "invalid value for :credential_id option: it needs an :auth function"},
       else: :ok
   end
 

@@ -12,14 +12,17 @@ defmodule ConduitMcp.Client.Cache do
       connection state (`ConduitMcp.Client.status/1`).
     * `{:server, server | nil}` - what the server reported in the handshake
       (`ConduitMcp.Client.server_info/1`).
-    * `{kind, version, items, fetched_at, expires_at, stale?}` - one list,
-      for `kind` in `:tools`, `:prompts`, `:resources` and
-      `:resource_templates`.
+    * `{kind, version, items, fetched_at, expires_at, stale?, owner}` - one
+      list, for `kind` in `:tools`, `:prompts`, `:resources` and
+      `:resource_templates`; `owner` is `:public` or `{:private,
+      credential}` (see "Private results").
     * `{{:tool, name}, version, %ConduitMcp.Client.Tool{}}` - a point row
       per item, so a lookup copies one item instead of the list. Prompts are
       keyed `{:prompt, name}`, resources `{:resource, uri}`, templates
       `{:resource_template, uri_template}`.
     * `{:version, n}` - the counter list writes take their version from.
+    * `{:credential, credential}` - the identity of the credentials the
+      connection sends now.
 
   A list is written with one `:ets.insert/2` of the list row and its point
   rows, then the point rows of earlier versions are deleted, so a reader
@@ -37,9 +40,25 @@ defmodule ConduitMcp.Client.Cache do
   also marks it stale at once), and it is marked stale when the connection
   is lost. Multi-round-trip interim results and retries are never cached.
 
-  A server's `cacheScope: "private"` means the answer may differ per
-  credential. A client holds one credential, so the cache is per
-  credential; run one client per credential (per user) when they differ.
+  ## Private results (HT-11)
+
+  A server's `cacheScope: "private"` (and a missing `cacheScope`, so every
+  legacy result) means the answer may differ per credential. Such a list
+  is stored with the identity of the credentials it was fetched with, and
+  served only while the connection still sends those: after a change
+  (`ConduitMcp.Client.set_auth/3`, an OAuth re-authorization for another
+  principal or authorization server) it is a miss, fetched again, and the
+  connection deletes every private list at once. A list is `public` only
+  when every page said so; public lists survive a credential change.
+
+  The identity is never a secret: `nil` without credentials, the SHA-256 of
+  a static bearer token, the SHA-256 of the `{principal, issuer, resource}`
+  key OAuth tokens are stored under (so a token refresh for the same
+  principal keeps the cache), or of an `:auth` function's declared
+  `:credential_id`. An `:auth` function without one is called before every
+  request and may return anyone's token, so its private results are never
+  stored: every listing asks the server, and `ConduitMcp.Client.cached_tools/2`
+  and `ConduitMcp.Client.tool/3` find nothing private.
 
   ## Dead tables
 
@@ -67,8 +86,19 @@ defmodule ConduitMcp.Client.Cache do
           version: pos_integer(),
           fetched_at: integer(),
           expires_at: integer(),
-          stale?: boolean()
+          stale?: boolean(),
+          scope: :public | :private
         }
+
+  @typedoc """
+  The identity of the credentials a list was fetched with (never a secret):
+  `nil` without credentials, `:unshared` when it cannot be known (an
+  `:auth` function without `:credential_id`), else a tagged SHA-256 digest.
+  """
+  @type credential :: nil | :unshared | {atom(), binary()}
+
+  @typedoc "Who may be served a list: everyone, or holders of one credential."
+  @type owner :: :public | {:private, credential()}
 
   @doc "Every cached list kind."
   @spec kinds() :: [kind(), ...]
@@ -89,9 +119,11 @@ defmodule ConduitMcp.Client.Cache do
   def put_server(tid, server), do: :ets.insert(tid, {:server, server})
 
   @doc false
-  # Writes `items` as the `kind` list, fetched at `now`, fresh for `ttl_ms`.
-  @spec put_list(:ets.tid(), kind(), [term()], non_neg_integer(), integer()) :: pos_integer()
-  def put_list(tid, kind, items, ttl_ms, now) when kind in @kinds do
+  # Writes `items` as the `kind` list, fetched at `now`, fresh for `ttl_ms`,
+  # served to `owner` (`servable?/2`).
+  @spec put_list(:ets.tid(), kind(), [term()], non_neg_integer(), integer(), owner()) ::
+          pos_integer()
+  def put_list(tid, kind, items, ttl_ms, now, owner) when kind in @kinds do
     version = :ets.update_counter(tid, :version, 1, {:version, 0})
     tag = Map.fetch!(@point_tags, kind)
 
@@ -103,9 +135,71 @@ defmodule ConduitMcp.Client.Cache do
         end
       end)
 
-    true = :ets.insert(tid, [{kind, version, items, now, now + ttl_ms, false} | points])
+    true = :ets.insert(tid, [{kind, version, items, now, now + ttl_ms, false, owner} | points])
     _deleted = :ets.select_delete(tid, [{{{tag, :_}, :"$1", :_}, [{:<, :"$1", version}], [true]}])
     version
+  end
+
+  @doc false
+  # Deletes the `kind` list and its point rows (the list row first, so a
+  # lookup racing this finds no owner and misses).
+  @spec drop_list(:ets.tid(), kind()) :: true
+  def drop_list(tid, kind) when kind in @kinds do
+    true = :ets.delete(tid, kind)
+    :ets.match_delete(tid, {{Map.fetch!(@point_tags, kind), :_}, :_, :_})
+  end
+
+  @doc false
+  # Records the identity of the credentials the connection sends. On a
+  # change every private list is deleted (public ones stay); returns
+  # whether it changed.
+  @spec put_credential(:ets.tid(), credential()) :: boolean()
+  def put_credential(tid, credential) do
+    case :ets.lookup(tid, :credential) do
+      [{:credential, ^credential}] ->
+        false
+
+      _changed ->
+        true = :ets.insert(tid, {:credential, credential})
+
+        for kind <- @kinds, match?({:private, _}, owner_of(tid, kind)), do: drop_list(tid, kind)
+
+        true
+    end
+  end
+
+  @doc false
+  # The identity of the credentials the connection sends now.
+  @spec credential(:ets.tid()) :: credential()
+  def credential(tid) do
+    case :ets.lookup(tid, :credential) do
+      [{:credential, credential}] -> credential
+      [] -> nil
+    end
+  end
+
+  @doc false
+  # Whether a list owned by `owner` may be served while the connection
+  # sends `credential`: a private list only to the credential it was
+  # fetched with, and never to an unknown one.
+  @spec servable?(owner(), credential()) :: boolean()
+  def servable?(:public, _credential), do: true
+  def servable?({:private, :unshared}, _credential), do: false
+  def servable?({:private, credential}, credential), do: true
+  def servable?(_owner, _credential), do: false
+
+  @doc false
+  # Whether private lists can be cached at all: false while the
+  # connection's credential is `:unshared`. Any process may ask.
+  @spec shared?(:ets.tid()) :: boolean()
+  def shared?(tid), do: lookup_rows(tid, :credential) != {:ok, [{:credential, :unshared}]}
+
+  # Only the owner element is copied, never the items.
+  defp owner_of(tid, kind) do
+    case :ets.select(tid, [{{kind, :_, :_, :_, :_, :_, :"$1"}, [], [:"$1"]}]) do
+      [owner] -> owner
+      [] -> nil
+    end
   end
 
   @doc false
@@ -158,25 +252,28 @@ defmodule ConduitMcp.Client.Cache do
     end
   end
 
-  @doc "The cached `kind` list, `:miss` when it was never fetched."
+  @doc """
+  The cached `kind` list, `:miss` when it was never fetched or is private
+  to other credentials than the connection sends now (see "Private
+  results").
+  """
   @spec list(:ets.tid(), kind()) :: {:ok, entry()} | :miss | {:error, Error.t()}
   def list(tid, kind) when kind in @kinds do
-    case lookup_rows(tid, kind) do
-      {:ok, [{^kind, version, items, fetched_at, expires_at, stale?}]} ->
-        {:ok,
-         %{
-           items: items,
-           version: version,
-           fetched_at: fetched_at,
-           expires_at: expires_at,
-           stale?: stale?
-         }}
-
-      {:ok, []} ->
-        :miss
-
-      {:error, _} = error ->
-        error
+    with {:ok, [{^kind, version, items, fetched_at, expires_at, stale?, owner}]} <-
+           lookup_rows(tid, kind),
+         {:ok, true} <- servable(tid, owner) do
+      {:ok,
+       %{
+         items: items,
+         version: version,
+         fetched_at: fetched_at,
+         expires_at: expires_at,
+         stale?: stale?,
+         scope: if(owner == :public, do: :public, else: :private)
+       }}
+    else
+      {:ok, _none_or_not_servable} -> :miss
+      {:error, _} = error -> error
     end
   end
 
@@ -188,21 +285,40 @@ defmodule ConduitMcp.Client.Cache do
   @doc """
   The cached item of `kind` keyed `key` (a tool or prompt name, a resource
   URI, a template's `uriTemplate`), `:miss` when it is not in the last
-  fetched list.
+  fetched list or that list is not served (`list/2`).
   """
   @spec lookup(:ets.tid(), kind(), String.t()) :: {:ok, term()} | :miss | {:error, Error.t()}
   def lookup(tid, kind, key) when kind in @kinds do
     point = {Map.fetch!(@point_tags, kind), key}
 
-    case lookup_rows(tid, point) do
-      {:ok, [{^point, _version, item}]} -> {:ok, item}
-      {:ok, []} -> :miss
+    with {:ok, [{^point, _version, item}]} <- lookup_rows(tid, point),
+         {:ok, owner} when owner != nil <- read_owner(tid, kind),
+         {:ok, true} <- servable(tid, owner) do
+      {:ok, item}
+    else
+      {:ok, _none_or_not_servable} -> :miss
       {:error, _} = error -> error
     end
   end
 
-  # The one place a dead table surfaces: `:ets.lookup/2` on a deleted table
-  # raises `ArgumentError`, and nothing else in here can.
+  defp servable(_tid, :public), do: {:ok, true}
+
+  defp servable(tid, owner) do
+    case lookup_rows(tid, :credential) do
+      {:ok, [{:credential, credential}]} -> {:ok, servable?(owner, credential)}
+      {:ok, []} -> {:ok, servable?(owner, nil)}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp read_owner(tid, kind) do
+    {:ok, owner_of(tid, kind)}
+  rescue
+    ArgumentError -> {:error, Error.new(:unavailable, :cache_gone)}
+  end
+
+  # Where a dead table surfaces (with `read_owner/2`): a read of a deleted
+  # table raises `ArgumentError`, and nothing else in here can.
   defp lookup_rows(tid, key) do
     {:ok, :ets.lookup(tid, key)}
   rescue

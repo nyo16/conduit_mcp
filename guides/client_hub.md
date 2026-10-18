@@ -97,7 +97,8 @@ servers: [
 server's tool hints.
 
 Other hub options: `:prefix` (prepended to every exposed name),
-`:restart_backoff`, `:refetch_interval` and `:breaker_threshold` (below).
+`:restart_backoff` and `:max_stdio_servers` (see "Supervision and
+restarts"), `:refetch_interval` and `:breaker_threshold` (below).
 
 ## Naming
 
@@ -261,11 +262,25 @@ connects in the background.
 
 Server clients are `restart: :temporary`. When one exits (a bug, or its own
 supervisor giving up after repeated connection crashes), the manager starts
-it again after a jittered backoff: `:restart_backoff`, by default 1 s
-doubling to at most 5 minutes. One crash-looping server never exhausts a
-supervisor's restart intensity or takes the others down. Within a running
-client, ordinary connection failures are handled by its own reconnect loop
-(see [client.md](client.md)).
+it again after a jittered backoff: `:restart_backoff`, by default full
+jitter from 1 s, doubling, capped at 30 s. `attempt` counts consecutive
+failures and starts over once a server ran for a minute; each failure emits
+`[:conduit_mcp, :client, :hub, :server_failed]` with the `:delay` and
+`:attempt`. One crash-looping server never exhausts a supervisor's restart
+intensity or takes the others down. Each client is itself a `:one_for_all`
+supervisor allowing 3 restarts in 5 s, so a connection that keeps crashing
+takes its client down within seconds and the hub's backoff paces the rest.
+Within a running client, ordinary connection failures are handled by its
+own reconnect loop (see [client.md](client.md)).
+
+A hub runs at most `:max_stdio_servers` (default 16) servers whose
+transport starts a local process (`kind/0` `:stdio`, such as
+`ConduitMcp.Client.Transport.Stdio`), whether running or waiting to
+restart. More in `servers:` raises `ArgumentError` naming the option when
+the hub starts; `add_server/3` beyond the cap returns
+`{:error, %ConduitMcp.Client.Error{kind: :overloaded, reason:
+:max_stdio_servers}}` and starts nothing. `max_stdio_servers: :infinity`
+lifts the cap.
 
 ## OAuth servers
 
@@ -286,9 +301,12 @@ give each server a persistent store; see
 
 ## Per-user hubs
 
-A client holds one credential, and its cache, grants and approval baseline
-belong to that client. When servers answer differently per user (private
-results, per-user OAuth tokens), run **one hub per credential**:
+Each server client sends one set of credentials at a time. Its private
+cached results are keyed by them and never served to other credentials
+(see "Private results and credentials" in [client.md](client.md)), but its
+grants and approval baseline belong to the client. When servers answer
+differently per user (private results, per-user OAuth tokens), run **one
+hub per credential**:
 
 ```elixir
 DynamicSupervisor.start_child(MyApp.Hubs,

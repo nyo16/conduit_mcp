@@ -83,7 +83,10 @@ defmodule ConduitMcp.Client do
   over-1 KiB cursor fails with `kind: :pagination_cycle`) and keep the
   result in the client's `ConduitMcp.Client.Cache`, which serves it again
   while the server's `ttlMs` hint says it is fresh. `cached_tools/2` and
-  `tool/3` read the cache without asking the server.
+  `tool/3` read the cache without asking the server. A result the server
+  marks private is served only while the client sends the credentials it
+  was fetched with (`set_auth/3` changes them; see "Private results" in
+  `ConduitMcp.Client.Cache`).
 
   Every listed tool goes through intake: a tool whose name is outside the
   spec charset (`[A-Za-z0-9_.-]`, 1-128 characters), whose definition is
@@ -387,6 +390,46 @@ defmodule ConduitMcp.Client do
   @spec authorized(client()) :: :ok | {:error, Error.t()}
   def authorized(client), do: Request.call(client, :authorized, @control_timeout)
 
+  @doc """
+  Replaces the credentials the client sends with `auth`, any form the
+  transport's `:auth` option takes (`ConduitMcp.Client.Transport.StreamableHTTP`:
+  `nil`, `{:bearer, token}`, a one-arity function, `{:oauth, opts}`,
+  `{:client_credentials, opts}`), checked like that option. Raises
+  `ArgumentError` when it is invalid, or when the transport takes no
+  `:auth`.
+
+  Everything bound to the old credentials ends: the client reconnects as
+  `reconnect/1` does (requests in flight fail with `kind: :transport`,
+  listen streams and a legacy session close, an OAuth authorization in
+  progress is abandoned). Cached results the server marked private are
+  deleted before this returns when the credentials' identity changes, and
+  fetched again under the new ones; public results stay (see "Private
+  results" in `ConduitMcp.Client.Cache`). A `:closed` client stays closed.
+
+  OAuth options naming no `:store` keep the client's current token store;
+  change `:principal` to act for another user (tokens are stored per
+  principal). The change lasts as long as the client process: a client
+  restarted by its supervisor starts with its configured credentials.
+
+      :ok = ConduitMcp.Client.set_auth(:docs, {:bearer, new_token})
+
+  Options:
+
+    * `:credential_id` - with an `:auth` function, any term naming whose
+      tokens it returns (the transport's `:credential_id`). Without it,
+      private results fetched with the function are never served from the
+      cache.
+  """
+  @spec set_auth(client(), term(), keyword()) :: :ok | {:error, Error.t()}
+  def set_auth(client, auth, opts \\ []) do
+    opts = Keyword.validate!(opts, credential_id: nil)
+
+    case Request.call(client, {:set_auth, auth, opts[:credential_id]}, @control_timeout) do
+      {:error, {:invalid_auth, message}} -> raise ArgumentError, message
+      other -> other
+    end
+  end
+
   # --- requests ------------------------------------------------------------------
 
   @doc """
@@ -597,12 +640,20 @@ defmodule ConduitMcp.Client do
   @doc false
   # Sends a `tools/call` with `params` (and its MRTR rounds, or the task it
   # becomes) and returns `{result, rounds}`; `ConduitMcp.Client.Pipeline`
-  # step 9. `opts` are request options plus `:meta`.
-  @spec __send_tool_call__(client(), map(), map(), {atom() | nil, term()}, keyword()) ::
+  # step 9. `opts` are request options plus `:meta`; `tool` is the resolved
+  # definition (its `Mcp-Param-*` headers), `nil` to look it up in the cache.
+  @spec __send_tool_call__(
+          client(),
+          map(),
+          map(),
+          {atom() | nil, term()},
+          keyword(),
+          Tool.t() | nil
+        ) ::
           {{:ok, ToolResult.t() | ClientTask.t()} | {:error, Error.t()}, non_neg_integer()}
-  def __send_tool_call__(client, view, params, {mode, ttl}, opts) do
+  def __send_tool_call__(client, view, params, {mode, ttl}, opts, tool \\ nil) do
     if view.era == :modern,
-      do: modern_call(client, view, params, mode, opts),
+      do: modern_call(client, view, params, mode, opts, tool),
       else: legacy_call(client, view, params, {mode, ttl}, opts)
   end
 
@@ -621,26 +672,37 @@ defmodule ConduitMcp.Client do
     end
   end
 
-  defp modern_call(client, view, params, mode, opts) do
-    case modern_send(client, view, params, mode, opts) do
+  defp modern_call(client, view, params, mode, opts, tool) do
+    case modern_send(client, view, params, mode, opts, tool) do
       # `-32020`: the `Mcp-Param-*` headers came from a stale (or missing)
-      # tool definition; refresh the tools and send once more (CS §6.3).
+      # tool definition; refresh the tools and send once more (CS §6.3)
+      # with the definition just listed (a private list fetched with an
+      # unshared credential is not cached, HT-11).
       {:error, %Error{reason: {:jsonrpc, @header_mismatch}}} when view.transport == :http ->
-        _ = list_all_tools(client, refresh: true)
-        modern_send(client, view, params, mode, opts) |> modern_result(client, view, mode, opts)
+        tool = listed_tool(client, params["name"])
+
+        modern_send(client, view, params, mode, opts, tool)
+        |> modern_result(client, view, mode, opts)
 
       outcome ->
         modern_result(outcome, client, view, mode, opts)
     end
   end
 
-  defp modern_send(client, view, params, mode, opts) do
+  defp listed_tool(client, name) do
+    case list_all(client, :tools, refresh: true) do
+      {:ok, tools} -> Enum.find(tools, &(&1.name == name))
+      {:error, _} -> nil
+    end
+  end
+
+  defp modern_send(client, view, params, mode, opts, tool) do
     result_types = if mode == nil, do: [], else: ["task"]
 
     mrtr(client, "tools/call", params, view, opts,
       extensions: TaskRequestor.extensions(mode),
       result_types: result_types,
-      headers: param_headers(view, params)
+      headers: param_headers(view, params, tool)
     )
   end
 
@@ -657,11 +719,16 @@ defmodule ConduitMcp.Client do
     end
   end
 
-  # The `Mcp-Param-*` headers of a modern HTTP call, from the cached tool
-  # definition and the final arguments (sent as given, so atom keys are
-  # normalised the way the JSON body will carry them).
-  defp param_headers(%{transport: :http, cache: cache}, %{"name" => name, "arguments" => args}) do
-    with {:ok, tool} <- Cache.lookup(cache, :tools, name),
+  # The `Mcp-Param-*` headers of a modern HTTP call, from the tool
+  # definition (the resolved one, else the cached one) and the final
+  # arguments (sent as given, so atom keys are normalised the way the JSON
+  # body will carry them).
+  defp param_headers(
+         %{transport: :http, cache: cache},
+         %{"name" => name, "arguments" => args},
+         tool
+       ) do
+    with {:ok, tool} <- definition(tool, cache, name),
          [_ | _] <- ConduitMcp.Headers.header_params(tool.input_schema),
          {:ok, args} <- normalise(args) do
       ConduitMcp.Headers.param_headers(tool.input_schema, args)
@@ -670,7 +737,10 @@ defmodule ConduitMcp.Client do
     end
   end
 
-  defp param_headers(_view, _params), do: []
+  defp param_headers(_view, _params, _tool), do: []
+
+  defp definition(%Tool{name: name} = tool, _cache, name), do: {:ok, tool}
+  defp definition(_tool, cache, name), do: Cache.lookup(cache, :tools, name)
 
   defp normalise(args) do
     JSON.decode(JSON.encode!(args))

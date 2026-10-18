@@ -80,7 +80,7 @@ is where it lives.
 | Area | Default |
 |---|---|
 | Limits | 64 requests in flight, 128 queued, 4 listen streams; pagination capped at 100 pages, 10 000 items, 1 KiB cursors |
-| Cache | Fresh only for the server's `ttlMs`, clamped to 1 hour; one credential per client |
+| Cache | Fresh only for the server's `ttlMs`, clamped to 1 hour; private results served only to the credential they were fetched with (HT-11) |
 | Retries | Nothing that may have run is retried automatically |
 | Era | Once modern, never downgraded to legacy; HTTP 5xx and network errors are never legacy evidence |
 | Crash reports | The connection's `format_status/1` redacts the transport state and options, queued request params and every `assigns`; the stdio port owner redacts its state too |
@@ -98,6 +98,7 @@ is where it lives.
 | 8 MiB per message; 10 consecutive junk lines; 16 MiB unwritten stdin | A server cannot exhaust memory or stall the connection |
 | stdin close, then `SIGTERM` after 2 s, `SIGKILL` after 2 s more | Servers that ignore EOF are still reaped |
 | stderr never merged into stdout, never captured into `Logger` | Server stderr cannot corrupt the protocol stream or be logged by the client |
+| In a hub: at most 16 stdio servers (`:max_stdio_servers`); a failed server restarted after full jitter from 1 s, doubling, capped at 30 s; each client gives up after 3 restarts in 5 s | A crash-looping or runaway configuration cannot fork without bound (ST-8) |
 
 Know the limits:
 
@@ -208,8 +209,17 @@ Elsewhere:
 - Hooks: what a failing hook raised is never logged or emitted.
 - Task ids are bound to the credential that created them and may act as
   bearer tokens: never log them.
-- One credential per client: the cache, grants and approval baseline belong
-  to one client, so run one client (or hub) per user when credentials differ.
+- Private cached results are keyed by credential (HT-11, enforced): a list
+  the server marks `cacheScope: "private"` (or leaves unmarked) is served
+  only while the client sends the credentials it was fetched with, and is
+  deleted when they change (`ConduitMcp.Client.set_auth/3`, OAuth for
+  another principal). The key is a digest: the token's SHA-256, the OAuth
+  `{principal, issuer, resource}`, or an `:auth` function's
+  `:credential_id`. Without a `:credential_id` an `:auth` function's
+  private results are never served from the cache. See "Private results and
+  credentials" in [client.md](client.md).
+- Grants and the approval baseline belong to one client: pass `principal:`
+  on calls, or run one client (or hub) per user when users differ.
 
 ## `ui://` resources
 

@@ -67,10 +67,17 @@ defmodule ConduitMcp.Client.Hub do
   Server clients are `restart: :temporary`: when one exits (a bug, or its
   own supervisor giving up after repeated connection crashes) the manager
   starts it again after a jittered backoff (`:restart_backoff`, 1 s doubling
-  to at most 5 minutes), so one crash-looping server never exhausts a
-  supervisor's restart intensity or takes the others down. Starting never
+  to at most 30 s), so one crash-looping server never exhausts a
+  supervisor's restart intensity or takes the others down. Each client is
+  itself a `:one_for_all` supervisor allowing 3 restarts in 5 s: a
+  connection that keeps crashing takes its client down within seconds, and
+  the manager's backoff paces what follows (ST-8). Starting never
   blocks: servers are started after `start_link/1` returns, and each client
   connects in the background.
+
+  At most `:max_stdio_servers` (16) servers run a local process (a
+  transport whose `kind/0` is `:stdio`), so a configuration or a caller of
+  `add_server/3` cannot fork without bound (ST-8).
 
   `add_server/3` and `remove_server/2` change the server set at runtime.
   **Servers added at runtime are not durable**: they survive a restart of
@@ -299,7 +306,9 @@ defmodule ConduitMcp.Client.Hub do
   Adds and starts server `server_id` with `client_opts` (as in `servers:`).
   Idempotent: when the id is already present, nothing changes (remove it
   first to change its options). Raises `ArgumentError` on an invalid id or
-  option. Not durable across a hub restart.
+  option. A stdio server beyond the hub's `:max_stdio_servers` is refused
+  with `{:error, %Error{kind: :overloaded, reason: :max_stdio_servers}}`
+  and nothing is started. Not durable across a hub restart.
   """
   @spec add_server(hub(), String.t() | atom(), keyword()) :: :ok | {:error, Error.t()}
   def add_server(hub, server_id, client_opts) do
@@ -472,7 +481,10 @@ defmodule ConduitMcp.Client.Hub do
 
   # What to do for one ready server: use its cached list, fetch it, or
   # leave it out (HB-4). With the breaker open (too many failed fetches)
-  # the cached list is not offered; each allowed attempt probes again.
+  # the cached list is not offered; each allowed attempt probes again. A
+  # server whose credential cannot share private results (an `:auth`
+  # function without `:credential_id`, HT-11) has no list to fall back on,
+  # so every listing fetches while the breaker is closed.
   defp plan(ref, id, view, now, refresh?) do
     %{refetch_interval: interval, breaker_threshold: threshold} = ref.config
     {last, failures} = Table.fetch_state(ref.table, id, view.cache)
@@ -492,7 +504,9 @@ defmodule ConduitMcp.Client.Hub do
         end
 
       :miss ->
-        if allowed?, do: {:fetch, nil}, else: :skip
+        if allowed? or (not open? and not Cache.shared?(view.cache)),
+          do: {:fetch, nil},
+          else: :skip
 
       {:error, _gone} ->
         :skip
