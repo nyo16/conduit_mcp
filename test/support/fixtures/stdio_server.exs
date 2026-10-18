@@ -35,6 +35,12 @@ defmodule ConduitMcp.Test.StdioServerScript do
   @subscription_id "io.modelcontextprotocol/subscriptionId"
 
   def main(argv) do
+    # SIGTERM halts at once, like a typical MCP server process. The BEAM's
+    # default is a graceful `init:stop/0` of every started application,
+    # which on a loaded machine can outlast the client's TERM grace and turn
+    # a "stopped by TERM" check into a KILL.
+    System.trap_signal(:sigterm, fn -> System.halt(143) end)
+
     # stdout carries the protocol: logs go to stderr.
     :ok = :logger.remove_handler(:default)
 
