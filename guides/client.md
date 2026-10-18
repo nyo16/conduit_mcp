@@ -593,19 +593,20 @@ it starts.
 | Option | Default | Meaning |
 |---|---|---|
 | `:url` | required | The MCP endpoint: an absolute `http`/`https` URL, no user info, no fragment |
-| `:auth` | `nil` | `{:bearer, token}` (a string or a `ConduitMcp.Client.Secret`), or a one-arity function called before each request with `%{url: url, method: method}`, returning `{:ok, token}`, `{:ok, nil}` or `{:error, reason}` (the request fails with `kind: :auth`), or `{:oauth, opts}` / `{:client_credentials, opts}` ([client_oauth.md](client_oauth.md)). Never sent over `http` to a non-loopback host: that configuration raises. Replace it at runtime with `ConduitMcp.Client.set_auth/3` |
+| `:auth` | `nil` | `{:bearer, token}` (a string or a `ConduitMcp.Client.Secret`), or a one-arity function called before each request with `%{url: url, method: method}`, returning `{:ok, token}`, `{:ok, nil}` or `{:error, reason}` (the request fails with `kind: :auth`), or `{:oauth, opts}` / `{:client_credentials, opts}` ([client_oauth.md](client_oauth.md)). A token must be visible ASCII (0x21-0x7E): a static one raises, a function's fails the request with `kind: :auth, reason: :invalid_token`. Never sent over `http` to a non-loopback host: that configuration raises. Replace it at runtime with `ConduitMcp.Client.set_auth/3` |
 | `:credential_id` | `nil` | With an `:auth` function only: any term naming whose tokens it returns, so private results are cached for that identity (see "Private results and credentials"). Without it they are never served from the cache |
-| `:headers` | `[]` | Extra `{name, value}` headers; a value may be a `Secret`. Headers the transport owns (`accept`, `authorization`, `content-type`, `mcp-*`, `last-event-id`, hop-by-hop) are refused |
+| `:headers` | `[]` | Extra `{name, value}` headers; a value may be a `Secret`, and must be visible ASCII, space and tab. Headers the transport owns (`accept`, `authorization`, `content-type`, `mcp-*`, `last-event-id`, hop-by-hop) are refused |
 | `:finch` | `nil` | The name of a `Finch` pool you started |
 | `:pool_size` | 100 | Connections in the library-started pool. Each open event stream holds one |
-| `:transport_opts` | `[]` | TLS options for the library-started pool (Mint `:transport_opts`, for example `cacertfile:`). Any `verify:` other than `:verify_peer`, and `verify_fun:`, are refused |
-| `:insecure_skip_tls_verify` | `false` | Skip certificate verification. **Local development only**: a warning is logged whenever the transport starts |
+| `:transport_opts` | `[]` | TLS options for the library-started pool, and with `:public_only` for the pinned pools (Mint `:transport_opts`, for example `cacertfile:`). Any `verify:` other than `:verify_peer`, and `verify_fun:`, are refused |
+| `:insecure_skip_tls_verify` | `false` | Skip certificate verification. **Local development only**: a warning is logged whenever the transport starts. Refused with `server_url_policy: :public_only` |
 | `:redirect` | `false` | `false` refuses every redirect. `:same_origin` follows 307/308 to the same scheme, host and port (at most 5) |
 | `:max_message_bytes` | 8 MiB | The largest JSON body or event-stream event. More fails with `kind: :message_too_large` |
 | `:request_timeout` | 60 000 | Total time of a request the connection sends itself (handshake, health check) |
 | `:listen_idle_timeout` | 120 000 | How long a long-lived stream may stay silent (keep-alives count) before it is dropped and reopened |
-| `:server_url_policy` | `:any` | `:public_only` checks the URL with `ConduitMcp.Client.URLPolicy` before every request (see [client_security.md](client_security.md)) |
+| `:server_url_policy` | `:any` | `:public_only` checks the URL with `ConduitMcp.Client.URLPolicy` before every request and connects to the vetted address, so DNS rebinding cannot redirect it (see [client_security.md](client_security.md)) |
 | `:allow_private` | `[]` | CIDRs that `:public_only` admits anyway |
+| `:resolver` | `nil` | The DNS resolver `:public_only` uses (`fn host -> {:ok, [ip]} end`), called in the request's process; default the system resolver |
 
 **The pool.** By default each client starts its own Finch pool under its
 supervisor, stopped with it. That pool is named by an atom derived from a

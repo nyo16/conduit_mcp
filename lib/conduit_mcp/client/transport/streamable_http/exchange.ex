@@ -71,16 +71,29 @@ if Code.ensure_loaded?(Finch) do
       end
     end
 
+    @doc false
+    # A legacy session's DELETE under `server_url_policy: :public_only`,
+    # vetted and pinned like any request; run in a task by the transport's
+    # `close/2`. Any answer or failure is fine.
+    @spec delete(map()) :: :ok
+    def delete(spec) do
+      case open(spec, :delete, spec.headers, nil) do
+        {:ok, response} -> spec.http.cancel(response)
+        {:error, _reason} -> :ok
+      end
+    end
+
     # --- opening ---------------------------------------------------------------
 
     @doc false
     # Opens `method` on the spec's URL with `headers` plus credentials,
     # after the URL policy check. Shared with the Listener.
-    @spec open(map(), :get | :post, list(), iodata() | nil) :: {:ok, term()} | {:error, term()}
+    @spec open(map(), :get | :post | :delete, list(), iodata() | nil) ::
+            {:ok, term()} | {:error, term()}
     def open(spec, method, headers, body) do
-      with :ok <- check_url(spec),
+      with {:ok, pin} <- check_url(spec),
            {:ok, auth} <- credentials(spec, method) do
-        spec.http.open(%{
+        request = %{
           method: method,
           url: spec.url,
           headers: auth ++ headers,
@@ -89,23 +102,27 @@ if Code.ensure_loaded?(Finch) do
           deadline: Map.get(spec, :deadline, :infinity),
           idle_timeout: Map.get(spec, :idle_timeout, :infinity),
           redirect: spec.redirect
-        })
+        }
+
+        spec.http.open(if pin, do: Map.put(request, :pin, pin), else: request)
       end
     end
 
-    defp check_url(%{url_policy: :public_only} = spec) do
-      case URLPolicy.check(spec.url, :public_only, allow_private: spec.allow_private) do
-        {:ok, _target} -> :ok
+    # `server_url_policy: :public_only`: resolve and vet the host here, then
+    # connect to the first vetted address (W-S4) - the name is not resolved
+    # again between the check and the connect.
+    defp check_url(%{url_policy: %{check: check, pool: pool}} = spec) do
+      case URLPolicy.check(spec.url, :public_only, check) do
+        {:ok, %{addresses: [address | _]}} -> {:ok, %{address: address, pool: pool}}
         {:error, reason} -> {:error, {:url_policy, reason}}
       end
     end
 
-    defp check_url(_spec), do: :ok
+    defp check_url(_spec), do: {:ok, nil}
 
     defp credentials(%{auth: nil}, _method), do: {:ok, []}
 
-    defp credentials(%{auth: {:bearer, token}}, _method),
-      do: {:ok, [{"authorization", StreamableHTTP.bearer(token)}]}
+    defp credentials(%{auth: {:bearer, token}}, _method), do: authorization(token)
 
     # OAuth: the stored token, refreshed here first when it is about to
     # expire (this process, never the connection). Only the MCP server's
@@ -119,7 +136,7 @@ if Code.ensure_loaded?(Finch) do
 
         {:ok, token} ->
           Process.put(@sent_key, OAuthSession.fingerprint(token))
-          {:ok, [{"authorization", StreamableHTTP.bearer(token)}]}
+          authorization(token)
       end
     rescue
       # A host token store that raised; what it raised is not reported.
@@ -136,7 +153,7 @@ if Code.ensure_loaded?(Finch) do
           {:ok, []}
 
         {:ok, token} when is_binary(token) or is_struct(token, Secret) ->
-          {:ok, [{"authorization", StreamableHTTP.bearer(token)}]}
+          authorization(token)
 
         {:error, reason} ->
           {:error, Error.new(:auth, :credentials_unavailable, reason)}
@@ -146,6 +163,12 @@ if Code.ensure_loaded?(Finch) do
       end
     rescue
       error -> {:error, Error.new(:auth, :auth_function_raised, Exception.message(error))}
+    end
+
+    # A token Mint would refuse fails here, by `kind: :auth, reason:
+    # :invalid_token` naming no value (`StreamableHTTP.bearer/1`).
+    defp authorization(token) do
+      with {:ok, header} <- StreamableHTTP.bearer(token), do: {:ok, [{"authorization", header}]}
     end
 
     # --- the answer ------------------------------------------------------------
