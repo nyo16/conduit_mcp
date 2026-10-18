@@ -689,37 +689,48 @@ defmodule ConduitMcp.Transport.SubscriptionsListenTest do
   # --- limits -----------------------------------------------------------------
 
   describe "limits (SV-10)" do
-    test "the 5th concurrent listen of one principal is 429; closing one admits another" do
+    test "at the per-principal cap the oldest stream is superseded, never another principal's" do
       port = start_server(keep_alive_interval: 10, auth: function_auth())
+      other_uri = unique_uri()
+
+      {other, _acc, _ack} =
+        listen(port, 100, %{"resourceSubscriptions" => [other_uri]}, bearer("other"))
 
       streams =
         for n <- 1..4 do
           uri = unique_uri()
 
-          {socket, _acc, _ack} =
+          {socket, acc, _ack} =
             listen(port, n, %{"resourceSubscriptions" => [uri]}, bearer("capped"))
 
-          {socket, uri}
+          {socket, acc, uri}
         end
 
-      response = post(port, listen_request(5, %{"toolsListChanged" => true}), bearer("capped"))
+      # The 5th is admitted; stream 1 ends with the server-initiated teardown.
+      {fifth, _acc, _ack} = listen(port, 5, %{"toolsListChanged" => true}, bearer("capped"))
+      assert_superseded(Enum.at(streams, 0), 1)
 
-      assert response.status == 429
-      assert %{"id" => 5, "error" => %{"code" => -32000}} = JSON.decode!(response.body)
+      # A 6th supersedes the next oldest.
+      {sixth, _acc, _ack} = listen(port, 6, %{"toolsListChanged" => true}, bearer("capped"))
+      assert_superseded(Enum.at(streams, 1), 2)
 
-      # Another principal is unaffected.
-      {other, _acc, _ack} = listen(port, 6, %{"toolsListChanged" => true}, bearer("other"))
+      for {_socket, _acc, uri} <- Enum.drop(streams, 2),
+          do: assert(Process.alive?(stream_pid(uri)))
 
-      [{socket, uri} | rest] = streams
-      pid = stream_pid(uri)
-      ref = Process.monitor(pid)
-      :ok = :gen_tcp.close(socket)
-      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 2_000
-      sync_registry()
+      assert Process.alive?(stream_pid(other_uri))
 
-      {again, _acc, _ack} = listen(port, 7, %{"toolsListChanged" => true}, bearer("capped"))
+      for socket <- [other, fifth, sixth | Enum.map(Enum.drop(streams, 2), &elem(&1, 0))],
+          do: :gen_tcp.close(socket)
+    end
 
-      for socket <- [other, again | Enum.map(rest, &elem(&1, 0))], do: :gen_tcp.close(socket)
+    test "a listen refused 503 at :max_streams supersedes nothing" do
+      port = start_server(max_streams: 1, max_listens_per_principal: 1)
+      uri = unique_uri()
+      {socket, _acc, _ack} = listen(port, 1, %{"resourceSubscriptions" => [uri]})
+
+      assert post(port, listen_request(2, %{"toolsListChanged" => true})).status == 503
+      assert Process.alive?(stream_pid(uri))
+      :gen_tcp.close(socket)
     end
 
     test "a listen past the shared :max_streams cap is 503" do
@@ -732,5 +743,19 @@ defmodule ConduitMcp.Transport.SubscriptionsListenTest do
       assert %{"id" => 2, "error" => %{"code" => -32000}} = JSON.decode!(response.body)
       :gen_tcp.close(socket)
     end
+  end
+
+  defp assert_superseded({socket, acc, _uri}, id) do
+    response = socket |> read_until(&complete?/1, acc) |> parse()
+
+    assert [_ack, cancelled, %{"id" => ^id, "result" => %{"resultType" => "complete"}}] =
+             events(response.body)
+
+    assert %{"method" => "notifications/cancelled", "params" => %{"requestId" => ^id}} =
+             cancelled
+
+    assert cancelled["params"]["reason"] =~ "Superseded"
+
+    assert_receive {:telemetry, [:conduit_mcp, :subscription, :stop], _, %{reason: :superseded}}
   end
 end

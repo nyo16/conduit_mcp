@@ -261,7 +261,6 @@ A modern response's status depends on the outcome, not always 200:
 | `-32601` (unknown method, including every legacy-only method) | 404 |
 | Insufficient scope under `strategy: :oauth` | 403 with an `insufficient_scope` challenge |
 | `subscriptions/listen` without `text/event-stream` in `Accept` | 406 |
-| `subscriptions/listen` over `:max_listens_per_principal` | 429 |
 | `subscriptions/listen` when `:max_streams` is full | 503 |
 
 `ConduitMcp.Protocol.Modern.http_status/1` maps a response to its status.
@@ -281,6 +280,12 @@ rejected by classification or header validation is not counted by
 Every modern result carries `"resultType"` (`"complete"`,
 `"input_required"` or `"task"`) and the server's name and version in
 `_meta["io.modelcontextprotocol/serverInfo"]`.
+
+A `tools/call` result's `_meta` is the tool's own `_meta` (e.g. MCP Apps UI
+metadata) plus `serverInfo`; the request's `_meta` (`progressToken`,
+`logLevel`, your own keys) is not echoed. On the legacy era the request's
+`_meta` is still echoed into the result for backward compatibility, merged
+under the tool's own keys, which always win.
 
 Six results also carry cache hints: `server/discover`, `tools/list`,
 `prompts/list`, `resources/list`, `resources/templates/list` and
@@ -453,7 +458,7 @@ The legacy `ConduitMcp.Transport.SSE` answers modern requests on
 | `-32601` | `Errors.method_not_found/0` | Unknown method; HTTP 404 on the modern era |
 | `-32602` | `Errors.invalid_params/0` | Invalid params; also invalid modern `_meta` (400), an invalid `requestState`, and a missing resource on the modern era |
 | `-32603` | `Errors.internal_error/0` | Internal error |
-| `-32000` | `Errors.server_error/0` | Generic server error; also insufficient scope and the listen 429/503 bodies |
+| `-32000` | `Errors.server_error/0` | Generic server error; also insufficient scope and the listen 503 body |
 | `-32002` | `Protocol.Legacy.resource_not_found/0` | Resource not found, legacy era only |
 | `-32004` | `Errors.task_not_ready/0` | Legacy `tasks/result` before the task finished |
 | `-32020` | `Errors.header_mismatch/0` | A header is missing, duplicated, malformed or disagrees with the body (400) |

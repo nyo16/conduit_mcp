@@ -32,6 +32,14 @@ defmodule ConduitMcp.HandlerModernTest do
 
       {:ok, %{"content" => [%{"type" => "text", "text" => "ok"}]}}
     end
+
+    def handle_call_tool(_conn, "with_meta", _params) do
+      {:ok,
+       %{
+         "content" => [%{"type" => "text", "text" => "ok"}],
+         "_meta" => %{"ui" => %{"resourceUri" => "ui://app.html"}, "progressToken" => "tool's"}
+       }}
+    end
   end
 
   defp modern(method, params \\ %{}, id \\ 1) do
@@ -191,6 +199,66 @@ defmodule ConduitMcp.HandlerModernTest do
                Handler.handle_request(request, ProbeServer)
 
       assert message =~ "Supported versions: 2025-11-25, 2025-06-18"
+    end
+  end
+
+  describe "tools/call result _meta" do
+    test "modern: the tool's _meta is kept and the request's _meta is not echoed" do
+      meta =
+        Map.merge(@meta, %{
+          "progressToken" => "req",
+          "io.modelcontextprotocol/logLevel" => "debug",
+          "user/key" => 1
+        })
+
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tools/call",
+        "params" => %{"name" => "with_meta", "arguments" => %{}, "_meta" => meta}
+      }
+
+      response = Handler.handle_request(request, ProbeServer)
+
+      assert %{"io.modelcontextprotocol/serverInfo" => %{"name" => "conduit-mcp"}} =
+               result_meta = response["result"]["_meta"]
+
+      assert Map.delete(result_meta, "io.modelcontextprotocol/serverInfo") == %{
+               "ui" => %{"resourceUri" => "ui://app.html"},
+               "progressToken" => "tool's"
+             }
+    end
+
+    test "modern: a tool without _meta gets only serverInfo" do
+      request =
+        modern("tools/call", %{"name" => "probe"})
+        |> put_in(["params", "_meta", "progressToken"], "req")
+        |> put_in(["params", "_meta", "user/key"], 1)
+
+      response = Handler.handle_request(request, ProbeServer, probe_conn())
+
+      assert Map.keys(response["result"]["_meta"]) == ["io.modelcontextprotocol/serverInfo"]
+    end
+
+    test "legacy: the request's _meta is echoed, the tool's own keys win" do
+      request = %{
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tools/call",
+        "params" => %{
+          "name" => "with_meta",
+          "arguments" => %{},
+          "_meta" => %{"progressToken" => "req", "user/key" => 1}
+        }
+      }
+
+      response = Handler.handle_request(request, ProbeServer)
+
+      assert response["result"]["_meta"] == %{
+               "ui" => %{"resourceUri" => "ui://app.html"},
+               "progressToken" => "tool's",
+               "user/key" => 1
+             }
     end
   end
 

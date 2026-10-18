@@ -96,7 +96,8 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   - `:max_listens_per_principal` — maximum concurrent `subscriptions/listen`
     streams per principal (`ConduitMcp.Principal.rate_limit_key/1`: the
     authenticated id, else the client's address) (default: 4). The next is
-    refused with HTTP 429.
+    admitted and the principal's oldest stream is ended gracefully (see
+    `ConduitMcp.Subscriptions`); it is never refused with HTTP 429.
   - `:listen_idle_timeout` — milliseconds a `subscriptions/listen` stream
     may go without delivering a notification before the server ends it
     gracefully (default: 30 minutes). Keep-alives do not count. Checked on

@@ -59,10 +59,22 @@ defmodule ConduitMcp.Subscriptions do
 
   Each stream is bounded by the transport (see
   `ConduitMcp.Transport.StreamableHTTP`): at most `:max_listens_per_principal`
-  concurrent streams per principal (default 4; the next is answered HTTP
-  429), the shared `:max_streams` cap (503 when full), `:max_stream_lifetime`,
+  live streams per principal (default 4), the shared `:max_streams` cap (503 when full), `:max_stream_lifetime`,
   the bearer token's `exp`, and `:listen_idle_timeout`. A filter may name at
   most 1 000 resource URIs (`ConduitMcp.Subscriptions.Filter`).
+
+  The per-principal cap is never answered 429: a listen that would exceed it
+  is admitted and the principal's **oldest** stream is superseded - it ends
+  with `notifications/cancelled` for its listen id, then the graceful-closure
+  result, then closes (telemetry `subscription.stop` reason `:superseded`).
+  A client that went away is only noticed on the stream's next write, so a
+  client opening one listen per run (e.g. the MCP Inspector CLI) would
+  otherwise be locked out by its own dead streams. Admission and eviction
+  are serialized per principal, so even a burst of concurrent listens never
+  holds more than the cap live at once; superseded streams still writing
+  their teardown are not counted (each also holds a `:max_streams` slot
+  until it closes). One principal still never holds more than the cap
+  (SV-10), and another principal's streams are never evicted.
   """
 
   alias ConduitMcp.Notifications
@@ -152,23 +164,54 @@ defmodule ConduitMcp.Subscriptions do
   # --- stream-side registration (ConduitMcp.Subscriptions.Stream) -----------
 
   @doc false
-  # Admits the calling process as one more stream of `principal_key`, at
-  # most `max` at once. Insert-then-count, as `SSEStream.acquire_slot/3`: each
-  # racer counts its own entry, so two at the boundary can both be refused
-  # but no interleaving admits more than `max`. A dead stream's entry is
-  # dropped by the registry when its exit is processed, so it can only
-  # briefly over-count - refusing rather than over-admitting.
-  @spec admit(String.t(), pos_integer()) :: boolean()
-  def admit(principal_key, max) do
-    key = listener_key(principal_key)
-    {:ok, _owner} = Registry.register(__MODULE__, key, nil)
+  # Admits the calling process as one more stream of `principal_key`, tagged
+  # `ref`, keeping at most `max` live streams per principal: when the
+  # principal is already at `max`, its oldest live streams are superseded -
+  # each is sent `{ConduitMcp.Subscriptions, ref, :superseded}` (its own
+  # ref, so the stream loop matches it and `flush/1` drops a late one) and
+  # ends with the server-initiated teardown.
+  #
+  # Count, evict and register run under a node-local `:global` lock on the
+  # principal, so a burst of concurrent admissions is serialized: the live
+  # count never exceeds `max`, even transiently. A superseded stream stays
+  # registered until its teardown finishes; the admitting process records it
+  # under `superseded_key/1` (an entry it owns, dropped when it leaves or
+  # dies) so it is not counted, nor evicted, a second time.
+  @spec admit(String.t(), pos_integer(), reference()) :: :ok
+  def admit(principal_key, max, ref) do
+    :global.trans(
+      {{__MODULE__, principal_key}, self()},
+      fn -> do_admit(principal_key, max, ref) end,
+      [node()]
+    )
+  end
 
-    if length(Registry.lookup(__MODULE__, key)) <= max do
-      true
-    else
-      Registry.unregister(__MODULE__, key)
-      false
-    end
+  defp do_admit(principal_key, max, ref) do
+    live = live_listeners(principal_key)
+
+    live
+    |> Enum.sort()
+    |> Enum.take(max(length(live) - max + 1, 0))
+    |> Enum.each(fn {_seq, pid, victim} ->
+      {:ok, _owner} = Registry.register(__MODULE__, superseded_key(principal_key), victim)
+      send(pid, {__MODULE__, victim, :superseded})
+    end)
+
+    seq = System.unique_integer([:monotonic])
+    {:ok, _owner} = Registry.register(__MODULE__, listener_key(principal_key), {seq, ref})
+    :ok
+  end
+
+  @doc false
+  # The not-yet-superseded streams of `principal_key`, as `{seq, pid, ref}`.
+  @spec live_listeners(String.t()) :: [{integer(), pid(), reference()}]
+  def live_listeners(principal_key) do
+    superseded =
+      MapSet.new(Registry.lookup(__MODULE__, superseded_key(principal_key)), &elem(&1, 1))
+
+    for {pid, {seq, ref}} <- Registry.lookup(__MODULE__, listener_key(principal_key)),
+        not MapSet.member?(superseded, ref),
+        do: {seq, pid, ref}
   end
 
   @doc false
@@ -186,10 +229,15 @@ defmodule ConduitMcp.Subscriptions do
   # request.
   @spec leave([topic()], String.t()) :: :ok
   def leave(topics, principal_key) do
-    Enum.each([listener_key(principal_key) | topics], &Registry.unregister(__MODULE__, &1))
+    Enum.each(
+      [listener_key(principal_key), superseded_key(principal_key) | topics],
+      &Registry.unregister(__MODULE__, &1)
+    )
   end
 
   @doc false
   @spec listener_key(String.t()) :: {:listener, String.t()}
   def listener_key(principal_key), do: {:listener, principal_key}
+
+  defp superseded_key(principal_key), do: {:superseded, principal_key}
 end
