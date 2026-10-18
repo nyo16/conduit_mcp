@@ -424,10 +424,11 @@ defmodule ConduitMcp.DSLTest do
 
       {:ok, result} = DSLTestServer.handle_read_resource(conn, "user://{id}")
 
-      # Should return JSON content
+      # Should return JSON contents, typed with the declared mime_type
       assert is_map(result)
-      content = hd(result["content"])
-      assert content["type"] == "text"
+      content = hd(result["contents"])
+      assert content["mimeType"] == "application/json"
+      assert content["uri"] == "user://{id}"
 
       # Verify it's valid JSON
       assert {:ok, data} = JSON.decode(content["text"])
@@ -439,8 +440,12 @@ defmodule ConduitMcp.DSLTest do
 
       {:ok, result} = DSLTestServer.handle_read_resource(conn, "static://readme")
 
-      assert result["content"] == [
-               %{"type" => "text", "text" => "# README\n\nThis is a test README."}
+      assert result["contents"] == [
+               %{
+                 "uri" => "static://readme",
+                 "mimeType" => "text/markdown",
+                 "text" => "# README\n\nThis is a test README."
+               }
              ]
     end
 
@@ -450,8 +455,8 @@ defmodule ConduitMcp.DSLTest do
       # Test with actual user ID
       {:ok, result} = DSLTestServer.handle_read_resource(conn, "user://123")
 
-      content = hd(result["content"])
-      assert content["type"] == "text"
+      content = hd(result["contents"])
+      assert content["uri"] == "user://123"
 
       # Verify parameter was extracted and used
       {:ok, data} = JSON.decode(content["text"])
@@ -466,7 +471,7 @@ defmodule ConduitMcp.DSLTest do
       # Test with different ID
       {:ok, result} = DSLTestServer.handle_read_resource(conn, "user://456")
 
-      content = hd(result["content"])
+      content = hd(result["contents"])
       {:ok, data} = JSON.decode(content["text"])
       assert data["id"] == "456"
       assert data["name"] == "User 456"
@@ -604,7 +609,7 @@ defmodule ConduitMcp.DSLTest do
       conn = %Plug.Conn{}
       {:ok, result} = DSLTestServer.handle_read_resource(conn, "user://{id}")
 
-      content_text = hd(result["content"])["text"]
+      content_text = hd(result["contents"])["text"]
       assert {:ok, _data} = JSON.decode(content_text)
     end
   end
