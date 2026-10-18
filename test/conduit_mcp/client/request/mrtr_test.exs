@@ -261,8 +261,6 @@ defmodule ConduitMcp.Client.Request.MRTRTest do
         assert {:error, %Error{kind: :input_handler, reason: ^reason}} =
                  run([{:ok, interim}], handle_input: handler)
       end
-
-      assert Process.alive?(self())
     end
   end
 

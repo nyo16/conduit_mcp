@@ -280,7 +280,7 @@ defmodule ConduitMcp.Client.HandlerRuntimeTest do
       caller = self()
 
       {task, call_id} =
-        pending_call(name, conn, timeout: 150, assigns: %{test_pid: caller, who: :call})
+        pending_call(name, conn, timeout: 500, assigns: %{test_pid: caller, who: :call})
 
       server_request(
         conn,
@@ -298,8 +298,8 @@ defmodule ConduitMcp.Client.HandlerRuntimeTest do
       assert handler != conn
       assert state(conn).pending[call_id].paused == 1
 
-      # Past the call's 150 ms timeout, the call is still waiting.
-      refute_receive {_ref, {:error, %Error{kind: :timeout}}}, 300
+      # Past the call's 500 ms timeout, the call is still waiting.
+      refute_receive {_ref, {:error, %Error{kind: :timeout}}}, 700
       refute_received {:fake_transport, ^conn, {:cancel, ^call_id, _, _}}
 
       send(handler, :release)
@@ -314,7 +314,8 @@ defmodule ConduitMcp.Client.HandlerRuntimeTest do
       conn = start(name, protocol: :legacy)
       ready_legacy(name, conn)
 
-      {task, call_id} = pending_call(name, conn, timeout: 50, max_total_timeout: 150)
+      started = System.monotonic_time(:millisecond)
+      {task, call_id} = pending_call(name, conn, timeout: 500, max_total_timeout: 1_000)
 
       server_request(
         conn,
@@ -325,8 +326,11 @@ defmodule ConduitMcp.Client.HandlerRuntimeTest do
       )
 
       assert_receive {:sampling, _, _, handler}
+      assert state(conn).pending[call_id].paused == 1
 
       assert {:error, %Error{kind: :timeout}} = Task.await(task)
+      # The pause outlived the 500 ms timeout; only the total cap ended it.
+      assert System.monotonic_time(:millisecond) - started >= 1_000
       assert_receive {:fake_transport, ^conn, {:cancel, ^call_id, _, :timeout}}
       send(handler, :release)
       expect_response(conn, 1)

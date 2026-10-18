@@ -143,8 +143,15 @@ defmodule ConduitMcp.ApplicationTest do
       assert owner == self()
 
       # The application itself starts no client (this module is async: false,
-      # so no async test's supervised client is alive now).
-      assert Registry.select(registry, [{{{:client, :_}, :_, :_}, [], [true]}]) == []
+      # so no async test's supervised client is alive now). A partition drops
+      # a dead owner's row only after handling its :EXIT, which can come after
+      # an earlier sync test's stop_supervised returned, so check liveness.
+      live =
+        registry
+        |> Registry.select([{{{:client, :_}, :"$1", :_}, [], [:"$1"]}])
+        |> Enum.filter(&Process.alive?/1)
+
+      assert live == []
     end
   end
 

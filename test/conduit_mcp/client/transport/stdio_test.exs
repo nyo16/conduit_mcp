@@ -282,8 +282,10 @@ defmodule ConduitMcp.Client.Transport.StdioTest do
     @describetag :tmp_dir
 
     test "inherits only the allowlisted environment plus :env (ST-2)", %{tmp_dir: dir} do
-      System.put_env("CONDUIT_TEST_SECRET", "must-not-leak")
-      on_exit(fn -> System.delete_env("CONDUIT_TEST_SECRET") end)
+      # A name of its own: this module is async and the OS env is node-wide.
+      secret_var = "CONDUIT_TEST_SECRET_#{System.unique_integer([:positive])}"
+      System.put_env(secret_var, "must-not-leak")
+      on_exit(fn -> System.delete_env(secret_var) end)
       log = Path.join(dir, "env.log")
 
       {state, _os_pid} =
@@ -297,7 +299,7 @@ defmodule ConduitMcp.Client.Transport.StdioTest do
         |> String.split("\n", trim: true)
         |> Map.new(&List.to_tuple(String.split(&1, "=", parts: 2)))
 
-      refute Map.has_key?(env, "CONDUIT_TEST_SECRET")
+      refute Map.has_key?(env, secret_var)
       assert env["PATH"] == System.get_env("PATH")
       assert env["EXTRA"] == "given"
 
@@ -340,8 +342,9 @@ defmodule ConduitMcp.Client.Transport.StdioTest do
     test "a server that exits on EOF is reaped without signals" do
       {state, os_pid} = open!(command: "cat", stdin_grace: 5_000)
       owner = state.port_owner
+      started = System.monotonic_time(:millisecond)
       :ok = Stdio.close(state, :done)
-      assert StdioFixture.await_reaped(owner) < 2_000
+      assert StdioFixture.await_reaped(owner, since: started) < 2_000
       refute StdioFixture.os_alive?(os_pid)
     end
 
@@ -350,25 +353,37 @@ defmodule ConduitMcp.Client.Transport.StdioTest do
         open!(sh("while :; do sleep 1; done") ++ [stdin_grace: 200, term_grace: 5_000])
 
       owner = state.port_owner
+      started = System.monotonic_time(:millisecond)
       :ok = Stdio.close(state, :done)
-      elapsed = StdioFixture.await_reaped(owner)
-      assert elapsed >= 200 and elapsed < 2_000
+      elapsed = StdioFixture.await_reaped(owner, since: started)
+      # Not before the stdin grace; KILL would not come before 5 200 ms.
+      assert elapsed >= 200 and elapsed < 5_000
       refute StdioFixture.os_alive?(os_pid)
     end
 
-    test "a server that ignores EOF and TERM is KILLed within ~4 s by default", %{tmp_dir: dir} do
+    test "by default KILL comes ~4 s after close (2 s stdin + 2 s TERM grace)" do
+      {:ok, state} = Stdio.init([command: "cat"], %{owner: self()})
+      assert state.opts[:stdin_grace] == 2_000
+      assert state.opts[:term_grace] == 2_000
+    end
+
+    test "a server that ignores EOF and TERM is KILLed after both graces", %{tmp_dir: dir} do
       log = Path.join(dir, "signals.log")
 
+      # `wait` returns as soon as a trapped signal arrives, so the trap runs
+      # within the short TERM grace instead of after a foreground `sleep 1`.
       {state, os_pid} =
         open!(
-          sh(~s(trap 'echo TERM >&2' TERM; while :; do sleep 1; done)) ++ [stderr: {:file, log}]
+          sh(~s(trap 'echo TERM >&2' TERM; while :; do sleep 1 & wait $!; done)) ++
+            [stderr: {:file, log}, stdin_grace: 100, term_grace: 200]
         )
 
       owner = state.port_owner
+      started = System.monotonic_time(:millisecond)
       :ok = Stdio.close(state, :done)
-      elapsed = StdioFixture.await_reaped(owner)
+      elapsed = StdioFixture.await_reaped(owner, since: started)
 
-      assert elapsed >= 4_000 and elapsed < 5_500
+      assert elapsed >= 300 and elapsed < 3_000
       refute StdioFixture.os_alive?(os_pid)
       assert File.read!(log) =~ "TERM"
     end

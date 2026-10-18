@@ -23,6 +23,7 @@ defmodule ConduitMcp.Client.SecretScanTest do
   @moduletag :stdio
 
   import ExUnit.CaptureLog
+  import ConduitMcp.Test.Client.Harness, only: [eventually: 1]
 
   alias ConduitMcp.Client
   alias ConduitMcp.Client.OAuth
@@ -386,32 +387,16 @@ defmodule ConduitMcp.Client.SecretScanTest do
   end
 
   # Waits for `fun` of the transport state to return a process entry.
-  defp await_tstate(name, fun, tries \\ 200) do
-    case fun.(connection_data(name).tstate) do
-      %{pid: pid} = entry when is_pid(pid) ->
-        entry
-
-      _none ->
-        assert tries > 0, "no process in the transport state"
-
-        receive do
-        after
-          10 -> await_tstate(name, fun, tries - 1)
-        end
-    end
+  defp await_tstate(name, fun) do
+    eventually(fn -> match?(%{pid: pid} when is_pid(pid), fun.(connection_data(name).tstate)) end)
+    fun.(connection_data(name).tstate)
   end
 
-  defp await_pending(conn, tries \\ 200) do
-    {_state, data} = :sys.get_state(conn)
-
-    if map_size(data.pending) == 0 and tries > 0 do
-      receive do
-      after
-        5 -> await_pending(conn, tries - 1)
-      end
-    else
-      assert map_size(data.pending) > 0
-    end
+  defp await_pending(conn) do
+    eventually(fn ->
+      {_state, data} = :sys.get_state(conn)
+      map_size(data.pending) > 0
+    end)
   end
 
   defp client_logger_metadata(pid) do

@@ -278,15 +278,17 @@ defmodule ConduitMcp.Client.StdioClientTest do
   end
 
   test "a server that ignores EOF is stopped with TERM when the client stops" do
-    name = start_ready(StdioFixture.server("ignore_eof", stdin_grace: 300), protocol: :legacy)
+    server = StdioFixture.server("ignore_eof", stdin_grace: 300, term_grace: 5_000)
+    name = start_ready(server, protocol: :legacy)
     owner = StdioFixture.port_owner(name)
     os_pid = StdioFixture.os_pid(owner)
 
+    started = System.monotonic_time(:millisecond)
     :ok = stop_supervised({Client, name})
-    elapsed = StdioFixture.await_reaped(owner)
+    elapsed = StdioFixture.await_reaped(owner, since: started)
 
-    # Not before the stdin grace, and well before KILL would be due.
-    assert elapsed >= 300 and elapsed < 2_300
+    # Not before the stdin grace; KILL would not come before 5 300 ms.
+    assert elapsed >= 300 and elapsed < 5_000
     refute StdioFixture.os_alive?(os_pid)
   end
 end

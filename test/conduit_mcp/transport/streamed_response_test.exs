@@ -3,10 +3,12 @@ defmodule ConduitMcp.Transport.StreamedResponseTest do
   # so chunk boundaries, keep-alives and a client closing its socket are the
   # real thing rather than Plug.Test's in-memory adapter.
   #
-  # `async: true` is safe: every test starts its own listener, the test pid a
-  # tool reports to is keyed by a per-test string, and the only test that
-  # occupies a `:conduit_mcp_sse_streams` slot does so from this module, whose
-  # tests run sequentially.
+  # `async: true` is safe: every test starts its own listener, and the test
+  # pid a tool reports to is keyed by a per-test string. The node-wide
+  # `:conduit_mcp_sse_streams` table is shared with other async modules that
+  # open SSE streams, so the one test that fills it (`max_streams: 1`) holds a
+  # slot of its own first: slots others take can only make the table fuller,
+  # never let its response stream.
   use ExUnit.Case, async: true
 
   alias ConduitMcp.Transport.SSEStream

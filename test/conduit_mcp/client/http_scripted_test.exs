@@ -25,6 +25,8 @@ defmodule ConduitMcp.Client.HTTPScriptedTest do
       header: 2
     ]
 
+  import ConduitMcp.Test.Client.Harness, only: [eventually: 1]
+
   alias ConduitMcp.Client
   alias ConduitMcp.Client.Error
   alias ConduitMcp.Client.OAuth.Challenge
@@ -187,11 +189,16 @@ defmodule ConduitMcp.Client.HTTPScriptedTest do
   end
 
   test "a legacy stream that drops after an event id is resumed with GET Last-Event-ID after retry" do
+    # Hands the POSTed request to the resume GET; supervised, so it goes away
+    # with the test whether or not the GET ever comes.
+    resume = start_supervised!({Agent, fn -> %{} end})
+
     url =
       ScriptedServer.start(
         legacy(fn
           %{method: "POST"} = conn, %{"method" => "tools/call"} = request ->
-            :persistent_term.put({__MODULE__, :resume, header(conn, "mcp-session-id")}, request)
+            sid = header(conn, "mcp-session-id")
+            Agent.update(resume, &Map.put(&1, sid, request))
 
             conn
             |> sse()
@@ -206,9 +213,8 @@ defmodule ConduitMcp.Client.HTTPScriptedTest do
             )
 
           %{method: "GET"} = conn, nil ->
-            key = {__MODULE__, :resume, header(conn, "mcp-session-id")}
-            request = :persistent_term.get(key)
-            :persistent_term.erase(key)
+            sid = header(conn, "mcp-session-id")
+            request = Agent.get_and_update(resume, &Map.pop!(&1, sid))
             "e-1" = header(conn, "last-event-id")
             conn |> sse() |> event(text_result(request, "resumed"), id: "e-2")
         end)
@@ -292,7 +298,7 @@ defmodule ConduitMcp.Client.HTTPScriptedTest do
 
       name = ready(url, protocol: :legacy)
       assert_receive {:scripted, "GET", _headers, nil}, 2_000
-      wait_until(fn -> tstate(name).listener == :disabled end)
+      eventually(fn -> tstate(name).listener == :disabled end)
       refute_receive {:scripted, "GET", _headers, nil}, 200
     end
   end
@@ -844,22 +850,6 @@ defmodule ConduitMcp.Client.HTTPScriptedTest do
 
       assert {:error, %Error{kind: :closed, reason: :invalid_session_id}} =
                Client.await_ready(name, 2_000)
-    end
-  end
-
-  defp wait_until(fun, tries \\ 100) do
-    cond do
-      fun.() ->
-        :ok
-
-      tries == 0 ->
-        flunk("condition never held")
-
-      true ->
-        receive do
-        after
-          10 -> wait_until(fun, tries - 1)
-        end
     end
   end
 end

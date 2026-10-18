@@ -370,14 +370,18 @@ defmodule ConduitMcp.Client.PipelineTest do
            quote(do: fn call, _ctx -> {:cont, %{call | server_id: "other"}} end), :bad_return}
         ] do
       test "a pre-hook that #{label} fails closed (#{kind})" do
-        name = start(hooks: [pre_tool_call: [{:all, unquote(fun), id: :guard}]], hook_timeout: 20)
+        # Only the sleeping hook should hit the timeout; the others get room
+        # to crash, which 20 ms does not always give on a loaded runner.
+        hook_timeout = unquote(if kind == :timeout, do: 20, else: 5_000)
+        hooks = [pre_tool_call: [{:all, unquote(fun), id: :guard}]]
+        name = start(hooks: hooks, hook_timeout: hook_timeout)
+
         caller = Task.async(fn -> Client.call_tool(name, "read_file", %{"path" => "/a"}) end)
 
         assert {:error, %Error{kind: :hook, reason: {:hook_failed, :guard, unquote(kind)}}} =
                  Task.await(caller)
 
         refute_received {:server_called, _, _}
-        assert Process.alive?(caller.pid) == false
         assert_no_leaks(name)
       end
     end
