@@ -2052,6 +2052,39 @@ defmodule ConduitMcp.DSL do
 
   def __prompt_result__(messages), do: {:ok, %{"messages" => messages}}
 
+  # A DSL `read` handler may answer with the tool-shaped helpers (`text/1`,
+  # `json/1`, `image/2`, `audio/2`), whose `"content"` blocks are not a
+  # `ReadResourceResult`. Those become `"contents"` for `uri`, typed with the
+  # resource's `mime_type` (text) or the block's own (image, audio). Anything
+  # else - `"contents"` results, errors, MRTR `{:input_required, ...}`, or a
+  # block with no resource-contents form - passes through untouched.
+  @doc false
+  @spec __resource_result__(term(), String.t(), String.t() | nil) :: term()
+  def __resource_result__({:ok, %{"content" => blocks} = result} = reply, uri, mime_type)
+      when is_list(blocks) and not is_map_key(result, "contents") do
+    contents = Enum.map(blocks, &resource_contents(&1, uri, mime_type))
+
+    if Enum.all?(contents),
+      do: {:ok, result |> Map.delete("content") |> Map.put("contents", contents)},
+      else: reply
+  end
+
+  def __resource_result__(reply, _uri, _mime_type), do: reply
+
+  defp resource_contents(%{"type" => "text", "text" => text}, uri, nil)
+       when is_binary(text),
+       do: %{"uri" => uri, "text" => text}
+
+  defp resource_contents(%{"type" => "text", "text" => text}, uri, mime_type)
+       when is_binary(text),
+       do: %{"uri" => uri, "mimeType" => mime_type, "text" => text}
+
+  defp resource_contents(%{"type" => type, "data" => data, "mimeType" => mime}, uri, _mime_type)
+       when type in ["image", "audio"] and is_binary(data),
+       do: %{"uri" => uri, "mimeType" => mime, "blob" => data}
+
+  defp resource_contents(_block, _uri, _mime_type), do: nil
+
   # `readable_resources` is already in dispatch order.
   # Static URIs are tried before any template, then templates in order.
   defp generate_resource_clauses(readable_resources) do
@@ -2063,18 +2096,28 @@ defmodule ConduitMcp.DSL do
   end
 
   # Static URIs get direct pattern-match clauses — O(1) dispatch
-  defp generate_static_resource_clause(%{uri: res_uri, handler: {:fn_ast, handler_ast}}) do
+  defp generate_static_resource_clause(%{uri: res_uri, mime_type: mime, handler: {:fn_ast, ast}}) do
     quote do
       def handle_read_resource(conn, unquote(res_uri)) do
-        unquote(handler_ast).(conn, %{}, %{})
+        ConduitMcp.DSL.__resource_result__(
+          unquote(ast).(conn, %{}, %{}),
+          unquote(res_uri),
+          unquote(mime)
+        )
       end
     end
   end
 
-  defp generate_static_resource_clause(%{uri: res_uri, handler: {:mfa, {mod, fun}}}) do
+  defp generate_static_resource_clause(%{uri: res_uri, mime_type: mime, handler: {:mfa, mfa}}) do
+    {mod, fun} = mfa
+
     quote do
       def handle_read_resource(conn, unquote(res_uri)) do
-        apply(unquote(mod), unquote(fun), [conn, %{}, %{}])
+        ConduitMcp.DSL.__resource_result__(
+          apply(unquote(mod), unquote(fun), [conn, %{}, %{}]),
+          unquote(res_uri),
+          unquote(mime)
+        )
       end
     end
   end
@@ -2115,8 +2158,8 @@ defmodule ConduitMcp.DSL do
     ]
   end
 
-  defp generate_templated_resource_match(%{uri: res_uri, handler: handler}, no_match) do
-    {params_pattern, serve} = templated_resource_handler(handler)
+  defp generate_templated_resource_match(%{uri: res_uri} = resource, no_match) do
+    {params_pattern, serve} = templated_resource_handler(resource)
 
     quote do
       {param_names, regex} = ConduitMcp.DSL.template_regex(__MODULE__, unquote(res_uri))
@@ -2128,15 +2171,29 @@ defmodule ConduitMcp.DSL do
     end
   end
 
-  defp templated_resource_handler({:fn_ast, handler_ast}) do
-    {quote(do: params), quote(do: unquote(handler_ast).(conn, params, %{}))}
+  defp templated_resource_handler(%{mime_type: mime, handler: {:fn_ast, handler_ast}}) do
+    {quote(do: params),
+     quote do
+       ConduitMcp.DSL.__resource_result__(
+         unquote(handler_ast).(conn, params, %{}),
+         uri,
+         unquote(mime)
+       )
+     end}
   end
 
-  defp templated_resource_handler({:mfa, {mod, fun}}) do
-    {quote(do: params), quote(do: apply(unquote(mod), unquote(fun), [conn, params, %{}]))}
+  defp templated_resource_handler(%{mime_type: mime, handler: {:mfa, {mod, fun}}}) do
+    {quote(do: params),
+     quote do
+       ConduitMcp.DSL.__resource_result__(
+         apply(unquote(mod), unquote(fun), [conn, params, %{}]),
+         uri,
+         unquote(mime)
+       )
+     end}
   end
 
-  defp templated_resource_handler({:app_view, view_path}) do
+  defp templated_resource_handler(%{handler: {:app_view, view_path}}) do
     {quote(do: _params), app_view_result(view_path)}
   end
 

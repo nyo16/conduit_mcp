@@ -12,7 +12,10 @@ defmodule ConduitMcp.Capabilities do
     * `resources.subscribe: true` (legacy) — `handle_subscribe_resource/2`,
       and only when the base set advertises `resources` at all.
     * `completions: %{}` — `handle_complete/3`.
-    * `logging: %{}` — `handle_set_log_level/2`.
+    * `logging: %{}` — `handle_set_log_level/2` (legacy); always on the modern
+      era, where any tool can emit `notifications/message` through
+      `ConduitMcp.Log` on a request that sets a `logLevel`, and the
+      2026-07-28 spec requires a server that emits them to declare `logging`.
     * `extensions: %{"io.modelcontextprotocol/tasks" => %{}}` — modern era
       only, while `ConduitMcp.Ext.Tasks` is enabled.
 
@@ -71,7 +74,7 @@ defmodule ConduitMcp.Capabilities do
     |> base()
     |> put_change_notifications(server_module, era)
     |> maybe_put_completions(server_module)
-    |> maybe_put_logging(server_module)
+    |> maybe_put_logging(server_module, era)
     |> maybe_put_tasks_extension(Keyword.get(opts, :era, :legacy))
   end
 
@@ -124,7 +127,9 @@ defmodule ConduitMcp.Capabilities do
     end
   end
 
-  defp maybe_put_logging(caps, server_module) do
+  defp maybe_put_logging(caps, _server_module, :modern), do: Map.put(caps, "logging", %{})
+
+  defp maybe_put_logging(caps, server_module, :legacy) do
     if ServerMeta.has?(server_module, :set_log_level) do
       Map.put(caps, "logging", %{})
     else

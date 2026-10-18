@@ -97,7 +97,8 @@ server speaks.
     "supportedVersions": ["2026-07-28", "2025-11-25", "2025-06-18"],
     "capabilities": {
       "tools": {"listChanged": true},
-      "resources": {"listChanged": true, "subscribe": true}
+      "resources": {"listChanged": true, "subscribe": true},
+      "logging": {}
     },
     "instructions": "Use search before fetch.",
     "resultType": "complete",
@@ -113,8 +114,9 @@ capabilities can depend on who is asking. On the modern era, every
 advertised `tools`, `prompts` and `resources` capability gets
 `listChanged: true`, and `resources` also gets `subscribe: true`, because
 every modern server answers `subscriptions/listen` (see
-[Subscriptions](subscriptions.md)). `instructions` is left out when there
-are none.
+[Subscriptions](subscriptions.md)). `logging` is always declared, because
+any tool can send log messages (see "Per-request logging"). `instructions`
+is left out when there are none.
 
 ### Instructions
 
@@ -324,7 +326,10 @@ A modern client asks for log messages on one request at a time, with
 `_meta["io.modelcontextprotocol/logLevel"]`; `logging/setLevel` belongs to
 the legacy era. Without a `logLevel`, the server must not send
 `notifications/message` for that request. `ConduitMcp.Ctx.log?/2` applies
-this rule, and `ConduitMcp.Log.log/4` checks it for you.
+this rule, and `ConduitMcp.Log.log/4` checks it for you. Every modern
+`server/discover` declares the `logging` capability, which the spec requires
+of a server that sends log messages; the legacy `initialize` declares it only
+when the server module defines `handle_set_log_level/2`.
 
 ## Streamed tool responses
 

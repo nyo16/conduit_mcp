@@ -217,8 +217,13 @@ defmodule ConduitMcp.Client.Connection.Handshake do
           }
       }
 
+      # The transport learns the session first: over HTTP,
+      # `notifications/initialized` must carry `MCP-Protocol-Version` like
+      # every request after `initialize` (2025-11-25 transports).
+      data = Data.set_session(data)
+
       case Data.notify(data, "notifications/initialized", %{}) do
-        {:ok, data} -> ready(data)
+        {:ok, data} -> enter_ready(data)
         {:error, reason, data} -> reconnect(reason, data)
       end
     else
@@ -256,9 +261,10 @@ defmodule ConduitMcp.Client.Connection.Handshake do
 
   # --- ready, reconnecting, closed ------------------------------------------
 
-  defp ready(data) do
-    data = Data.set_session(%{data | handshake: nil})
-    {data, actions} = Listen.on_ready(data)
+  defp ready(data), do: enter_ready(Data.set_session(data))
+
+  defp enter_ready(data) do
+    {data, actions} = Listen.on_ready(%{data | handshake: nil})
     {:next_state, :ready, data, actions}
   end
 

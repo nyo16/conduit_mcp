@@ -157,6 +157,14 @@ resource "static://readme" do
 end
 ```
 
+A `read` handler that answers with `text/1`, `json/1`, `image/2` or
+`audio/2` is sent as a `ReadResourceResult`: each content block becomes a
+`contents` entry for the requested URI. Text is typed with the resource's
+`mime_type` (no `mimeType` when it declares none), and image and audio
+become `blob` entries with their own MIME type. A result that already has
+`"contents"` (`raw_resource/2`, `app_html/1`, or a map you build) is sent
+as it is.
+
 ## Response Helpers
 
 All of these are macros imported automatically:
