@@ -20,8 +20,14 @@ defmodule ConduitMcp.Client.Transport.InProcess do
   limiting, `ConduitMcp.Plugs.HeaderValidation`) do not run. Give the
   server a caller identity with `:principal` instead.
 
-  Cancelling a request terminates its task. The server never sends
+  Cancelling a request kills its task. The server never sends
   server-to-client requests over this transport.
+
+  A modern `tools/call` sent with `:on_progress` (or after `set_log_level/2`)
+  runs to its response with the tool's `notifications/progress` and
+  `notifications/message` delivered as they happen, as over Streamable HTTP.
+  `subscriptions/listen` needs a stream this transport cannot hold and is
+  answered `-32601`.
 
   ## Options
 
@@ -38,8 +44,10 @@ defmodule ConduitMcp.Client.Transport.InProcess do
   @behaviour ConduitMcp.Client.Transport
 
   alias ConduitMcp.Handler
+  alias ConduitMcp.Handler.Pipeline
   alias ConduitMcp.Principal
   alias ConduitMcp.Protocol
+  alias ConduitMcp.StreamSpec
   alias ConduitMcp.Transport.Shared
 
   @schema NimbleOptions.new!(
@@ -116,14 +124,29 @@ defmodule ConduitMcp.Client.Transport.InProcess do
     {:ok, %{state | tasks: Map.put(state.tasks, task.ref, {:notification, task.pid})}}
   end
 
-  defp run(%{server: server, conn: conn, task_sup: task_sup}, message),
-    do: Task.Supervisor.async_nolink(task_sup, fn -> Handler.dispatch(message, server, conn) end)
+  defp run(%{server: server, conn: conn, task_sup: task_sup, owner: owner, ref: ref}, message) do
+    Task.Supervisor.async_nolink(task_sup, fn ->
+      message |> Handler.dispatch(server, conn) |> serve(owner, ref)
+    end)
+  end
+
+  # A modern `tools/call` carrying a progress token or log level comes back
+  # as a `:response` stream: run it here, in the task, with its progress and
+  # log notifications sent to the connection as frames.
+  defp serve({:stream, %StreamSpec{kind: :response} = spec}, owner, ref) do
+    {:reply,
+     Pipeline.in_flight(spec.conn, spec.request_id, fn work_conn ->
+       spec.run.(StreamSpec.put_sink(work_conn, owner, ref, spec.progress_token))
+     end)}
+  end
+
+  defp serve(reply, _owner, _ref), do: reply
 
   @impl true
   def cancel(state, id, _handle, _reason) do
     case Enum.find(state.tasks, fn {_ref, {task_id, _pid}} -> task_id == id end) do
       {ref, {_id, pid}} ->
-        stop_task(state.task_sup, ref, pid)
+        stop_task(ref, pid)
         {:ok, %{state | tasks: Map.delete(state.tasks, ref)}}
 
       nil ->
@@ -134,6 +157,9 @@ defmodule ConduitMcp.Client.Transport.InProcess do
   @impl true
   def handle_info({__MODULE__, ref, :connected}, %{ref: ref} = state),
     do: {:ok, [{:connected, %{}}], state}
+
+  def handle_info({StreamSpec, ref, {:frame, frame}}, %{ref: ref} = state),
+    do: {:ok, frame_events(frame), state}
 
   def handle_info({ref, reply}, %{tasks: tasks} = state) when is_map_key(tasks, ref) do
     Process.demonitor(ref, [:flush])
@@ -156,7 +182,7 @@ defmodule ConduitMcp.Client.Transport.InProcess do
   defp reply_events(:notification, _reply), do: []
   defp reply_events(id, {:reply, response}), do: [{:response, id, response}]
 
-  defp reply_events(id, {:stream, _spec}),
+  defp reply_events(id, {:stream, %StreamSpec{kind: :listen}}),
     do: [
       {:response, id,
        Protocol.error_response(
@@ -168,14 +194,27 @@ defmodule ConduitMcp.Client.Transport.InProcess do
 
   defp reply_events(id, :noreply), do: [{:exchange_done, id, {:error, :no_response}}]
 
-  @impl true
-  def close(state, _reason) do
-    Enum.each(state.tasks, fn {ref, {_id, pid}} -> stop_task(state.task_sup, ref, pid) end)
+  # `ConduitMcp.StreamSpec.notify/2` encodes each notification as an SSE
+  # frame (`ConduitMcp.Transport.SSEStream.frame/1`); take the JSON back out.
+  defp frame_events(frame) do
+    with "event: message\ndata: " <> rest <- IO.iodata_to_binary(frame),
+         {:ok, %{"method" => method} = message} when is_binary(method) <-
+           JSON.decode(String.trim_trailing(rest)) do
+      [{:notification, method, Map.get(message, "params") || %{}}]
+    else
+      _other -> []
+    end
   end
 
-  defp stop_task(task_sup, ref, pid) do
+  @impl true
+  def close(state, _reason) do
+    Enum.each(state.tasks, fn {ref, {_id, pid}} -> stop_task(ref, pid) end)
+  end
+
+  # Never waits on the task: it runs host code, which may trap exits.
+  defp stop_task(ref, pid) do
     Process.demonitor(ref, [:flush])
-    _ = Task.Supervisor.terminate_child(task_sup, pid)
+    Process.exit(pid, :kill)
     :ok
   end
 end

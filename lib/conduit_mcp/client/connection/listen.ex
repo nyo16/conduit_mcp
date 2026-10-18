@@ -76,7 +76,7 @@ defmodule ConduitMcp.Client.Connection.Listen do
 
   @doc "The connection just became ready: re-apply the subscriptions."
   @spec on_ready(Data.t()) :: result()
-  def on_ready(%Data{era: :legacy} = data), do: {resubscribe(data), []}
+  def on_ready(%Data{era: :legacy} = data), do: resubscribe(data)
   def on_ready(data), do: sync(data, :ready)
 
   @doc """
@@ -320,7 +320,7 @@ defmodule ConduitMcp.Client.Connection.Listen do
 
   defp reopen_later(data) do
     attempt = data.listen.attempt + 1
-    delay = data.config.backoff.(attempt)
+    delay = Data.backoff(data, attempt)
     {put(data, attempt: attempt), [{{:timeout, :listen}, delay, nil}]}
   end
 
@@ -396,8 +396,9 @@ defmodule ConduitMcp.Client.Connection.Listen do
     {id, data} = Data.take_id(data)
 
     case Data.send_request(data, id, method, %{"uri" => uri}, %{}, nil, []) do
-      {:ok, _handle, data} ->
-        {%{data | internal: Map.put(data.internal, id, purpose)}, []}
+      {:ok, handle, data} ->
+        {%{data | internal: Map.put(data.internal, id, purpose)},
+         [Data.internal_timer(data, id, handle)]}
 
       {:error, reason, data} ->
         reply_purpose(purpose, {:error, Error.new(:transport, reason)})
@@ -408,13 +409,25 @@ defmodule ConduitMcp.Client.Connection.Listen do
   # Every desired URI again, for a new legacy session (fire and forget).
   defp resubscribe(data) do
     if legacy_subscribe?(data) do
-      Enum.reduce(data.listen.subs, data, fn uri, data ->
-        {data, []} = legacy_send(data, "resources/subscribe", uri, :resubscribe)
-        data
+      Enum.reduce(data.listen.subs, {data, []}, fn uri, {data, actions} ->
+        {data, more} = legacy_send(data, "resources/subscribe", uri, :resubscribe)
+        {data, more ++ actions}
       end)
     else
-      data
+      {data, []}
     end
+  end
+
+  @doc """
+  Answers the callers of legacy `resources/(un)subscribe` requests still in
+  `internal` with `error`: the session they were sent in is gone.
+  """
+  @spec fail_legacy(map(), Error.t()) :: :ok
+  def fail_legacy(internal, error) do
+    Enum.each(internal, fn
+      {_id, {:resource, _op, _mref, _uri} = purpose} -> reply_purpose(purpose, {:error, error})
+      {_id, _purpose} -> :ok
+    end)
   end
 
   @doc """

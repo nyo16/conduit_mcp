@@ -234,6 +234,25 @@ defmodule ConduitMcp.Client.TasksTest do
     end
   end
 
+  test "a dead caller's unanswered tasks/cancel is cancelled at the request timeout",
+       %{name: name} do
+    conn = start_client(name, request_timeout: 200)
+    ready_modern(name, conn)
+
+    caller =
+      spawn(fn -> Client.call_tool(name, "t", %{}, task: :await, timeout: 60_000) end)
+
+    {id, _, _} = expect_request(conn, "tools/call")
+    reply(conn, id, created(%{"pollIntervalMs" => 30_000}))
+    eventually(fn -> map_size(state(conn).watches) == 1 end)
+
+    Process.exit(caller, :kill)
+    {id, _message, _} = expect_request(conn, "tasks/cancel")
+    assert_receive {:fake_transport, ^conn, {:cancel, ^id, _handle, :timeout}}, 1_000
+    assert state(conn).internal == %{}
+    no_leaks(name, conn)
+  end
+
   describe "legacy (task augmentation)" do
     @server_caps %{"tools" => %{}, "tasks" => %{"requests" => %{"tools" => %{"call" => %{}}}}}
 

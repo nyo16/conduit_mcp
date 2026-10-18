@@ -275,6 +275,29 @@ defmodule ConduitMcp.Client.ListenTest do
       assert :ok = Task.await(task)
     end
 
+    test "an unanswered resources/subscribe is cancelled at the request timeout" do
+      name = {__MODULE__, make_ref()}
+      conn = start_client(name, protocol: :legacy, request_timeout: 200)
+      ready_legacy(name, conn, %{"resources" => %{"subscribe" => true}})
+
+      task = Task.async(fn -> Client.subscribe(name, "file:///a", timeout: 5_000) end)
+      {id, _message, _opts} = expect_request(conn, "resources/subscribe")
+      assert_receive {:fake_transport, ^conn, {:cancel, ^id, _handle, :timeout}}, 1_000
+      assert {:error, %Error{kind: :timeout}} = Task.await(task)
+      assert state(conn).internal == %{}
+    end
+
+    test "a resources/subscribe in flight fails when the transport closes" do
+      name = {__MODULE__, make_ref()}
+      conn = start_client(name, protocol: :legacy)
+      ready_legacy(name, conn, %{"resources" => %{"subscribe" => true}})
+
+      task = Task.async(fn -> Client.subscribe(name, "file:///a", timeout: 5_000) end)
+      _ = expect_request(conn, "resources/subscribe")
+      FakeTransport.push(conn, {:closed, :boom})
+      assert {:error, %Error{kind: :transport}} = Task.await(task, 1_000)
+    end
+
     test "a server without resources.subscribe refuses at once" do
       name = {__MODULE__, make_ref()}
       conn = start_client(name, protocol: :legacy)
@@ -295,5 +318,19 @@ defmodule ConduitMcp.Client.ListenTest do
     assert filter["resourceSubscriptions"] == ["file:///a"]
     ack(conn, id, %{"resourceSubscriptions" => ["file:///a"]})
     assert :ok = Task.await(task)
+  end
+
+  test "a subscribe/2 that timed out before the connection was ready is never applied" do
+    name = {__MODULE__, make_ref()}
+    conn = start_client(name)
+
+    assert {:error, %Error{kind: :timeout}} =
+             Client.subscribe(name, "file:///a", timeout: 200)
+
+    ready_modern(name, conn, @caps)
+
+    refute_receive {:fake_transport, ^conn, {:request, %{"method" => "subscriptions/listen"}, _}}
+
+    assert MapSet.size(state(conn).listen.subs) == 0
   end
 end

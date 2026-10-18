@@ -189,7 +189,8 @@ for how these caps relate to the Hammer limiters.
   so a legacy request gets `-32601`.
 - **`ConduitMcp.Handler.handle_request/3`.** A map-returning call can't hold
   a stream open, so it answers `-32601` ("requires a streaming transport").
-  Only the HTTP transports serve listen.
+  Only the HTTP transports serve listen; the client's
+  `ConduitMcp.Client.Transport.InProcess` answers it `-32601` too.
 - **`GET /sse`** on the legacy SSE transport. Modern clients should use
   `ConduitMcp.Transport.StreamableHTTP`.
 

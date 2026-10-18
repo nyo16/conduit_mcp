@@ -27,7 +27,7 @@ defmodule ConduitMcp.Client.Connection.TaskWatch do
   end
 
   @doc "A watched caller died: cancel its task. `:unknown` when `ref` is not a watch."
-  @spec down(reference(), atom(), Data.t()) :: Data.t() | :unknown
+  @spec down(reference(), atom(), Data.t()) :: {Data.t(), [:gen_statem.action()]} | :unknown
   def down(ref, state, data) do
     case Map.pop(data.watches, ref) do
       {nil, _watches} -> :unknown
@@ -40,11 +40,15 @@ defmodule ConduitMcp.Client.Connection.TaskWatch do
     info = if data.era == :modern, do: %{extensions: @tasks_extension}, else: %{}
 
     case Data.send_request(data, id, "tasks/cancel", %{"taskId" => task_id}, info, nil, []) do
-      {:ok, _handle, data} -> %{data | internal: Map.put(data.internal, id, :task_cancel)}
-      {:error, _reason, data} -> data
+      {:ok, handle, data} ->
+        {%{data | internal: Map.put(data.internal, id, :task_cancel)},
+         [Data.internal_timer(data, id, handle)]}
+
+      {:error, _reason, data} ->
+        {data, []}
     end
   end
 
   # Not connected: the task cannot be reached now.
-  defp cancel(_task_id, _state, data), do: data
+  defp cancel(_task_id, _state, data), do: {data, []}
 end

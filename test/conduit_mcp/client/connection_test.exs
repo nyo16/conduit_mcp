@@ -10,11 +10,31 @@ defmodule ConduitMcp.Client.ConnectionTest do
   alias ConduitMcp.Client.ServerInfo
   alias ConduitMcp.Client.ToolResult
   alias ConduitMcp.TelemetryTestHelper
+  alias ConduitMcp.Test.Client.FakeHTTPTransport
   alias ConduitMcp.Test.Client.FakeTransport
 
   @modern "2026-07-28"
   @legacy "2025-11-25"
   @list_changed "notifications/tools/list_changed"
+
+  # Reports each `elicitation_modes/0` call to the process named in the
+  # persistent term, and raises once the test flips it to `:raise`.
+  defmodule CountingModes do
+    @behaviour ConduitMcp.Client.Handler
+
+    @impl true
+    def handle_elicitation(_params, _ctx), do: {:ok, %{"action" => "decline"}}
+
+    @impl true
+    def elicitation_modes do
+      case :persistent_term.get(__MODULE__) do
+        :raise -> raise "elicitation_modes/0 called after start"
+        pid -> send(pid, {:elicitation_modes, self()})
+      end
+
+      [:form]
+    end
+  end
 
   setup do
     {:ok, name: {__MODULE__, make_ref()}}
@@ -445,6 +465,23 @@ defmodule ConduitMcp.Client.ConnectionTest do
       assert_no_leaks(name, conn)
     end
 
+    test "await_ready and subscribe calls while connecting count against max_queued",
+         %{name: name} do
+      conn = start_client(name, max_queued: 1)
+      task = Task.async(fn -> Client.await_ready(name) end)
+      eventually(fn -> state(conn).queued == 1 end)
+
+      assert {:error, %Error{kind: :overloaded, reason: :max_queued}} =
+               Client.await_ready(name, 200)
+
+      assert {:error, %Error{kind: :overloaded, reason: :max_queued}} =
+               Client.subscribe(name, "file:///a", timeout: 200)
+
+      ready_modern(name, conn)
+      assert :ok = Task.await(task)
+      assert_no_leaks(name, conn)
+    end
+
     test "progress reaches the caller, keyed by a progressToken equal to the id",
          %{name: name} do
       conn = start_client(name)
@@ -599,7 +636,55 @@ defmodule ConduitMcp.Client.ConnectionTest do
 
   # --- reconnect, close --------------------------------------------------------------
 
+  describe "handler capabilities" do
+    for protocol <- [:modern, :legacy] do
+      @protocol protocol
+      test "are built from the handler once, at start (#{protocol})", %{name: name} do
+        :persistent_term.put(CountingModes, self())
+        conn = start_client(name, handler: CountingModes, protocol: @protocol)
+        assert_received {:elicitation_modes, _pid}
+        :persistent_term.put(CountingModes, :raise)
+        on_exit(fn -> :persistent_term.erase(CountingModes) end)
+
+        if @protocol == :modern, do: ready_modern(name, conn), else: ready_legacy(name, conn)
+
+        task = Task.async(fn -> Client.list_tools(name) end)
+        {id, message, _wire_opts} = expect_request(conn, "tools/list")
+        reply(conn, id, %{"tools" => []})
+        assert {:ok, %{tools: []}} = Task.await(task)
+
+        if @protocol == :modern do
+          assert message["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"] ==
+                   %{"elicitation" => %{"form" => %{}}}
+        end
+
+        assert Process.alive?(conn)
+      end
+    end
+  end
+
   describe "reconnect and give-up" do
+    for {label, backoff} <- [
+          {"raises", quote(do: fn _attempt -> raise "boom" end)},
+          {"returns a negative delay", quote(do: fn _attempt -> -5 end)}
+        ] do
+      @backoff backoff
+      test "a :backoff that #{label} falls back to full jitter", %{name: name} do
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            conn = start_client(name, backoff: unquote(@backoff))
+            ready_modern(name, conn)
+            FakeTransport.push(conn, {:closed, :boom})
+
+            # `full_jitter(1)` waits at most 1 s.
+            assert_receive {:fake_transport, ^conn, :connect}, 2_000
+            assert Process.alive?(conn)
+          end)
+
+        assert log =~ "ConduitMcp.Client :backoff"
+      end
+    end
+
     test "pending requests fail, the transport reconnects, then gives up", %{name: name} do
       conn = start_client(name, max_reconnects: 1)
       ready_modern(name, conn)
@@ -822,6 +907,63 @@ defmodule ConduitMcp.Client.ConnectionTest do
       assert {:error, %Error{kind: :closed}} = Task.await(task)
       assert_no_leaks(name, conn)
     end
+  end
+
+  test "crash-report state hides Mcp-Param-* header copies of pending and queued calls",
+       %{name: name} do
+    conn =
+      start_client(name,
+        transport: {FakeHTTPTransport, test_pid: self()},
+        backoff: fn _attempt -> 60_000 end
+      )
+
+    ready_modern(name, conn)
+
+    schema = %{
+      "type" => "object",
+      "properties" => %{"region" => %{"type" => "string", "x-mcp-header" => "Region"}}
+    }
+
+    task = Task.async(fn -> Client.list_all_tools(name) end)
+    {id, _message, _opts} = expect_request(conn, "tools/list")
+
+    reply(conn, id, %{
+      "tools" => [%{"name" => "geo", "inputSchema" => schema}],
+      "ttlMs" => 60_000,
+      "cacheScope" => "public"
+    })
+
+    assert {:ok, _page} = Task.await(task)
+
+    args = %{"region" => "PENDING-s3cr3t"}
+
+    pending =
+      Task.async(fn -> Client.call_tool(name, "geo", args, assigns: %{k: "ASSIGN-s3cr3t"}) end)
+
+    {_id, _message, wire_opts} = expect_request(conn, "tools/call")
+    assert inspect(wire_opts[:headers]) =~ "PENDING-s3cr3t"
+    assert_redacted(conn, ["PENDING-s3cr3t", "ASSIGN-s3cr3t"])
+
+    FakeTransport.push(conn, {:closed, :boom})
+    assert {:error, %Error{kind: :transport}} = Task.await(pending)
+
+    queued =
+      Task.async(fn ->
+        Client.call_tool(name, "geo", %{"region" => "QUEUED-s3cr3t"},
+          assigns: %{k: "QASSIGN-s3cr3t"}
+        )
+      end)
+
+    eventually(fn -> state(conn).queued == 1 end)
+    assert_redacted(conn, ["QUEUED-s3cr3t", "QASSIGN-s3cr3t"])
+
+    assert :ok = Client.close(name)
+    assert {:error, %Error{kind: :closed}} = Task.await(queued)
+  end
+
+  defp assert_redacted(conn, secrets) do
+    status = conn |> :sys.get_status() |> inspect(limit: :infinity, printable_limit: :infinity)
+    for secret <- secrets, do: refute(status =~ secret, secret)
   end
 
   defp respond_loop do

@@ -123,7 +123,10 @@ defmodule ConduitMcp.Client.Config do
               doc: """
               `fn attempt -> milliseconds end`: the delay before reconnect
               attempt `attempt` (1, 2, …). Defaults to
-              `ConduitMcp.Client.Backoff.full_jitter/1`.
+              `ConduitMcp.Client.Backoff.full_jitter/1`. It runs in the
+              connection process, so it must be pure and fast; one that
+              raises or returns anything but a non-negative integer is
+              replaced by `full_jitter/1` for that attempt, with a warning.
               """
             ],
             max_reconnects: [
@@ -457,7 +460,10 @@ defmodule ConduitMcp.Client.Config do
     :elicitation,
     :roots,
     :max_cache_ttl,
-    :governance
+    :governance,
+    # The client capabilities per era, derived from the handler once here so
+    # the connection never calls handler code to build them.
+    :capabilities
   ]
 
   @type protocol :: :auto | :modern | :legacy | String.t()
@@ -489,7 +495,8 @@ defmodule ConduitMcp.Client.Config do
           elicitation: keyword(),
           roots: keyword(),
           max_cache_ttl: pos_integer(),
-          governance: struct()
+          governance: struct(),
+          capabilities: %{modern: map(), legacy: map()}
         }
 
   @doc """
@@ -525,6 +532,10 @@ defmodule ConduitMcp.Client.Config do
           |> Keyword.put(:server_id, server_id)
           |> Keyword.put_new_lazy(:probe_timeout, fn -> default_probe_timeout(transport) end)
           |> Keyword.put_new_lazy(:client_info, &default_client_info/0)
+          |> Keyword.put(:capabilities, %{
+            modern: capabilities(valid, :modern),
+            legacy: capabilities(valid, :legacy)
+          })
           |> Keyword.put(
             :governance,
             ConduitMcp.Client.Governance.new(
@@ -543,6 +554,17 @@ defmodule ConduitMcp.Client.Config do
   def new!(other) do
     raise ArgumentError,
           "ConduitMcp.Client options must be a keyword list, got: #{inspect(other)}"
+  end
+
+  # `roots.listChanged` (legacy only) is promised when configured: the host
+  # announces changes with `ConduitMcp.Client.notify_roots_changed/1`.
+  defp capabilities(valid, era) do
+    Negotiation.client_capabilities(valid[:handler],
+      era: era,
+      sampling_tools: valid[:sampling][:tools],
+      sampling_context: valid[:sampling][:context],
+      roots_list_changed: valid[:roots][:list_changed]
+    )
   end
 
   defp default_server_id(name) when is_binary(name), do: name
@@ -636,8 +658,8 @@ defmodule ConduitMcp.Client.Config do
   def validate_handler(nil), do: {:ok, nil}
 
   def validate_handler(handler) when is_atom(handler) do
-    # Builds the capabilities once so a bad `elicitation_modes/0` fails at
-    # start, not on the first request.
+    # A bad `elicitation_modes/0` fails here, naming the key; `new!/1`
+    # stores the capabilities built from it.
     _ = Negotiation.client_capabilities(handler)
     {:ok, handler}
   rescue
