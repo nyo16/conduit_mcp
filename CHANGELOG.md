@@ -657,14 +657,18 @@ Smaller behaviour changes worth knowing about:
   `notify_resource_updated/1` (node-local; broadcast on your own PubSub for a
   cluster). Resource URIs are authorized per URI and silently dropped when
   unauthorized; the stream closes at token `exp` or
-  `:max_stream_lifetime`; `:max_listens_per_principal` (4, then 429) and
-  `:listen_idle_timeout` bound it; 503 at `:max_streams`, 406 without the
-  event-stream Accept. Modern capabilities advertise `listChanged: true` and
-  `resources.subscribe: true`. New
+  `:max_stream_lifetime`; `:max_listens_per_principal` (4) bounds a
+  principal's live streams — a further listen replaces that principal's
+  oldest one (`notifications/cancelled`, then the closing result; telemetry
+  reason `:superseded`), because a client that vanished is only noticed on
+  the stream's next write — and `:listen_idle_timeout` ends idle ones; 503
+  at `:max_streams`, 406 without the event-stream Accept. Modern
+  capabilities advertise `listChanged: true`, `resources.subscribe: true`
+  and `logging` (any modern tool may send `notifications/message`). New
   `Notifications.subscriptions_acknowledged_notification/1` and
   `cancelled_notification/2`.
-- **Cache hints.** Cacheable modern results (the three lists, templates,
-  `resources/read`, `prompts/get`) carry `ttlMs` and `cacheScope`, never on
+- **Cache hints.** Cacheable modern results (`server/discover`, the three
+  lists, templates and `resources/read`) carry `ttlMs` and `cacheScope`, never on
   interim results. Global `config :conduit_mcp, cache_ttl_ms:, cache_scope:`
   (validated at boot), per declaration with the DSL `cache ttl_ms:, scope:`
   macro or the Component `cache:` option (`ConduitMcp.CacheHints`). A list
