@@ -376,6 +376,20 @@ Smaller behaviour changes worth knowing about:
 
 ### Fixed
 
+- **DSL resource reads put `contents` on the wire.** A `read` handler
+  answering with `text/1`, `json/1`, `image/2` or `audio/2`, as the README and
+  DSL guide show, sent a tool-shaped `"content"` list that strict clients
+  reject (`@modelcontextprotocol/client` 2.3.1: "Invalid result for
+  resources/read"). The blocks are now converted to `contents` for the
+  requested URI, typed with the resource's `mime_type`; image and audio
+  become `blob` entries. Opt out: return `raw_resource/2` or a `"contents"`
+  map yourself; those pass through untouched.
+- **A tool's own result `_meta` survives a request `_meta`.** `tools/call`
+  copied the request's `_meta` over the result's, so a tool returning `_meta`
+  (MCP Apps UI metadata, for one) lost it whenever the client sent a
+  `progressToken`. Legacy results still echo the request `_meta`, merged with
+  the tool's keys winning; modern results carry only the tool's `_meta` and
+  `serverInfo`. Opt out: none needed.
 - **`Retry-After` rounds up.** Both rate-limit plugs floored the backend's
   wait to whole seconds, so a client told to wait after a 1.5 s window came
   back after 1 s and was denied again. Hammer 7.5's token-bucket backend
