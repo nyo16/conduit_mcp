@@ -35,6 +35,14 @@ defmodule ConduitMcp.Subscriptions do
   published by `ConduitMcp.Ext.Tasks.ListenNotifier`, the default notifier
   of `ConduitMcp.Ext.Tasks`.
 
+  Topics are shared by every Server and Endpoint in the node: the
+  `notify_*` functions take no server module, so a notification reaches the
+  matching streams of every endpoint. When endpoints serve different
+  audiences, gate each resource with `scope` or the endpoint's
+  `handle_subscribe_resource/2` (both apply to `resourceSubscriptions`), and
+  don't put anything an audience must not learn in a URI another endpoint
+  lets it subscribe to.
+
   ## Node-local
 
   The registry is a `Registry` started under `ConduitMcp.Supervisor`
@@ -65,6 +73,17 @@ defmodule ConduitMcp.Subscriptions do
   the bearer token's `exp`, and `:listen_idle_timeout`. A filter may name at
   most 1 000 resource URIs (`ConduitMcp.Subscriptions.Filter`).
 
+  A stream's mailbox is bounded too. A stream writes each notification to
+  its socket synchronously, so a client that stops reading parks it in the
+  send (up to the socket's send timeout) while notifications keep arriving.
+  `publish/2` skips any stream already holding `max_queue/0` messages
+  (`config :conduit_mcp, :listen_max_queue`, default 1 000): that stream
+  misses the notification, every other stream still gets it, and
+  `[:conduit_mcp, :subscription, :drop]` is emitted. The stream itself is
+  left to end through its own bounds (a failed write, the lifetime, idle
+  timeout or supersession); a client that has missed notifications should
+  re-read what it cares about after reconnecting.
+
   The per-principal cap is never answered 429: a listen that would exceed it
   is admitted and the principal's **oldest** stream is superseded - it ends
   with `notifications/cancelled` for its listen id, then the graceful-closure
@@ -82,6 +101,8 @@ defmodule ConduitMcp.Subscriptions do
 
   alias ConduitMcp.Notifications
   alias ConduitMcp.Subscriptions.Admission
+
+  @default_max_queue 1_000
 
   @typedoc "What a stream subscribes to; see the Topics table."
   @type topic ::
@@ -144,10 +165,50 @@ defmodule ConduitMcp.Subscriptions do
   """
   @spec publish(term(), map()) :: :ok
   def publish(topic, notification) when is_map(notification) do
+    cap = max_queue()
+
     Registry.dispatch(__MODULE__, topic, fn entries ->
-      for {pid, ref} <- entries, do: send(pid, {__MODULE__, ref, notification})
+      for {pid, ref} <- entries, do: deliver(pid, ref, notification, topic, cap)
     end)
   end
+
+  @doc """
+  The mailbox bound of a stream: `publish/2` skips a stream holding this many
+  messages or more. `config :conduit_mcp, :listen_max_queue` (a positive
+  integer), default #{1_000}.
+  """
+  @spec max_queue() :: pos_integer()
+  def max_queue do
+    case Application.get_env(:conduit_mcp, :listen_max_queue, @default_max_queue) do
+      cap when is_integer(cap) and cap > 0 ->
+        cap
+
+      other ->
+        raise ArgumentError,
+              "config :conduit_mcp, :listen_max_queue must be a positive integer, " <>
+                "got: #{inspect(other)}"
+    end
+  end
+
+  # A stream writes each notification synchronously to its socket, so a client
+  # that stops reading parks it in the send while publishes keep arriving.
+  # Past the bound the notification is dropped for that stream only.
+  defp deliver(pid, ref, notification, topic, cap) do
+    case Process.info(pid, :message_queue_len) do
+      {:message_queue_len, len} when len >= cap ->
+        :telemetry.execute(
+          [:conduit_mcp, :subscription, :drop],
+          %{message_queue_len: len},
+          %{topic: topic_kind(topic)}
+        )
+
+      _alive_or_gone ->
+        send(pid, {__MODULE__, ref, notification})
+    end
+  end
+
+  defp topic_kind(topic) when is_tuple(topic), do: elem(topic, 0)
+  defp topic_kind(topic), do: topic
 
   @doc """
   The pids of the local streams subscribed to `topic`. For introspection and

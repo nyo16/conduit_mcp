@@ -243,7 +243,7 @@ defmodule ConduitMcp.Transport.StreamedResponseTest do
       assert [content_type] = header(response, "content-type")
       assert content_type =~ "text/event-stream"
       assert header(response, "x-accel-buffering") == ["no"]
-      assert header(response, "cache-control") == ["no-cache"]
+      assert header(response, "cache-control") == ["no-store"]
       assert header(response, "mcp-protocol-version") == [@version]
 
       assert [first, second, result] = events(response.body)

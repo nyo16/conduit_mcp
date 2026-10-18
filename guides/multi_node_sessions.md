@@ -232,6 +232,11 @@ end
 - **Sticky sessions**: Configure your load balancer to route by `Mcp-Session-Id` header. ETS works fine.
 - **No sessions**: Omit `:session` (or set `session: false`) for fully stateless mode.
 
+A session records the principal that created it (`ConduitMcp.Principal.id/1`).
+A legacy request or `DELETE` that presents it from a different principal is
+answered 404, exactly like an unknown session id, so a leaked id can't be
+used, used to cancel the owner's requests, or used to end the session.
+
 ## Multi-node on the modern era
 
 A modern request carries everything the server needs in its own `_meta`, so

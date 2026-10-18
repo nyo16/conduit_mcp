@@ -17,7 +17,8 @@ defmodule ConduitMcp.MRTR.StateTest do
       "arguments" => %{"target" => "prod", "n" => 1},
       "_meta" => %{"progressToken" => 1}
     },
-    principal: "sub:alice"
+    principal: "sub:alice",
+    server: MyApp.EndpointA
   }
 
   setup do
@@ -82,6 +83,7 @@ defmodule ConduitMcp.MRTR.StateTest do
         wrong_principal: open(token, %{@binding | principal: "sub:mallory"}),
         nil_principal: open(token, %{@binding | principal: nil}),
         expired: open(token, @binding, @now + :timer.minutes(5)),
+        wrong_server: open(token, %{@binding | server: MyApp.EndpointB}),
         wrong_method: open(token, %{@binding | method: "prompts/get"}),
         wrong_version: open(token, %{@binding | version: "2025-11-25"}),
         wrong_args: open(token, put_in(@binding, [:params, "arguments", "target"], "dev")),

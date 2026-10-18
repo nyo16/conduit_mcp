@@ -26,9 +26,13 @@ defmodule ConduitMcp.MRTR.State do
   ## Bindings
 
   The binding passed to both calls is
-  `%{version: v, method: m, params: p, principal: id}`:
+  `%{version: v, method: m, params: p, principal: id, server: module}`:
 
-    * **AAD** — the protocol `version`, `method`, and `kid`.
+    * **AAD** — the protocol `version`, `method`, `server` (the Server or
+      Endpoint module that handles the request), and `kid`. `:mrtr_keys` is
+      application-global, so without `server` a token sealed by one endpoint
+      would open at another endpoint in the same node for the same tool,
+      arguments and principal.
     * **Payload** — the `principal` id (use `ConduitMcp.Principal.id/1`, the
       claim-prefixed id, or `nil` when unauthenticated), an expiry (5 minutes,
       60 seconds when `principal` is nil), a SHA-256 digest of `method` and
@@ -70,7 +74,8 @@ defmodule ConduitMcp.MRTR.State do
           required(:version) => String.t(),
           required(:method) => String.t(),
           required(:params) => map() | nil,
-          required(:principal) => String.t() | nil
+          required(:principal) => String.t() | nil,
+          required(:server) => module()
         }
 
   @doc """
@@ -110,7 +115,7 @@ defmodule ConduitMcp.MRTR.State do
 
   Returns `:error` — the same value whatever the cause — for an oversize,
   truncated, malformed or tampered token, an unknown `kid`, a different
-  principal, version, method or salient params, or an expired token.
+  principal, server module, version, method or salient params, or an expired token.
 
   Options: `:now`, as in `seal/3`.
   """
@@ -215,8 +220,9 @@ defmodule ConduitMcp.MRTR.State do
     end
   end
 
-  # A JSON array is an unambiguous encoding of the three fields.
-  defp aad(kid, binding), do: JSON.encode!([binding.version, binding.method, kid])
+  # A JSON array is an unambiguous encoding of the four fields.
+  defp aad(kid, binding),
+    do: JSON.encode!([binding.version, binding.method, inspect(binding.server), kid])
 
   defp digest(binding) do
     salient = Map.drop(binding.params || %{}, @unsalient)

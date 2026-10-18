@@ -23,7 +23,7 @@ defmodule ConduitMcp.Transport.SSEStream do
       it; intermediaries see traffic and keep the connection open.
 
   `open/1` sends the response head: `content-type: text/event-stream`,
-  `cache-control: no-cache` and `x-accel-buffering: no` (so nginx does not
+  `cache-control: no-store` and `x-accel-buffering: no` (so nginx does not
   buffer the stream), and no `connection` header — RFC 9113 §8.2.2 forbids
   connection-specific headers in HTTP/2 and strict clients reject them.
 
@@ -91,7 +91,7 @@ defmodule ConduitMcp.Transport.SSEStream do
   def open(conn) do
     conn
     |> put_resp_content_type("text/event-stream")
-    |> put_resp_header("cache-control", "no-cache")
+    |> put_resp_header("cache-control", "no-store")
     |> put_resp_header("x-accel-buffering", "no")
     |> send_chunked(200)
   end

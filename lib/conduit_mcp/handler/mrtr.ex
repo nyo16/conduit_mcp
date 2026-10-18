@@ -96,7 +96,7 @@ defmodule ConduitMcp.Handler.MRTR do
   end
 
   defp modern(conn, ctx, method, params, server_module, callback, callback_name) do
-    binding = binding(ctx, conn, method, params)
+    binding = binding(ctx, conn, method, params, server_module)
 
     case restore(conn, binding, params) do
       {:ok, conn, previous_round} ->
@@ -130,12 +130,13 @@ defmodule ConduitMcp.Handler.MRTR do
 
   defp start_task(result, _conn, _ctx, _method, _callback_name), do: result
 
-  defp binding(ctx, conn, method, params) do
+  defp binding(ctx, conn, method, params, server_module) do
     %{
       version: ctx.version,
       method: method,
       params: params,
-      principal: ConduitMcp.Principal.id(conn)
+      principal: ConduitMcp.Principal.id(conn),
+      server: server_module
     }
   end
 

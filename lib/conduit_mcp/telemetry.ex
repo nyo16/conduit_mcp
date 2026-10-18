@@ -72,6 +72,7 @@ defmodule ConduitMcp.Telemetry do
                   [:filters, :server_module], []},
                  {[:conduit_mcp, :subscription, :stop], [:duration],
                   [:filters, :server_module, :reason], []},
+                 {[:conduit_mcp, :subscription, :drop], [:message_queue_len], [:topic], []},
                  {[:conduit_mcp, :ext_tasks, :cleanup], [:removed], [:store], []},
                  {[:conduit_mcp, :client, :cache, :refresh, :start], span_start,
                   client ++ [:kind, :trigger], []},
@@ -343,6 +344,22 @@ defmodule ConduitMcp.Telemetry do
       `:max_listens_per_principal`). Every reason but
       `:client_closed` ended with `notifications/cancelled` and the
       graceful-closure result.
+
+  #### `[:conduit_mcp, :subscription, :drop]`
+
+  Emitted by `ConduitMcp.Subscriptions.publish/2` for each stream it skips
+  because the stream's mailbox already holds
+  `ConduitMcp.Subscriptions.max_queue/0` messages (a client that stopped
+  reading). That stream misses the notification; the others still get it.
+
+  **Measurements:**
+
+    * `:message_queue_len` (integer) - The stream's mailbox length
+
+  **Metadata:**
+
+    * `:topic` (atom) - The topic kind: `:tools`, `:prompts`, `:resources`,
+      `:resource` or `:task` (never a URI, task id or principal)
 
   Neither event carries the resource URIs, the listen request id or the
   principal.
@@ -1363,6 +1380,15 @@ defmodule ConduitMcp.Telemetry do
 
     Logger.debug(
       "Subscription started: filters=#{inspect(metadata.filters)} resource_subscriptions=#{measurements.resource_subscriptions}"
+    )
+  end
+
+  defp handle_event([:conduit_mcp, :subscription, :drop], measurements, metadata, _config) do
+    require Logger
+
+    Logger.warning(
+      "Subscription notification dropped for a stalled stream: topic=#{metadata.topic} " <>
+        "message_queue_len=#{measurements.message_queue_len}"
     )
   end
 

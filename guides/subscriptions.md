@@ -70,6 +70,23 @@ without it the request is answered with HTTP 406 and `-32600`.
   may not read is dropped from the acknowledgment silently, exactly as if it
   had not been requested. The acknowledgment never reveals more than the
   caller could read.
+- **Shared across endpoints.** Topics are node-wide, not per endpoint:
+  `notify_resource_updated/1` reaches every stream subscribed to that URI,
+  whichever Server or Endpoint admitted it. Each endpoint's own scope check
+  and hook decide which of its callers may subscribe.
+- **The subscribe hook applies.** When the server defines
+  `handle_subscribe_resource/2`, each URI that passes the scope check is
+  also passed to it, exactly as a legacy `resources/subscribe` is, and only
+  URIs it answers `{:ok, _}` for are honoured. A refused URI is dropped
+  silently, like a scope miss. Use the hook for per-user rules that `scope`
+  can't express (for example, `user://{id}` only for the caller's own id).
+- **Without the hook,** the scope check alone decides. This differs from
+  legacy, which refuses `resources/subscribe` outright without the hook:
+  legacy subscriptions are delivered only by the author's own hook, while
+  modern subscriptions are delivered by the library from
+  `ConduitMcp.Subscriptions.notify_resource_updated/1`, so modern
+  `resources.subscribe` is always advertised. Define the hook whenever
+  update timing of a readable resource must not reach a caller.
 - **Deduplicated.** Duplicate URIs are collapsed. If no URI survives, the
   field is left out of the acknowledgment.
 
@@ -155,6 +172,13 @@ stream slot. A process that is killed leaks neither.
   responses. A full server is a capacity problem, not something the client
   did, so it is answered 503 (and supersedes nothing).
 
+- **Mailbox bound.** A stream writes each notification synchronously, so a
+  client that stops reading parks its stream in the socket send. Once a
+  stream holds `config :conduit_mcp, :listen_max_queue` undelivered
+  notifications (default `1_000`), further notifications skip that stream
+  (and only that stream) and emit `[:conduit_mcp, :subscription, :drop]`.
+  The stream is not closed for it; it ends through the bounds above.
+
 These options must be positive integers, or `init/1` raises
 `ArgumentError`. See [Rate Limiting](rate_limiting.md#listen-streams)
 for how these caps relate to the Hammer limiters.
@@ -188,6 +212,7 @@ a latency. A listen refused with 406 or 503 emits neither.
 |---|---|---|
 | `[:conduit_mcp, :subscription, :start]` | `system_time`, `resource_subscriptions` (count) | `filters`, `server_module` |
 | `[:conduit_mcp, :subscription, :stop]` | `duration` (native units) | `filters`, `server_module`, `reason` (`:client_closed`, `:max_lifetime`, `:token_expired`, `:idle_timeout`, `:superseded`) |
+| `[:conduit_mcp, :subscription, :drop]` | `message_queue_len` | `topic` (`:tools`, `:prompts`, `:resources`, `:resource` or `:task`) |
 
 `filters` is a list of atoms: `:tools_list_changed`,
 `:prompts_list_changed`, `:resources_list_changed`,

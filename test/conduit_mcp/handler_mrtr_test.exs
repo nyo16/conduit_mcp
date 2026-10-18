@@ -148,6 +148,17 @@ defmodule ConduitMcp.HandlerMRTRTest do
     )
   end
 
+  # Same "deploy" tool behind a different module: another endpoint in the node.
+  defmodule OtherDeployServer do
+    use ConduitMcp.Server, dsl: false
+
+    @impl true
+    defdelegate handle_list_tools(conn), to: DeployServer
+
+    @impl true
+    defdelegate handle_call_tool(conn, name, params), to: DeployServer
+  end
+
   defp dispatch(request, conn \\ conn(:post, "/", "")) do
     assert {:reply, response} = Handler.dispatch(request, DeployServer, conn)
     response
@@ -340,6 +351,14 @@ defmodule ConduitMcp.HandlerMRTRTest do
 
     assert %{"result" => %{"resultType" => "complete", "messages" => [%{"role" => "user"}]}} =
              dispatch(retry(request, result["requestState"], %{}))
+  end
+
+  test "a token sealed for one server module does not open at another" do
+    alice = ConduitMcp.Principal.put(conn(:post, "/", ""), %{id: "alice"})
+    %{"result" => %{"requestState" => token}} = dispatch(deploy(), alice)
+
+    assert {:reply, %{"error" => %{"code" => -32_602, "message" => "Invalid requestState"}}} =
+             Handler.dispatch(retry(deploy(), token, @approve), OtherDeployServer, alice)
   end
 
   test "a token minted for one method does not open on another" do

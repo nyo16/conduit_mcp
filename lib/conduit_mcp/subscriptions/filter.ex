@@ -21,8 +21,11 @@ defmodule ConduitMcp.Subscriptions.Filter do
       specification asks. `false` subscribes to nothing.
     * `resourceSubscriptions` — a list of at most
       #{1_000} URI strings. Each is authorized like `resources/read` (the
-      resource's `scope`); a URI the caller may not read is dropped from the
-      acknowledgment silently, exactly as if it had not been requested, so
+      resource's `scope`) and, when the server defines
+      `c:ConduitMcp.Server.handle_subscribe_resource/2`, must also be
+      accepted by it (`{:ok, _}`) — the same hook legacy `resources/subscribe`
+      runs. A URI the caller may not read, or the hook refuses, is dropped
+      from the acknowledgment silently, exactly as if it had not been requested, so
       the acknowledgment reveals nothing beyond what the caller may read.
       Duplicates are collapsed; an empty result omits the field.
     * `taskIds` — only while `ConduitMcp.Ext.Tasks` is enabled (otherwise an
@@ -50,6 +53,7 @@ defmodule ConduitMcp.Subscriptions.Filter do
   alias ConduitMcp.Handler.ExtTasks
   alias ConduitMcp.Handler.Resources
   alias ConduitMcp.Principal
+  alias ConduitMcp.ServerMeta
   alias ConduitMcp.Subscriptions
 
   @max_resource_subscriptions 1_000
@@ -154,7 +158,7 @@ defmodule ConduitMcp.Subscriptions.Filter do
       true ->
         uris
         |> Enum.uniq()
-        |> Enum.filter(&(Resources.authorize(&1, server_module, conn) == :ok))
+        |> Enum.filter(&subscribable?(&1, server_module, conn))
         |> case do
           [] -> :skip
           allowed -> {:ok, allowed, Enum.map(allowed, &{:resource, &1})}
@@ -190,6 +194,15 @@ defmodule ConduitMcp.Subscriptions.Filter do
           owned -> {:ok, owned, Enum.map(owned, &Subscriptions.task_topic(owner, &1))}
         end
     end
+  end
+
+  # The scope check `resources/read` uses, then — when the server defines it —
+  # the same `handle_subscribe_resource/2` hook a legacy `resources/subscribe`
+  # runs. A refusal drops the URI from the ack silently, like a scope miss.
+  defp subscribable?(uri, server_module, conn) do
+    Resources.authorize(uri, server_module, conn) == :ok and
+      (not ServerMeta.has?(server_module, :subscribe) or
+         match?({:ok, _}, server_module.handle_subscribe_resource(conn, uri)))
   end
 
   defp field(kind), do: Enum.find_value(@fields, fn {field, k} -> if k == kind, do: field end)

@@ -244,6 +244,9 @@ if Code.ensure_loaded?(PromEx) do
       streams stayed open
       - Tags: `reason`
       - Buckets: [1 000, 10 000, 60 000, 300 000, 900 000, 1 800 000, 3 600 000]
+    - `{prefix}_subscription_drop_total` - Counter of notifications skipped
+      for a stream whose mailbox reached `ConduitMcp.Subscriptions.max_queue/0`
+      - Tags: `topic` (`tools`, `prompts`, `resources`, `resource`, `task`)
 
     ## PromQL Examples
 
@@ -960,10 +963,11 @@ if Code.ensure_loaded?(PromEx) do
       end
     end
 
-    # Subscription metrics from [:conduit_mcp, :subscription, :start] and
-    # [:conduit_mcp, :subscription, :stop]. `reason` is a closed set of
-    # atoms; `filters` is a list, so it is not a tag. Durations are those of
-    # long-lived streams, hence the coarse buckets and fixed unit.
+    # Subscription metrics from [:conduit_mcp, :subscription, :start],
+    # [:conduit_mcp, :subscription, :stop] and [:conduit_mcp, :subscription,
+    # :drop]. `reason` and `topic` are closed sets of atoms; `filters` is a
+    # list, so it is not a tag. Durations are those of long-lived streams,
+    # hence the coarse buckets and fixed unit.
     defp subscription_metrics(metric_prefix) do
       Event.build(
         :conduit_mcp_subscription_metrics,
@@ -973,6 +977,14 @@ if Code.ensure_loaded?(PromEx) do
             event_name: [:conduit_mcp, :subscription, :start],
             description: "Total number of MCP subscriptions/listen streams opened",
             measurement: fn _measurements -> 1 end
+          ),
+          counter(
+            metric_prefix ++ [:subscription, :drop, :total],
+            event_name: [:conduit_mcp, :subscription, :drop],
+            description: "Notifications skipped for a stalled subscriptions/listen stream",
+            measurement: fn _measurements -> 1 end,
+            tags: [:topic],
+            tag_values: &Map.take(&1, [:topic])
           ),
           counter(
             metric_prefix ++ [:subscription, :stop, :total],

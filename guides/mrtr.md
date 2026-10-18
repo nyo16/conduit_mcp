@@ -251,12 +251,14 @@ The spec says servers must treat `requestState` as attacker-controlled.
 
 - **Encrypted and authenticated** with AES-256-GCM, using a fresh 96-bit IV
   per seal.
-- **Bound to the request.** The protocol version, method and `kid` are
-  authenticated data. The payload holds the principal
+- **Bound to the request.** The protocol version, method, the Server or
+  Endpoint module that handles the request, and `kid` are authenticated
+  data, so a token sealed by one endpoint does not open at another endpoint
+  in the same node (the keyring is application-global). The payload holds the principal
   (`ConduitMcp.Principal.id/1`), an expiry, and a SHA-256 digest of the
   method and the request's *salient* params: everything except `_meta`,
   `inputResponses` and `requestState`. A token presented for a different
-  tool, arguments, URI, prompt or principal is rejected.
+  tool, arguments, URI, prompt, principal or endpoint is rejected.
 - **Short-lived.** Tokens expire after 5 minutes, or 60 seconds when the
   request is unauthenticated.
 - **Bounded.** Tokens over 64 KiB are rejected before any decoding. The

@@ -81,15 +81,18 @@ if Code.ensure_loaded?(PromEx) do
         assert MapSet.new(ConduitMcp.Telemetry.events()) == metered
       end
 
-      test "subscription metrics are tagged with the stop reason only" do
+      test "subscription metrics are tagged with the stop reason or drop topic only" do
         group =
           [otp_app: :test_app]
           |> PromEx.event_metrics()
           |> Enum.find(&(&1.group_name == :conduit_mcp_subscription_metrics))
 
-        assert Enum.map(group.metrics, & &1.tags) == [[], [:reason], [:reason]]
+        assert Enum.map(group.metrics, & &1.tags) == [[], [:topic], [:reason], [:reason]]
 
-        for metric <- group.metrics, metric.tags != [] do
+        [drop] = Enum.filter(group.metrics, &(&1.tags == [:topic]))
+        assert drop.tag_values.(%{topic: :resource}) == %{topic: :resource}
+
+        for metric <- group.metrics, metric.tags == [:reason] do
           assert metric.tag_values.(%{reason: :idle_timeout, filters: [:tools_list_changed]}) ==
                    %{reason: :idle_timeout}
         end

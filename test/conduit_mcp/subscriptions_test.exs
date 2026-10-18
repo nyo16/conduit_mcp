@@ -31,6 +31,18 @@ defmodule ConduitMcp.SubscriptionsTest do
     end
   end
 
+  defmodule HookedServer do
+    use ConduitMcp.Server
+
+    resource "open://{id}" do
+      read(fn _conn, _params, _opts -> text("open") end)
+    end
+
+    def handle_subscribe_resource(conn, "open://" <> id = uri) do
+      if id == conn.assigns[:user], do: {:ok, %{"subscribed" => uri}}, else: {:error, %{}}
+    end
+  end
+
   defmodule EchoTool do
     use ConduitMcp.Component, type: :tool, description: "Echo"
 
@@ -95,6 +107,25 @@ defmodule ConduitMcp.SubscriptionsTest do
                parse(%{"resourceSubscriptions" => ["vault://a"]}, FullServer, scoped)
 
       assert filter.ack == %{"resourceSubscriptions" => ["vault://a"]}
+    end
+
+    test "a server's handle_subscribe_resource/2 must accept each uri; refusals drop silently" do
+      conn = Plug.Conn.assign(%Plug.Conn{}, :user, "alice")
+
+      assert {:ok, filter} =
+               parse(
+                 %{"resourceSubscriptions" => ["open://alice", "open://bob"]},
+                 HookedServer,
+                 conn
+               )
+
+      assert filter.ack == %{"resourceSubscriptions" => ["open://alice"]}
+      assert filter.topics == [{:resource, "open://alice"}]
+
+      assert {:ok, %Filter{ack: ack, topics: []}} =
+               parse(%{"resourceSubscriptions" => ["open://bob"]}, HookedServer, conn)
+
+      assert ack == %{}
     end
 
     test "an empty honoured uri list omits the field" do
@@ -214,6 +245,39 @@ defmodule ConduitMcp.SubscriptionsTest do
       assert Subscriptions.subscribers(topic) == []
       ConduitMcp.notify_resource_updated(uri)
       refute_received {Subscriptions, ^ref, _}
+    end
+
+    test "publish/2 skips a stalled stream whose mailbox is at the cap, with telemetry" do
+      topic = {:resource, "open://stalled-#{System.unique_integer([:positive])}"}
+      parent = self()
+
+      stalled =
+        spawn_link(fn ->
+          :ok = Subscriptions.subscribe([topic], make_ref())
+          send(parent, :subscribed)
+          receive do: (:stop -> :ok)
+        end)
+
+      on_exit(fn -> send(stalled, :stop) end)
+      assert_receive :subscribed, 1_000
+
+      ref =
+        ConduitMcp.TelemetryTestHelper.attach_event_handlers(self(), [
+          [:conduit_mcp, :subscription, :drop]
+        ])
+
+      cap = Subscriptions.max_queue()
+      [_, uri] = Tuple.to_list(topic)
+      for _ <- 1..(cap + 3), do: ConduitMcp.notify_resource_updated(uri)
+
+      assert Process.info(stalled, :message_queue_len) == {:message_queue_len, cap}
+
+      for _ <- 1..3 do
+        assert_received {[:conduit_mcp, :subscription, :drop], ^ref, %{message_queue_len: ^cap},
+                         %{topic: :resource}}
+      end
+
+      refute_received {[:conduit_mcp, :subscription, :drop], ^ref, _, _}
     end
 
     test "admit/3 at the cap supersedes the principal's oldest stream, never another's" do

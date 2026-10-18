@@ -193,8 +193,8 @@ defmodule ConduitMcp.Era do
   # before principals were recorded) binds nothing.
   defp check_session_binding(%Plug.Conn{} = conn) do
     with [session_id | _] <- Plug.Conn.get_req_header(conn, "mcp-session-id"),
-         {:ok, %{"principal" => bound}} <- session_data(conn, session_id),
-         false <- bound == Principal.id(conn) do
+         {:ok, session_data} <- session_data(conn, session_id),
+         true <- bound_to_other_principal?(session_data, conn) do
       {:error, Errors.invalid_request(),
        "Invalid request: Mcp-Session-Id is bound to a different principal", nil}
     else
@@ -203,6 +203,15 @@ defmodule ConduitMcp.Era do
   end
 
   defp check_session_binding(_conn), do: :ok
+
+  @doc false
+  # Whether `session_data` recorded a principal other than the caller's. A
+  # session that recorded no principal key (created before principals were
+  # recorded) binds nothing. Shared by the modern check above and the legacy
+  # session lookup in `ConduitMcp.Transport.StreamableHTTP`.
+  @spec bound_to_other_principal?(map(), Plug.Conn.t()) :: boolean()
+  def bound_to_other_principal?(%{"principal" => bound}, conn), do: bound != Principal.id(conn)
+  def bound_to_other_principal?(_session_data, _conn), do: false
 
   defp session_data(conn, session_id) do
     cond do
