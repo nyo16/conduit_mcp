@@ -310,13 +310,19 @@ defmodule ConduitMcp.Client.InProcessTest do
   end
 
   test "async_call_tool runs under the client's task supervisor" do
-    name = start_client(DslServer)
-    task = Client.async_call_tool(name, "echo", %{"message" => "later"})
+    # A tool that never returns keeps the caller task alive while we look; an
+    # echo can finish before `children/1` runs.
+    name = start_client(DslServer, transport_opts: [assigns: %{test_pid: self()}])
+    task = Client.async_call_tool(name, "block", %{})
+    assert_receive {:tool_running, tool}
 
     {:ok, task_sup, _value} = Registry.lookup({:task_sup, name})
     assert task.pid in Task.Supervisor.children(task_sup)
 
-    assert {:ok, %ToolResult{content: [%{"text" => "later"}]}} = Task.await(task)
+    # The caller's death cancels the request and stops the tool.
+    ref = Process.monitor(tool)
+    assert Task.shutdown(task, :brutal_kill) == nil
+    assert_receive {:DOWN, ^ref, :process, ^tool, _reason}
     assert_no_leaks(name)
   end
 

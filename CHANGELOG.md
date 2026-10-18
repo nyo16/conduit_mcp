@@ -375,9 +375,106 @@ Smaller behaviour changes worth knowing about:
   token request. A `transport_opts: [verify: :verify_none, ...]` used to
   reach an untrusted server. Opt out: `insecure_skip_tls_verify: true` on the
   transport, for local development only (it logs a warning).
+- **No header value ever reaches a client error, a log or an LLM.** A bearer
+  token holding a byte HTTP headers can't carry (a trailing `\n` from
+  `File.read!/1`, a control byte from an authorization server or token
+  store) made Mint echo the whole `Authorization` value into
+  `ConduitMcp.Client.Error`, its message and the adapters' tool results.
+  Tokens must now be visible ASCII: a static one raises at start, a
+  per-request one fails with `kind: :auth, reason: :invalid_token`, a token
+  endpoint's with `:invalid_token_response`, and any HTTP-layer
+  `{:invalid_header_value, name, value}` is reduced to
+  `{:invalid_header_value, name}`. `:headers` values must be visible ASCII,
+  space or tab. Opt out: none; trim the token (`String.trim/1`) before
+  returning it.
+- **`server_url_policy: :public_only` pins the vetted address.** The URL was
+  checked and then Finch resolved the name again, a DNS-rebinding window.
+  Each request (listen streams and the legacy session `DELETE` included) now
+  connects to the address it vetted, with SNI, certificate verification and
+  `Host` bound to the original name, through per-address pools in the
+  client's (or your `finch:`) Finch instance. A new `:resolver` option
+  replaces DNS for the check, and `:public_only` with
+  `insecure_skip_tls_verify: true` is refused at start. Opt out:
+  `server_url_policy: :any`.
+- **Finch telemetry carries credentials.** `[:finch, …]` event metadata
+  includes the request headers (`Authorization`, `Mcp-Session-Id`);
+  `guides/client_security.md` now warns against logging it wholesale.
+- **Private cached results are keyed by credential.** Lists marked
+  `cacheScope: "private"` (or unmarked, which covers every legacy result) are
+  served only while the client sends the credential they were fetched with
+  (bearer digest, OAuth `{principal, issuer, resource}`, or a declared
+  `:credential_id`), and are dropped when it changes; public lists are
+  shared. An `:auth` function without `:credential_id` never has private
+  results served from the cache. Opt out: give the function
+  `credential_id:` to cache for a fixed identity.
+- **Hub restart backoff is capped at 30 s.** A failed hub server is
+  restarted after full jitter from 1 s, doubling, capped at 30 s (was
+  5 minutes). Each client still gives up after 3 restarts in 5 s. Opt out:
+  `restart_backoff: &ConduitMcp.Client.Backoff.full_jitter(&1, base: 1_000, cap: 300_000)`.
+- **A hub runs at most 16 stdio servers** (`max_stdio_servers`), so a config
+  or an `add_server/3` caller can't fork without bound. Too many in
+  `servers:` raises at start; `add_server/3` beyond the cap returns
+  `kind: :overloaded, reason: :max_stdio_servers`. Opt out:
+  `max_stdio_servers: :infinity`.
+- **MRTR `requestState` is bound to the server module that sealed it.** The
+  keyring is application-global, so a token sealed by one endpoint opened at
+  another endpoint in the same node for the same tool, arguments and
+  principal. Tokens issued before the upgrade fail with `-32602` and clients
+  restart the round. Opt out: none.
+- **Modern `subscriptions/listen` runs `handle_subscribe_resource/2`.** A
+  modern client could subscribe to a URI the author's hook refused and learn
+  its update timing. Refused URIs are dropped from the acknowledgment
+  silently; without the hook, only the scope check applies. Opt out: don't
+  define `handle_subscribe_resource/2`.
+- **Legacy sessions are bound to their principal.** A legacy request or
+  `DELETE` presenting another principal's `Mcp-Session-Id` gets the same 404
+  as an unknown id. It used that session's data, could cancel the owner's
+  requests and could end the session. Opt out: none (sessions that recorded
+  no principal bind nothing).
+- **Listen streams have a mailbox bound.** A client that stops reading parks
+  its stream in the socket send while notifications pile up. `publish/2`
+  skips a stream holding 1 000 or more messages and emits
+  `[:conduit_mcp, :subscription, :drop]`. Opt out: raise
+  `config :conduit_mcp, :listen_max_queue`.
+- **The `x-mcp-header` annotation cache no longer depends on the first
+  caller.** A manual server whose tool list varies per user cached whichever
+  user called first, so header checks were skipped for tools that user
+  couldn't see. The cache now uses the anonymous view, and other tools are
+  read from the caller's own list each time; `handle_list_tools/1` must cope
+  with a conn that has no principal. Opt out: none.
+- **Streamed (SSE) responses send `cache-control: no-store`.** `no-cache`
+  still let intermediaries keep a copy of tool output. Opt out: none.
+- **Client crash reports no longer carry `Mcp-Param-*` header copies of tool
+  arguments.** The connection's `format_status/1` redacts request
+  `:headers` (pending and queued), queued per-call `:assigns`, and a queued
+  `set_auth/3`'s credentials. Opt out: none.
 
 ### Fixed
 
+- **InProcess serves modern progress and log notifications.** A modern
+  `tools/call` with `:on_progress`, or any call after `set_log_level/2`, was
+  answered `-32601` over `ConduitMcp.Client.Transport.InProcess`. It now runs
+  to its response and delivers the tool's progress and log notifications;
+  only `subscriptions/listen` still answers `-32601`.
+- **Postponed client control calls are bounded and dropped once their caller
+  gives up.** `await_ready/2`, `subscribe/2` and `unsubscribe/2` made before
+  `:ready` count against `:max_queued`; one whose caller timed out or exited
+  is dropped on replay, so a `subscribe/2` that returned `{:error, :timeout}`
+  is never applied later.
+- **The client connection never waits on a task it stops.** Handler tasks and
+  in-process requests are killed rather than shut down gracefully, so a task
+  that traps exits can't stall the connection for 5 s.
+- **Handler capabilities are computed once, and a bad `:backoff` can't crash
+  the connection.** `ConduitMcp.Client.Config.new!/1` builds the client
+  capabilities per era, so `elicitation_modes/0` is no longer called on every
+  request. A `:backoff` that raises or returns anything but a non-negative
+  integer falls back to `ConduitMcp.Client.Backoff.full_jitter/1` with a
+  warning.
+- **The client connection's own requests have a deadline.** Legacy
+  `resources/(un)subscribe` and the dead-caller `tasks/cancel` time out at
+  `:request_timeout`; callers waiting on a subscribe are answered when the
+  transport closes, and a notification handler process that dies is
+  restarted with a warning.
 - **DSL resource reads put `contents` on the wire.** A `read` handler
   answering with `text/1`, `json/1`, `image/2` or `audio/2`, as the README and
   DSL guide show, sent a tool-shaped `"content"` list that strict clients
@@ -553,6 +650,15 @@ Smaller behaviour changes worth knowing about:
 
 ### Added
 
+- `ConduitMcp.Client.set_auth/3` — replaces a running client's credentials
+  (any `:auth` form, plus `credential_id:`), reconnects, and drops private
+  cached results. OAuth options without `:store` keep the current store.
+- Streamable HTTP client options `:credential_id` (names whose tokens an
+  `:auth` function returns, so private results can be cached for that
+  identity) and `:resolver` (replaces DNS for the `:public_only` check).
+- `config :conduit_mcp, :listen_max_queue` and the
+  `[:conduit_mcp, :subscription, :drop]` telemetry event (with a PromEx
+  counter).
 - `ConduitMcp.Principal` — the canonical "who is calling", with `id/1`,
   `scopes/1`, `client_ip/1`, `client_bucket/1` and `rate_limit_key/1`.
 - `ConduitMcp.Cancellation.track/2`, `untrack/2`, `in_flight?/2` and
