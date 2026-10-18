@@ -120,7 +120,7 @@ To mirror a tool argument into an `Mcp-Param-*` header, add `"x-mcp-header"` to 
 }
 ```
 
-`ConduitMcp.Plugs.HeaderValidation` reads the annotations from your `handle_list_tools` (following `nextCursor`) on the first `tools/call`, and caches them per server module in `:persistent_term`. Unlike DSL and Component servers, manual servers aren't checked at compile time. A tool whose annotations are invalid is logged at `:error` when the cache is built (naming the tool and header, never values) and is left out of header validation.
+`ConduitMcp.Plugs.HeaderValidation` reads the annotations from your `handle_list_tools` (following `nextCursor`) on the first `tools/call`, and caches them per server module in `:persistent_term`. The cache is built from the list an unauthenticated caller sees: your callback gets a conn with no principal, assigns, headers or session, so it must not crash on one. A tool you list only to some callers (absent from that list) is looked up in the calling user's own list on every call instead, uncached. Keep a tool's `inputSchema` the same for every caller who can see it. Unlike DSL and Component servers, manual servers aren't checked at compile time. A tool whose annotations are invalid is logged at `:error` when the cache is built (naming the tool and header, never values) and is left out of header validation.
 
 If your tool list changes at runtime, drop the cache after the change:
 

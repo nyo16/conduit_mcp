@@ -55,9 +55,17 @@ defmodule ConduitMcp.Plugs.HeaderValidation do
   servers never reach this: their annotations are checked at compile time.
 
   The tool list is read from the server module in
-  `conn.private[:server_module]` (set by both transports). DSL and Endpoint
-  servers have a compile-time tool list, so the cache never
-  goes stale. A manual-mode server whose tool list changes at runtime must
+  `conn.private[:server_module]` (set by both transports). The cache is
+  built from the list an **unauthenticated** caller would see: the
+  `handle_list_tools` callback gets a conn with the transport's
+  configuration but no principal, assigns, headers or session, so no
+  caller's view decides another's. A called tool absent from that list —
+  one a manual-mode server lists only to some callers — is looked up in the
+  caller's own list on each call, uncached. A manual-mode
+  `handle_list_tools` must therefore tolerate a conn without a principal,
+  and a tool's `inputSchema` must not differ between callers who can both
+  see it. DSL and Endpoint servers have a compile-time tool list, so the
+  cache never goes stale. A manual-mode server whose tool list changes at runtime must
   call `invalidate/1` after the change; the next `tools/call` rebuilds the
   entry. `:persistent_term` updates are expensive (a global GC pass), so the
   cache suits tool lists that change rarely. A tool missing from the cached
@@ -231,10 +239,21 @@ defmodule ConduitMcp.Plugs.HeaderValidation do
 
   # --- annotation cache -----------------------------------------------------
 
+  # The cache holds the tool list as an unauthenticated caller sees it, so no
+  # caller's view decides another's. A tool absent from it (one a manual
+  # server lists only to some callers) is read from the caller's own list,
+  # uncached.
   defp annotated_params(server_module, conn, tool_name) do
-    server_module
-    |> annotations(conn)
-    |> Map.get(tool_name, [])
+    case Map.fetch(annotations(server_module, conn), tool_name) do
+      {:ok, params} ->
+        params
+
+      :error ->
+        case build_annotations(server_module, conn) do
+          {:ok, own} -> Map.get(own, tool_name, [])
+          :error -> []
+        end
+    end
   end
 
   defp annotations(server_module, conn) do
@@ -242,7 +261,7 @@ defmodule ConduitMcp.Plugs.HeaderValidation do
 
     case :persistent_term.get(key, nil) do
       nil ->
-        case build_annotations(server_module, conn) do
+        case build_annotations(server_module, neutral_conn(conn)) do
           {:ok, annotations} ->
             :persistent_term.put(key, annotations)
             annotations
@@ -255,6 +274,10 @@ defmodule ConduitMcp.Plugs.HeaderValidation do
         annotations
     end
   end
+
+  # No principal, assigns, headers or session: only the transport's config.
+  defp neutral_conn(conn),
+    do: %Plug.Conn{private: Map.drop(conn.private, [:mcp_session_id, :mcp_session_data])}
 
   defp build_annotations(server_module, conn) do
     if Code.ensure_loaded?(server_module) and
@@ -290,10 +313,7 @@ defmodule ConduitMcp.Plugs.HeaderValidation do
        when is_binary(name) and is_map(schema) do
     case Headers.validate_x_mcp_header(schema) do
       :ok ->
-        case Headers.header_params(schema) do
-          [] -> acc
-          params -> Map.put(acc, name, params)
-        end
+        Map.put(acc, name, Headers.header_params(schema))
 
       {:error, reasons} ->
         # Tool and annotation names with JSON Pointers only:
@@ -305,7 +325,7 @@ defmodule ConduitMcp.Plugs.HeaderValidation do
             "(conforming clients drop it): " <> Enum.join(reasons, "; ")
         )
 
-        acc
+        Map.put(acc, name, [])
     end
   end
 

@@ -295,6 +295,8 @@ defmodule ConduitMcp.TelemetryContractTest do
     :ok = stop_supervised({Client, modern})
     await_event(collector, [:conduit_mcp, :subscription, :stop])
 
+    stalled_subscription_flow()
+
     # Legacy: a timed-out call is cancelled by `notifications/cancelled`.
     legacy = start_http(url, auth, protocol: :legacy)
     key = HTTPServers.register_test()
@@ -452,6 +454,24 @@ defmodule ConduitMcp.TelemetryContractTest do
   end
 
   # --- janitors -------------------------------------------------------------------
+
+  # A listener that never reads: once its mailbox is at the cap, publish/2
+  # skips it with `:drop`.
+  defp stalled_subscription_flow do
+    uri = "test://stalled-#{System.unique_integer([:positive])}"
+    parent = self()
+
+    stalled =
+      spawn_link(fn ->
+        :ok = ConduitMcp.Subscriptions.subscribe([{:resource, uri}], make_ref())
+        send(parent, :subscribed)
+        receive do: (:stop -> :ok)
+      end)
+
+    assert_receive :subscribed, 1_000
+    for _ <- 0..ConduitMcp.Subscriptions.max_queue(), do: ConduitMcp.notify_resource_updated(uri)
+    send(stalled, :stop)
+  end
 
   defp janitor_flows(collector) do
     _removed = ConduitMcp.Cancellation.cleanup(60_000)

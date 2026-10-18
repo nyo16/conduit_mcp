@@ -24,6 +24,11 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
     validated exactly like a POST: an unknown session id is 404, a missing
     one 400. With sessions off it is **405**.
 
+  A legacy request (POST or DELETE) whose `Mcp-Session-Id` names a session
+  recorded for a different principal (`ConduitMcp.Principal.id/1`) gets the
+  same 404 as an unknown id: a session is usable, cancellable into and
+  endable only by the principal that created it.
+
   ## Protocol eras
 
   `POST /` serves both eras; the request body decides
@@ -250,26 +255,37 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
         conn
       end
     else
-      # Has session header — validate it exists in store
+      # Has session header — validate it exists in store. A session bound to
+      # another principal is answered exactly as an unknown one, so a
+      # borrowed id is no oracle and can neither use, cancel into, nor end
+      # the owner's session.
       case Session.get(session_id, store) do
         {:ok, session_data} ->
-          conn
-          |> Plug.Conn.put_private(:mcp_session_id, session_id)
-          |> Plug.Conn.put_private(:mcp_session_data, session_data)
+          if ConduitMcp.Era.bound_to_other_principal?(session_data, conn) do
+            session_not_found(conn)
+          else
+            conn
+            |> Plug.Conn.put_private(:mcp_session_id, session_id)
+            |> Plug.Conn.put_private(:mcp_session_data, session_data)
+          end
 
         {:error, :not_found} ->
-          conn
-          |> Shared.send_json(
-            404,
-            ConduitMcp.Protocol.error_response(
-              nil,
-              ConduitMcp.Protocol.invalid_request(),
-              "Session not found. Send an initialize request to create a new session."
-            )
-          )
-          |> halt()
+          session_not_found(conn)
       end
     end
+  end
+
+  defp session_not_found(conn) do
+    conn
+    |> Shared.send_json(
+      404,
+      ConduitMcp.Protocol.error_response(
+        nil,
+        ConduitMcp.Protocol.invalid_request(),
+        "Session not found. Send an initialize request to create a new session."
+      )
+    )
+    |> halt()
   end
 
   # --- routes -----------------------------------------------------------

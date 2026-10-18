@@ -81,14 +81,38 @@ defmodule ConduitMcp.Plugs.HeaderValidationTest do
     def handle_call_tool(_conn, _name, _args), do: {:ok, %{"content" => []}}
   end
 
+  # A manual server whose tool list depends on the caller (W-E5).
+  defmodule PerUserServer do
+    use ConduitMcp.Server, dsl: false
+
+    @impl true
+    def handle_list_tools(conn) do
+      public = %{"name" => "public", "inputSchema" => %{"type" => "object"}}
+
+      admin = %{
+        "name" => "admin_lookup",
+        "inputSchema" => %{
+          "type" => "object",
+          "properties" => %{"region" => %{"type" => "string", "x-mcp-header" => "Region"}}
+        }
+      }
+
+      tools = if ConduitMcp.Principal.id(conn) == "admin", do: [public, admin], else: [public]
+      {:ok, %{"tools" => tools}}
+    end
+
+    @impl true
+    def handle_call_tool(_conn, _name, _args), do: {:ok, %{"content" => []}}
+  end
+
   defp req(method, params, meta \\ @meta) do
     params = if meta, do: Map.put(params, "_meta", meta), else: params
     %{"jsonrpc" => "2.0", "id" => 1, "method" => method, "params" => params}
   end
 
-  defp run(request, headers, server \\ ParamServer) do
+  defp run(request, headers, server \\ ParamServer, base \\ conn(:post, "/", "")) do
     conn =
-      Enum.reduce(headers, conn(:post, "/", ""), fn {k, v}, c ->
+      Enum.reduce(headers, base, fn {k, v}, c ->
         %{c | req_headers: c.req_headers ++ [{k, v}]}
       end)
 
@@ -359,6 +383,26 @@ defmodule ConduitMcp.Plugs.HeaderValidationTest do
       HeaderValidation.invalidate(DynamicServer)
       mismatch!(run(request, hdrs, DynamicServer))
       refute run(request, hdrs ++ [{"mcp-param-region", "eu"}], DynamicServer).halted
+    end
+  end
+
+  describe "caller-dependent tool lists" do
+    setup do
+      HeaderValidation.invalidate(PerUserServer)
+      on_exit(fn -> HeaderValidation.invalidate(PerUserServer) end)
+    end
+
+    test "the first caller's view does not decide another caller's validation" do
+      as = fn id -> ConduitMcp.Principal.put(conn(:post, "/", ""), %{id: id}) end
+      request = call_req(%{"region" => "eu"}, "admin_lookup")
+      hdrs = std("tools/call", [{"mcp-name", "admin_lookup"}])
+
+      # bob cannot see the tool; his call builds the cache first.
+      refute run(request, hdrs, PerUserServer, as.("bob")).halted
+
+      mismatch!(run(request, hdrs, PerUserServer, as.("admin")))
+
+      refute run(request, hdrs ++ [{"mcp-param-region", "eu"}], PerUserServer, as.("admin")).halted
     end
   end
 

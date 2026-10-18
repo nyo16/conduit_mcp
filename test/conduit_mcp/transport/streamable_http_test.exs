@@ -689,6 +689,57 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
       assert allowed["result"]["resultType"] == "complete"
     end
 
+    # W-S3: a legacy request presenting a session bound to another principal
+    # is answered exactly as for an unknown session id, so the id is no oracle,
+    # and it cannot cancel the owner's requests nor end the session.
+    test "a legacy request or DELETE from another principal is answered as an unknown session" do
+      verify = fn
+        "alice-token" -> {:ok, %{id: "alice"}}
+        "mallory-token" -> {:ok, %{id: "mallory"}}
+        _ -> {:error, "invalid"}
+      end
+
+      opts =
+        StreamableHTTP.init(
+          server_module: TestServer,
+          session: [store: ConduitMcp.Session.EtsStore],
+          auth: [strategy: :function, verify: verify]
+        )
+
+      request = fn method, body, token, session_id ->
+        conn(method, "/", if(body, do: JSON.encode!(body), else: ""))
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("authorization", "Bearer " <> token)
+        |> then(&if(session_id, do: put_req_header(&1, "mcp-session-id", session_id), else: &1))
+        |> StreamableHTTP.call(opts)
+      end
+
+      init_conn = request.(:post, JSON.decode!(initialize_request_body()), "alice-token", nil)
+      [session_id] = get_resp_header(init_conn, "mcp-session-id")
+
+      list = %{"jsonrpc" => "2.0", "id" => 2, "method" => "tools/list"}
+
+      cancel = %{
+        "jsonrpc" => "2.0",
+        "method" => "notifications/cancelled",
+        "params" => %{"requestId" => 7}
+      }
+
+      unknown = request.(:post, list, "mallory-token", "no-such-session")
+      assert unknown.status == 404
+
+      for {method, body} <- [{:post, list}, {:post, cancel}, {:delete, nil}] do
+        conn = request.(method, body, "mallory-token", session_id)
+        assert {conn.status, conn.resp_body} == {404, unknown.resp_body}
+      end
+
+      assert {:ok, %{"principal" => "alice"}} =
+               ConduitMcp.Session.get(session_id, ConduitMcp.Session.EtsStore)
+
+      assert request.(:post, list, "alice-token", session_id).status == 200
+      assert request.(:delete, nil, "alice-token", session_id).status == 200
+    end
+
     test "require_session: true rejects non-initialize POST without session header" do
       opts =
         StreamableHTTP.init(
