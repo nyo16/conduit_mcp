@@ -11,7 +11,7 @@ ConduitMCP is an Elixir library implementing the [Model Context Protocol (MCP)](
 ```bash
 mix deps.get              # Install dependencies
 mix compile               # Compile
-mix test                  # Run all tests (~2,340: 2,236 tests, 61 doctests, 40 properties; includes :integration and :stdio)
+mix test                  # Run all tests (~2,360: 2,256 tests, 61 doctests, 40 properties; includes :integration and :stdio)
 mix test test/conduit_mcp/dsl_test.exs           # Run a single test file
 mix test test/conduit_mcp/dsl_test.exs:42        # Run a specific test line
 mix format                # Format code

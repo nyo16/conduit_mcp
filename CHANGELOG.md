@@ -208,11 +208,13 @@ Smaller behaviour changes worth knowing about:
 - The legacy SSE keep-alive frame changed from `": keepalive\n\n"` to
   `":\r\n"`, shared with the new response streams. Both are SSE comments
   that clients discard.
-- `ConduitMcp.Supervisor` starts three more children:
-  `ConduitMcp.Subscriptions` (a `Registry`), `ConduitMcp.Client.Registry` (a
-  `Registry`; no process per client) and
-  `ConduitMcp.Transport.SSEStream.Owner`, plus the `ConduitMcp.Ext.Tasks`
-  table owner and janitor when the tasks extension is enabled.
+- `ConduitMcp.Supervisor` starts four more children:
+  `ConduitMcp.Subscriptions` (a `Registry`),
+  `ConduitMcp.Subscriptions.Admission` (serializes listen admission per
+  principal), `ConduitMcp.Client.Registry` (a `Registry`; no process per
+  client) and `ConduitMcp.Transport.SSEStream.Owner`, plus the
+  `ConduitMcp.Ext.Tasks` table owner and janitor when the tasks extension is
+  enabled.
 - Sessions store a `"principal"` key, so a modern request carrying a legacy
   session id can be checked against the session's principal. Custom
   `ConduitMcp.Session.Store`s store whatever map they are given.
@@ -815,7 +817,7 @@ Smaller behaviour changes worth knowing about:
   `Logger.metadata()[:traceparent]`) is validated with the now-public
   `ConduitMcp.Era.traceparent/1` and sent in modern `_meta`; `tracestate` and
   `baggage` are never sent.
-- **Test coverage** expanded to 2 337 tests (2 236 tests, 61 doctests, 40
+- **Test coverage** expanded to 2 357 tests (2 256 tests, 61 doctests, 40
   properties; up from 745 in 0.10.1), including real-socket `:integration`
   and child-process `:stdio` tests that run in the default suite.
 - **Dependencies updated** (lock only; no requirement changed): hammer 7.5.0,
