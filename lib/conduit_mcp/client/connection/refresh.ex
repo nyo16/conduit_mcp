@@ -17,6 +17,11 @@ defmodule ConduitMcp.Client.Connection.Refresh do
   #     (HB-4): one due sooner waits for the second to pass, so a sustained
   #     storm costs one fetch per second per kind.
   #
+  # A list is written for the credential identity the refresh started under
+  # (HT-11): a private list is not written when that identity is
+  # `:unshared`, or changed while the fetch ran (the list then belongs to
+  # neither), and the kind's previous list is deleted instead.
+  #
   # Writing a tools list emits `[:conduit_mcp, :client, :tool,
   # :definition_changed]` for every known tool whose fingerprint changed.
 
@@ -135,7 +140,8 @@ defmodule ConduitMcp.Client.Connection.Refresh do
       again?: false,
       opts: opts,
       trigger: trigger,
-      started: System.monotonic_time()
+      started: System.monotonic_time(),
+      credential: Cache.credential(data.cache)
     }
 
     put_refresh(data, kind, refresh)
@@ -162,7 +168,7 @@ defmodule ConduitMcp.Client.Connection.Refresh do
     reply =
       case result do
         {:ok, listing} ->
-          store(kind, listing, data)
+          store(kind, listing, refresh.credential, data)
           if refresh.again?, do: Cache.mark_stale(data.cache, kind)
           {:ok, listing.items}
 
@@ -185,10 +191,17 @@ defmodule ConduitMcp.Client.Connection.Refresh do
       else: data
   end
 
-  defp store(kind, listing, data) do
-    if kind == :tools, do: report_changes(listing.items, data)
-    ttl = Cache.ttl(listing.ttl_ms, data.config.max_cache_ttl)
-    Cache.put_list(data.cache, kind, listing.items, ttl, System.monotonic_time(:millisecond))
+  defp store(kind, listing, credential, data) do
+    owner = if listing.scope == :public, do: :public, else: {:private, credential}
+
+    if Cache.servable?(owner, Cache.credential(data.cache)) do
+      if kind == :tools, do: report_changes(listing.items, data)
+      ttl = Cache.ttl(listing.ttl_ms, data.config.max_cache_ttl)
+      now = System.monotonic_time(:millisecond)
+      Cache.put_list(data.cache, kind, listing.items, ttl, now, owner)
+    else
+      Cache.drop_list(data.cache, kind)
+    end
   end
 
   defp report_changes(tools, data) do

@@ -69,15 +69,24 @@ defmodule ConduitMcp.Client.TaskRequestor do
 
   defp server_supports?(_view), do: false
 
-  # The tool's definition comes from the cache; a never-fetched list is
-  # fetched once first.
+  # The tool's definition comes from the cache; a never-fetched list (or
+  # one not cached for this credential, HT-11) is fetched once first.
   defp task_support(client, view, name, opts) do
-    if Cache.list(view.cache, :tools) == :miss do
-      _ = ConduitMcp.Client.list_all_tools(client, Keyword.take(opts, [:timeout]))
-    end
+    tool =
+      if Cache.list(view.cache, :tools) == :miss do
+        case ConduitMcp.Client.__list_all__(client, :tools, Keyword.take(opts, [:timeout])) do
+          {:ok, tools} -> Enum.find(tools, &(&1.name == name))
+          {:error, _} -> nil
+        end
+      else
+        case Cache.lookup(view.cache, :tools, name) do
+          {:ok, tool} -> tool
+          _miss -> nil
+        end
+      end
 
-    case Cache.lookup(view.cache, :tools, name) do
-      {:ok, %{execution: %{"taskSupport" => support}}} -> support
+    case tool do
+      %{execution: %{"taskSupport" => support}} -> support
       _other -> nil
     end
   end

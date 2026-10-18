@@ -163,6 +163,7 @@ defmodule ConduitMcp.Client.Connection do
 
   alias ConduitMcp.Client.Config
   alias ConduitMcp.Client.Connection.Authorize
+  alias ConduitMcp.Client.Connection.Credential
   alias ConduitMcp.Client.Connection.Data
   alias ConduitMcp.Client.Connection.Handshake
   alias ConduitMcp.Client.Connection.Inbound
@@ -534,6 +535,31 @@ defmodule ConduitMcp.Client.Connection do
 
   defp control(:authorized, mref, state, data), do: Authorize.authorized(mref, state, data)
   defp control(:oauth_session, mref, _state, data), do: Authorize.session(mref, data)
+
+  # `ConduitMcp.Client.set_auth/3`. Everything bound to the old credentials
+  # goes: requests in flight fail, listen streams and a legacy session end,
+  # an OAuth episode is abandoned. The new identity is recorded at once, so
+  # private cached lists are gone before the caller hears `:ok` (HT-11). A
+  # closed client stays closed with the new credentials.
+  defp control({:set_auth, auth, credential_id}, mref, state, data) do
+    case Credential.replace(data, auth, credential_id) do
+      {:ok, opts} ->
+        {data, actions} =
+          if state == :closed, do: {data, []}, else: Handshake.user_reconnect(data)
+
+        {transport, _old} = data.config.transport
+        config = %{data.config | transport: {transport, opts}}
+        data = Credential.sync(%{data | config: config, auth: Authorize.new(config)})
+        Requests.reply(mref, :ok)
+
+        if state == :closed,
+          do: {:keep_state, data},
+          else: {:next_state, :connecting, data, actions}
+
+      {:error, message} ->
+        reply(mref, {:error, {:invalid_auth, message}})
+    end
+  end
 
   defp control(_unknown, mref, _state, _data),
     do: reply(mref, {:error, Error.new(:protocol, :unknown_control_call)})

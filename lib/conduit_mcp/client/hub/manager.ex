@@ -4,9 +4,12 @@ defmodule ConduitMcp.Client.Hub.Manager do
   # `ConduitMcp.Client` started `restart: :temporary` under the hub's
   # DynamicSupervisor, so a crash-looping server never consumes that
   # supervisor's restart intensity: this process monitors it and starts it
-  # again after `restart_backoff.(attempt)` (jittered, capped at 5 minutes by
-  # default), which is the per-server circuit breaker. It is never on the
-  # request path and never runs hooks or approvers.
+  # again after `restart_backoff.(attempt)` (jittered, 1 s doubling to at
+  # most 30 s by default; ST-8), which is the per-server circuit breaker. A
+  # client gives up by itself after 3 restarts of its children in 5 s
+  # (its `:one_for_all` supervisor's intensity), and is then started again
+  # here. It is never on the request path and never runs hooks or
+  # approvers.
   #
   # State lives in the hub table (`ConduitMcp.Client.Hub.Table`), which the
   # hub supervisor created, so it survives a restart of this process: on
@@ -46,6 +49,7 @@ defmodule ConduitMcp.Client.Hub.Manager do
 
     state = %{
       hub: config.name,
+      config: config,
       table: table,
       dynsup: Registry.via({:hub_servers, config.name}),
       backoff: config.restart_backoff,
@@ -71,11 +75,16 @@ defmodule ConduitMcp.Client.Hub.Manager do
 
   @impl GenServer
   def handle_call({:add, id, client_config}, _from, state) do
-    case Table.server(state.table, id) do
-      {:ok, _row} ->
+    cond do
+      match?({:ok, _row}, Table.server(state.table, id)) ->
         {:reply, :ok, state}
 
-      :error ->
+      # ST-8: the cap counts every server the hub holds, running or not.
+      Config.stdio?(client_config) and
+          not Config.within_stdio_cap?(state.config, stdio_count(state) + 1) ->
+        {:reply, {:error, Client.Error.new(:overloaded, :max_stdio_servers)}, state}
+
+      true ->
         order = :ets.update_counter(state.table, :next_order, 1) - 1
         row = new_row(id, order, client_config, false)
         Table.put_server(state.table, row)
@@ -143,6 +152,9 @@ defmodule ConduitMcp.Client.Hub.Manager do
       :error -> state
     end
   end
+
+  defp stdio_count(state),
+    do: Enum.count(Table.servers(state.table), &Config.stdio?(&1.config))
 
   defp start(state, row) do
     spec = %{

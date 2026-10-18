@@ -243,6 +243,7 @@ defmodule ConduitMcp.Client.Pipeline do
       shape: own[:shape],
       opts: opts,
       subject: nil,
+      listed: nil,
       digest: nil,
       env: %{
         task_sup: view.task_sup,
@@ -267,8 +268,8 @@ defmodule ConduitMcp.Client.Pipeline do
   # --- steps -----------------------------------------------------------------------
 
   defp execute(s) do
-    with {:ok, tool} <- resolve(s),
-         s = %{s | tool: tool, subject: subject(tool, s.ctx)},
+    with {:ok, tool, listed} <- resolve(s),
+         s = %{s | tool: tool, listed: listed, subject: subject(tool, s.ctx)},
          :ok <- select(s) do
       {outcome, rounds} = governed(s)
       {finish(s, outcome), rounds}
@@ -277,10 +278,12 @@ defmodule ConduitMcp.Client.Pipeline do
     end
   end
 
-  # 1. Resolve.
+  # 1. Resolve. `listed` is the full list when one was fetched here: a
+  # private list fetched with an unshared credential is not cached (HT-11),
+  # so the tool and the baseline come from it, not from the cache.
   defp resolve(%{tool: %Tool{server_id: server_id, name: name} = tool, call: call})
        when server_id == call.server_id and name == call.name,
-       do: {:ok, tool}
+       do: {:ok, tool, nil}
 
   defp resolve(%{tool: %Tool{} = tool, call: call}) do
     raise ArgumentError,
@@ -291,15 +294,16 @@ defmodule ConduitMcp.Client.Pipeline do
   defp resolve(%{view: view, call: call} = s) do
     case Cache.lookup(view.cache, :tools, call.name) do
       {:ok, tool} ->
-        {:ok, tool}
+        {:ok, tool, nil}
 
       :miss ->
-        # Never listed, or listed before a `list_changed`: list once more.
+        # Never listed, listed before a `list_changed`, or not cached for
+        # this credential: list once more.
         if relist?(view.cache) do
-          with {:ok, _tools} <- Client.__list_all__(s.client, :tools, list_opts(s.opts)) do
-            case Cache.lookup(view.cache, :tools, call.name) do
-              {:ok, tool} -> {:ok, tool}
-              _miss -> unknown()
+          with {:ok, tools} <- Client.__list_all__(s.client, :tools, list_opts(s.opts)) do
+            case Enum.find(tools, &(&1.name == call.name)) do
+              %Tool{} = tool -> {:ok, tool, tools}
+              nil -> unknown()
             end
           end
         else
@@ -348,11 +352,11 @@ defmodule ConduitMcp.Client.Pipeline do
 
   defp fingerprints(%{gov: gov, tool: tool, ctx: ctx} = s) do
     # The first governed call before any full listing records the baseline
-    # (the cached list was just fetched by `resolve/1`).
+    # (the list was just fetched by `resolve/1`).
     if Governance.needs_baseline?(gov) do
-      case Cache.list(s.view.cache, :tools) do
-        {:ok, entry} -> Governance.record_baseline(gov, entry.items)
-        _none -> :ok
+      case s.listed || cached_list(s.view.cache) do
+        nil -> :ok
+        tools -> Governance.record_baseline(gov, tools)
       end
     end
 
@@ -370,6 +374,13 @@ defmodule ConduitMcp.Client.Pipeline do
 
   defp grant_key(%{ctx: ctx, tool: tool}, fingerprint),
     do: {ctx.principal, tool.server_id, tool.name, fingerprint}
+
+  defp cached_list(cache) do
+    case Cache.list(cache, :tools) do
+      {:ok, entry} -> entry.items
+      _none -> nil
+    end
+  end
 
   # 4. Pre-hooks.
   defp pre_hooks(s) do
@@ -535,7 +546,7 @@ defmodule ConduitMcp.Client.Pipeline do
 
   # 9 and 10. Send (with the MRTR loop), then output-schema validation.
   defp send_call(s, params) do
-    {result, rounds} = Client.__send_tool_call__(s.client, s.view, params, s.mode, s.opts)
+    {result, rounds} = Client.__send_tool_call__(s.client, s.view, params, s.mode, s.opts, s.tool)
 
     case result do
       {:ok, %ToolResult{is_error: false} = result} -> {validate_output(s, result), rounds}

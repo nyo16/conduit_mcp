@@ -86,6 +86,7 @@ Other control functions:
 | `instructions_for_llm/1` | The server's `instructions`, prepared for a model's context. `{:ok, nil}` unless the client has `include_instructions: true` (see [client_security.md](client_security.md)) |
 | `close/1` | Fails pending requests with `kind: :closed` and stays `:closed` until `reconnect/1` |
 | `reconnect/1` | Drops the connection (pending requests fail with `kind: :transport`) and connects again at once. Also revives a `:closed` client |
+| `set_auth/3` | Replaces the credentials (any `:auth` form) and reconnects; private cached results of other credentials are dropped (see "Private results and credentials") |
 
 ## Protocol negotiation
 
@@ -532,10 +533,41 @@ ETS table that callers read directly.
   :not_cached}}` before the first listing.
 - Multi-round-trip interim results and retries are never cached.
 
-The cache is per client, and a client holds one credential. A server's
-`cacheScope: "private"` means answers may differ per credential, so **run
-one client per credential** (one per user) when they differ. A `:name` like
-`{MyApp.GitHub, user_id}` makes that easy.
+### Private results and credentials
+
+A server's `cacheScope: "private"` means an answer may differ per
+credential; a missing `cacheScope` (every legacy result) counts as private,
+and a list is public only when every page says `"public"`. A private list is
+cached together with the identity of the credentials it was fetched with,
+and served only while the client still sends those. When they change it is
+deleted at once and fetched again under the new ones; public lists stay.
+
+| `:auth` | Identity |
+|---|---|
+| none | none: private lists are cached as usual |
+| `{:bearer, token}` | the SHA-256 of the token; a new token is a new identity |
+| `{:oauth, opts}`, `{:client_credentials, opts}` | the `{principal, issuer, resource}` key the tokens are stored under, so refreshing the token keeps the cache and another `:principal` does not |
+| a function, with `:credential_id` | the `:credential_id` you declare: whose tokens the function returns |
+| a function, no `:credential_id` | unknown: the function runs before every request and may return anyone's token, so private results are **never** served from the cache. Every `list_all_*` asks the server, `cached_tools/2` and `tool/3` see no private list, a call fetches the tool list it needs, and a hub fetches the server's tools on every listing |
+
+The identity is a digest, never a token. Change credentials at runtime with
+`ConduitMcp.Client.set_auth/3`:
+
+```elixir
+:ok = ConduitMcp.Client.set_auth(:docs, {:bearer, new_token})
+:ok = ConduitMcp.Client.set_auth(:docs, &MyApp.Tokens.fetch/1, credential_id: {:service, :reporting})
+```
+
+It takes any `:auth` form (OAuth options without `:store` keep the
+client's store; change `:principal` to act for another user), reconnects
+(requests in flight fail with `kind: :transport`, listen streams and a
+legacy session close) and drops the private lists before it returns. It
+lasts as long as the client process: a client restarted by its supervisor
+uses its configured credentials again.
+
+Grants and the approval baseline are per client, not per credential: to
+serve several users, pass `principal:` on calls (grants are keyed by it) or
+run one client per user, named like `{MyApp.GitHub, user_id}`.
 
 ## Streamable HTTP
 
@@ -561,7 +593,8 @@ it starts.
 | Option | Default | Meaning |
 |---|---|---|
 | `:url` | required | The MCP endpoint: an absolute `http`/`https` URL, no user info, no fragment |
-| `:auth` | `nil` | `{:bearer, token}` (a string or a `ConduitMcp.Client.Secret`), or a one-arity function called before each request with `%{url: url, method: method}`, returning `{:ok, token}`, `{:ok, nil}` or `{:error, reason}` (the request fails with `kind: :auth`), or `{:oauth, opts}` / `{:client_credentials, opts}` ([client_oauth.md](client_oauth.md)). Never sent over `http` to a non-loopback host: that configuration raises |
+| `:auth` | `nil` | `{:bearer, token}` (a string or a `ConduitMcp.Client.Secret`), or a one-arity function called before each request with `%{url: url, method: method}`, returning `{:ok, token}`, `{:ok, nil}` or `{:error, reason}` (the request fails with `kind: :auth`), or `{:oauth, opts}` / `{:client_credentials, opts}` ([client_oauth.md](client_oauth.md)). Never sent over `http` to a non-loopback host: that configuration raises. Replace it at runtime with `ConduitMcp.Client.set_auth/3` |
+| `:credential_id` | `nil` | With an `:auth` function only: any term naming whose tokens it returns, so private results are cached for that identity (see "Private results and credentials"). Without it they are never served from the cache |
 | `:headers` | `[]` | Extra `{name, value}` headers; a value may be a `Secret`. Headers the transport owns (`accept`, `authorization`, `content-type`, `mcp-*`, `last-event-id`, hop-by-hop) are refused |
 | `:finch` | `nil` | The name of a `Finch` pool you started |
 | `:pool_size` | 100 | Connections in the library-started pool. Each open event stream holds one |

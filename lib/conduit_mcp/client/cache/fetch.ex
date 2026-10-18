@@ -36,6 +36,7 @@ defmodule ConduitMcp.Client.Cache.Fetch do
           rejected: non_neg_integer(),
           next_cursor: String.t() | nil,
           ttl_ms: non_neg_integer(),
+          scope: :public | :private,
           seen: MapSet.t()
         }
 
@@ -43,7 +44,8 @@ defmodule ConduitMcp.Client.Cache.Fetch do
           items: [term()],
           pages: pos_integer(),
           rejected: non_neg_integer(),
-          ttl_ms: non_neg_integer()
+          ttl_ms: non_neg_integer(),
+          scope: :public | :private
         }
 
   @doc "The pagination caps."
@@ -89,6 +91,7 @@ defmodule ConduitMcp.Client.Cache.Fetch do
          rejected: rejected,
          next_cursor: next_cursor(result),
          ttl_ms: ttl_hint(result),
+         scope: scope_hint(result),
          seen: seen
        }}
     end
@@ -99,13 +102,24 @@ defmodule ConduitMcp.Client.Cache.Fetch do
 
   @doc """
   Fetches every page of `kind`. `ttl_ms` is the smallest `ttlMs` hint over
-  the pages (0 when any page has none); the caller clamps it.
+  the pages (0 when any page has none); the caller clamps it. `scope` is
+  `:public` only when every page said `cacheScope: "public"` (HT-11).
   """
   @spec all(term(), Intake.kind(), keyword()) :: {:ok, listing()} | {:error, Error.t()}
   def all(client, kind, opts) do
     with {:ok, _pid, view} <- Request.lookup(client) do
       ctx = context(client, view)
-      acc = %{items: [], count: 0, pages: 0, rejected: 0, ttl_ms: nil, seen: MapSet.new()}
+
+      acc = %{
+        items: [],
+        count: 0,
+        pages: 0,
+        rejected: 0,
+        ttl_ms: nil,
+        scope: :public,
+        seen: MapSet.new()
+      }
+
       loop(client, kind, nil, %{}, opts, ctx, acc)
     end
   end
@@ -120,6 +134,7 @@ defmodule ConduitMcp.Client.Cache.Fetch do
           pages: acc.pages + 1,
           rejected: acc.rejected + page.rejected,
           ttl_ms: min_ttl(acc.ttl_ms, page.ttl_ms),
+          scope: if(page.scope == :public, do: acc.scope, else: :private),
           seen: page.seen
       }
 
@@ -130,7 +145,8 @@ defmodule ConduitMcp.Client.Cache.Fetch do
              items: acc.items |> Enum.reverse() |> Enum.concat(),
              pages: acc.pages,
              rejected: acc.rejected,
-             ttl_ms: acc.ttl_ms
+             ttl_ms: acc.ttl_ms,
+             scope: acc.scope
            }}
 
         {:next, cursor} ->
@@ -160,6 +176,11 @@ defmodule ConduitMcp.Client.Cache.Fetch do
 
   defp ttl_hint(%{"ttlMs" => ttl}) when is_integer(ttl) and ttl >= 0, do: ttl
   defp ttl_hint(_result), do: 0
+
+  # Anything but "public" (absent included, so every legacy result) is
+  # private: the scope that never shares across credentials.
+  defp scope_hint(%{"cacheScope" => "public"}), do: :public
+  defp scope_hint(_result), do: :private
 
   defp next_cursor(%{"nextCursor" => cursor}) when is_binary(cursor), do: cursor
   defp next_cursor(_result), do: nil

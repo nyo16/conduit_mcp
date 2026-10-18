@@ -25,7 +25,8 @@ defmodule ConduitMcp.Client.Error do
     * `:hook` - a pre- or post-hook failed (fail closed).
     * `:unavailable` - the connection or its cache is gone.
     * `:closed` - the client was closed.
-    * `:overloaded` - in-flight or queue limits were reached.
+    * `:overloaded` - in-flight or queue limits were reached, or a hub's
+      `:max_stdio_servers`.
     * `:input_handler` - a `ConduitMcp.Client.Handler` callback failed during MRTR.
     * `:auth` - authorization is required or failed.
     * `:rate_limited` - the server or a local limiter rejected the request.
