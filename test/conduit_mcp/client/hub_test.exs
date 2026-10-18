@@ -376,7 +376,7 @@ defmodule ConduitMcp.Client.HubTest do
                ConduitMcp.Client.Registry.lookup({:supervisor, Hub.client(hub, "alpha")})
 
       assert new != old
-      assert names(hub) == ["alpha__echo", "beta__echo"]
+      await_listed(hub, ["alpha__echo", "beta__echo"])
     end
 
     test "a crash-looping server never takes the hub down", %{hub: hub} do
@@ -389,7 +389,7 @@ defmodule ConduitMcp.Client.HubTest do
       end
 
       assert Process.alive?(hub_pid)
-      assert names(hub) == ["alpha__echo", "beta__echo"]
+      await_listed(hub, ["alpha__echo", "beta__echo"])
     end
 
     test "the manager restarts without restarting servers or losing added ones", %{hub: hub} do
@@ -419,7 +419,7 @@ defmodule ConduitMcp.Client.HubTest do
       # Still monitored: a crash after the manager's restart is noticed.
       killed = kill_server(hub, "alpha")
       await_replaced(hub, "alpha", killed)
-      assert names(hub) == ["alpha__echo", "beta__echo"]
+      await_listed(hub, ["alpha__echo", "beta__echo"])
     end
   end
 
@@ -523,5 +523,14 @@ defmodule ConduitMcp.Client.HubTest do
     end)
 
     await_servers(hub, [id])
+  end
+
+  # Right after a restart the Registry can still serve the killed client's
+  # entry (its cache table gone), and the hub leaves that server out until
+  # the replacement's entry is visible: the listing converges, so wait for
+  # it rather than asserting the first read.
+  defp await_listed(hub, expected) do
+    eventually(fn -> names(hub) == expected end)
+    assert names(hub) == expected
   end
 end
