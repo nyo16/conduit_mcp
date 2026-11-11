@@ -4,6 +4,7 @@ defmodule ConduitMcp.Plugs.OAuthTest do
   import Plug.Conn
 
   alias ConduitMcp.Plugs.OAuth
+  alias ConduitMcp.Plugs.OAuth.Claims
   alias ConduitMcp.TelemetryTestHelper
 
   @auth_event [:conduit_mcp, :auth, :verify]
@@ -509,6 +510,39 @@ defmodule ConduitMcp.Plugs.OAuthTest do
       assert_receive {@auth_event, ^ref, _measurements, %{status: :error, reason: :not_yet_valid}}
     end
 
+    test "a token whose nbf has passed is accepted" do
+      token = sign_token(%{"nbf" => System.system_time(:second) - 60})
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> OAuth.call(@oauth_opts)
+
+      refute result.halted
+      assert result.assigns[:current_user]
+    end
+
+    # Joken's default claims reject these first, so only a direct call
+    # reaches the plug's own second line of checks.
+    test "the plug's own claim checks reject a future or malformed nbf and a wrong issuer" do
+      now = System.system_time(:second)
+      issuer = "https://auth.example.com"
+      audience = "https://mcp.example.com"
+
+      claims = %{"iss" => issuer, "aud" => audience, "sub" => "user-123", "exp" => now + 60}
+
+      assert {:ok, _} = Claims.validate(Map.put(claims, "nbf", now - 60), issuer, audience)
+
+      assert {:error, :not_yet_valid} =
+               Claims.validate(Map.put(claims, "nbf", now + 3600), issuer, audience)
+
+      assert {:error, :not_yet_valid} =
+               Claims.validate(Map.put(claims, "nbf", "soon"), issuer, audience)
+
+      assert {:error, :invalid_issuer} =
+               Claims.validate(%{claims | "iss" => "https://other.example"}, issuer, audience)
+    end
+
     test "wrong issuer reports :invalid_issuer, not :invalid_signature" do
       ref = TelemetryTestHelper.attach_event_handlers(self(), [@auth_event])
       token = sign_token(%{"iss" => "https://wrong-issuer.com"})
@@ -720,6 +754,40 @@ defmodule ConduitMcp.Plugs.OAuthTest do
 
       refute result.halted
       assert result.assigns[:oauth_claims]["sub"] == "ec-user"
+    end
+
+    # S2: every provider's key is stripped to its public members before the
+    # signer is built, not only the JWKS provider's. A private member the
+    # verifier never needs (here a malformed `p`) makes jose raise on parse.
+    test "a provider's private RSA JWK verifies through its public members only" do
+      private = Map.put(@rsa_key_map, "p", "!!")
+
+      opts =
+        OAuth.init(
+          issuer: "https://auth.example.com",
+          audience: "https://mcp.example.com",
+          key_provider: {ConduitMcp.OAuth.KeyProvider.Static, keys: [private]}
+        )
+
+      result =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer #{sign_token(%{})}")
+        |> OAuth.call(opts)
+
+      refute result.halted
+      assert result.assigns[:oauth_claims]["sub"] == "user-123"
+    end
+
+    test "KeyProvider.public_key/1 drops private members of RSA, EC and OKP keys, not oct" do
+      for spec <- [{:rsa, 1024}, {:ec, "P-256"}, {:okp, :Ed25519}] do
+        jwk = JOSE.JWK.generate_key(spec)
+        {_, private} = JOSE.JWK.to_map(jwk)
+        {_, public} = jwk |> JOSE.JWK.to_public() |> JOSE.JWK.to_map()
+        assert ConduitMcp.OAuth.KeyProvider.public_key(private) == public
+      end
+
+      oct = %{"kty" => "oct", "k" => "c2VjcmV0", "kid" => "hmac"}
+      assert ConduitMcp.OAuth.KeyProvider.public_key(oct) == oct
     end
   end
 

@@ -467,6 +467,9 @@ defmodule ConduitMcp.Client.Config do
     :clock
   ]
 
+  # The transport options may hold credentials (`:auth`, `:headers`, `:env`);
+  # `:assigns` is host data.
+  @derive {Inspect, except: [:transport, :assigns]}
   @enforce_keys [:name, :server_id, :transport, :protocol, :probe_timeout, :client_info]
   defstruct [
     :name,
@@ -594,8 +597,25 @@ defmodule ConduitMcp.Client.Config do
 
   def new!(other) do
     raise ArgumentError,
-          "ConduitMcp.Client options must be a keyword list, got: #{inspect(other)}"
+          "ConduitMcp.Client options must be a keyword list, got #{describe(other)}"
   end
+
+  @doc false
+  # The shape of an option term, never its contents: options may hold
+  # credentials, so error messages describe what was received instead of
+  # printing it.
+  @spec describe(term()) :: String.t()
+  def describe(%module{}), do: "a #{inspect(module)} struct"
+  def describe(term) when is_map(term), do: "a map"
+  def describe([]), do: "an empty list"
+  def describe(term) when is_list(term), do: "a list"
+  def describe(term) when is_tuple(term), do: "a #{tuple_size(term)}-element tuple"
+  def describe(term) when is_binary(term), do: "a string"
+  def describe(term) when is_atom(term), do: "an atom"
+  def describe(term) when is_number(term), do: "a number"
+  def describe(term) when is_function(term), do: "a function"
+  def describe(term) when is_bitstring(term), do: "a bitstring"
+  def describe(_term), do: "a pid, port or reference"
 
   # `roots.listChanged` (legacy only) is promised when configured: the host
   # announces changes with `ConduitMcp.Client.notify_roots_changed/1`.
@@ -654,7 +674,9 @@ defmodule ConduitMcp.Client.Config do
   def validate_transport({module, opts} = transport) when is_atom(module) and is_list(opts) do
     cond do
       not Keyword.keyword?(opts) ->
-        {:error, "expected the transport options to be a keyword list, got: #{inspect(opts)}"}
+        {:error,
+         "expected the transport options to be a keyword list, got a list whose " <>
+           "entries are not all {atom, value} pairs"}
 
       not Code.ensure_loaded?(module) ->
         {:error, "#{inspect(module)} is not an available module"}
@@ -673,8 +695,11 @@ defmodule ConduitMcp.Client.Config do
     end
   end
 
+  def validate_transport({module, opts}) when is_atom(module),
+    do: {:error, "expected {module, keyword_opts}, got {#{inspect(module)}, #{describe(opts)}}"}
+
   def validate_transport(other),
-    do: {:error, "expected {module, keyword_opts}, got: #{inspect(other)}"}
+    do: {:error, "expected {module, keyword_opts}, got #{describe(other)}"}
 
   @doc false
   @spec validate_protocol(term()) :: {:ok, protocol()} | {:error, String.t()}

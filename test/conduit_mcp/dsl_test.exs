@@ -1330,4 +1330,48 @@ defmodule ConduitMcp.DSLTest do
       assert_raise ArgumentError, ~r/URL or base64/, fn -> image(42) end
     end
   end
+
+  describe "a param type NimbleOptions does not know" do
+    # The DSL passes param types through unchecked and only warns at compile
+    # time when NimbleOptions rejects the schema, so such a server compiled
+    # and its tools ran (with runtime validation off, or called directly).
+    # Precompiling the validation schema must not turn that into a compile
+    # error.
+    test "still compiles, and the tool still runs" do
+      module = Module.concat(__MODULE__, "DateParam#{System.unique_integer([:positive])}")
+
+      source = """
+      defmodule #{inspect(module)} do
+        use ConduitMcp.Server
+
+        tool "when", "Takes a date" do
+          param(:on, :date, "A date")
+          handle(fn _conn, _params -> text("ok") end)
+        end
+      end
+      """
+
+      ExUnit.CaptureLog.capture_log(fn -> Code.compile_string(source) end)
+
+      assert {:ok, %{"tools" => [%{"name" => "when"}]}} = module.handle_list_tools(%Plug.Conn{})
+
+      assert {:ok, %{"content" => [%{"text" => "ok"}]}} =
+               module.handle_call_tool(%Plug.Conn{}, "when", %{"on" => "2026-11-10"})
+
+      # Not precompiled: NimbleOptions rejects the schema, so it stays a list.
+      assert {_full, [on: _]} = module.__validation_schema_for_tool__("when")
+    end
+  end
+
+  describe "precompiled validation schema" do
+    # Compiled once at compile time, so a call does not rebuild it (a
+    # performance property no behavioural test can see).
+    test "a DSL tool's schema is {full, %NimbleOptions{}}" do
+      assert {full, %NimbleOptions{schema: clean}} =
+               DSLTestServer.__validation_schema_for_tool__("simple")
+
+      assert Keyword.keys(full) == [:message]
+      assert Keyword.keys(clean) == [:message]
+    end
+  end
 end

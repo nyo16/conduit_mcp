@@ -38,7 +38,7 @@ defmodule ConduitMcp.Telemetry do
                   []},
                  {[:conduit_mcp, :cancellation, :janitor], [:removed], [:store], []},
                  {[:conduit_mcp, :session, :cleanup], [:removed], [:store], []},
-                 {[:conduit_mcp, :tasks, :cleanup], [:removed], [], []},
+                 {[:conduit_mcp, :tasks, :cleanup], [:removed], [:store], []},
                  {[:conduit_mcp, :mrtr, :input_required], [:count],
                   [:method, :server_module, :round], []},
                  {[:conduit_mcp, :client, :request, :start], span_start, client ++ [:method], []},
@@ -515,11 +515,13 @@ defmodule ConduitMcp.Telemetry do
 
   #### `[:conduit_mcp, :tasks, :cleanup]`
 
-  From `ConduitMcp.Tasks.Janitor` sweeping terminal tasks.
+  From `ConduitMcp.Tasks.Janitor`, and from the tasks janitor
+  `ConduitMcp.Application` starts (a `ConduitMcp.Session.Janitor` over
+  `ConduitMcp.Tasks`), sweeping terminal tasks.
 
   **Measurements:** `:removed` (integer) - Tasks evicted.
 
-  **Metadata:** none (`%{}`).
+  **Metadata:** `:store` (module) - `ConduitMcp.Tasks`.
 
   ### Client Events
 

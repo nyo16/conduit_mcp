@@ -40,6 +40,16 @@ defmodule ConduitMcp.Application do
       `config :conduit_mcp, :session_janitor, ttl: ..., interval: ...`.
     * `ConduitMcp.Tasks.EtsStore.Owner` — started only when the default
       in-memory tasks store is in use (skipped for a custom `:tasks_store`).
+    * A tasks janitor (`ConduitMcp.Session.Janitor` over `ConduitMcp.Tasks`,
+      registered as `ConduitMcp.Tasks.Janitor.Default` so it cannot collide
+      with a `ConduitMcp.Tasks.Janitor` you start yourself) — always started;
+      removes terminal tasks older than one hour, every five minutes. The
+      default store's row cap counts terminal tasks, so without a sweep they
+      fill it. Disable with `config :conduit_mcp, :tasks_janitor, false`, or
+      tune it with `config :conduit_mcp, :tasks_janitor, ttl: ..., interval: ...`.
+      Every sweep runs over the same tasks, so the shortest `ttl` wins: a host
+      running its own `ConduitMcp.Tasks.Janitor` with a longer `ttl` must set
+      this one's `ttl` too, or disable it.
     * `ConduitMcp.Ext.Tasks.EtsStore.Owner` and the Ext.Tasks janitor (a
       `ConduitMcp.Session.Janitor` named `ConduitMcp.Ext.Tasks.Janitor`) —
       only when `config :conduit_mcp, :ext_tasks` enables the experimental
@@ -129,11 +139,9 @@ defmodule ConduitMcp.Application do
   # not optional: without it the only bound is the row cap in
   # `ConduitMcp.Session.EtsStore.create/2`.
   #
-  # The 30-minute default is `Session.Janitor`'s, not the transport's. A
-  # consumer who set `session: [ttl: :timer.hours(4)]` on the transport gets
-  # rows swept at 30 minutes anyway - shortest sweep wins, and the janitor
-  # cannot see per-transport config. Configure the same TTL here, or `false` to
-  # run your own janitor:
+  # The 30-minute default is `Session.Janitor`'s; the transports have no
+  # session TTL (`session: [ttl: ...]` is ignored, with a warning at boot).
+  # Configure the TTL here, or `false` to run your own janitor:
   #
   #     config :conduit_mcp, session_janitor: [ttl: :timer.hours(4)]
   #     config :conduit_mcp, session_janitor: false
@@ -191,15 +199,29 @@ defmodule ConduitMcp.Application do
             "list of ConduitMcp.Session.Janitor options; got #{inspect(other)}"
   end
 
-  # When the default in-memory store is configured (or no store is
-  # configured), also start the Tasks ETS owner. If the user has wired
-  # a custom :tasks_store, skip — they don't need our table.
-  defp tasks_children do
-    if Application.get_env(:conduit_mcp, :tasks_store, Tasks.EtsStore) == Tasks.EtsStore do
-      [Tasks.EtsStore.Owner]
-    else
-      []
-    end
+  @doc false
+  # The Tasks ETS owner, when the default in-memory store is configured (or
+  # no store is): a custom :tasks_store doesn't need our table. Then the tasks
+  # janitor, for any store: `ConduitMcp.Tasks.cleanup/1` dispatches to the
+  # configured store and returns 0 for one without `cleanup/1`. Public (but
+  # undocumented) so the config contract can be tested without restarting
+  # the application.
+  def tasks_children do
+    owner =
+      if Application.get_env(:conduit_mcp, :tasks_store, Tasks.EtsStore) == Tasks.EtsStore,
+        do: [Tasks.EtsStore.Owner],
+        else: []
+
+    defaults = [
+      store: Tasks,
+      ttl: :timer.hours(1),
+      interval: :timer.minutes(5),
+      name: Tasks.Janitor.Default,
+      telemetry_event: [:conduit_mcp, :tasks, :cleanup],
+      noun: "terminal tasks"
+    ]
+
+    owner ++ janitor(:tasks_janitor, defaults, Tasks.Janitor.Default)
   end
 
   @doc false

@@ -102,9 +102,10 @@ defmodule ConduitMcp.OptionalDepsTest do
 
     test "raise naming the missing dependency when the module is absent" do
       for {check, deps} <- [
-            {&OptionalDeps.oauth_plug!/1, [{:joken, "~> 2.6"}, {:jose, "~> 1.11"}]},
+            {&OptionalDeps.oauth_plug!/1,
+             [{:joken, "~> 2.6"}, {:jose, "~> 1.11 and >= 1.11.13"}]},
             {&OptionalDeps.oauth_client!/1, [{:finch, "~> 0.21"}]},
-            {&OptionalDeps.client_assertion!/1, [{:jose, "~> 1.11"}]}
+            {&OptionalDeps.client_assertion!/1, [{:jose, "~> 1.11 and >= 1.11.13"}]}
           ] do
         error = assert_raise OptionalDependencyError, fn -> check.(ConduitMcp.NoSuchModule) end
         assert error.deps == deps

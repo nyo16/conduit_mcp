@@ -8,8 +8,8 @@ methods introduced in spec 2025-11-25.
 
 - Declaring a tool with `task_support :supported` so clients know it may
   return a task id instead of an inline result.
-- Using `ConduitMcp.Tasks` (`create/2`, `update/2`) to track lifecycle state
-  in ETS without writing your own store.
+- Using `ConduitMcp.Tasks` (`create/3` with the caller as owner, `update/2`)
+  to track lifecycle state in ETS without writing your own store.
 - Spawning the actual work on a `Task.Supervisor` so it outlives the HTTP
   request.
 - Cooperatively cancelling via `ConduitMcp.Cancellation` and/or polling the
@@ -20,8 +20,9 @@ methods introduced in spec 2025-11-25.
 
 - `server.ex` — defines `Examples.AsyncTasksServer` with two tools:
   `quick_echo` (synchronous) and `slow_render` (async via task).
-- `application.ex` — wires Bandit, a `Task.Supervisor` for the workers,
-  and `ConduitMcp.Tasks.Janitor` for periodic cleanup of completed tasks.
+- `application.ex` — wires Bandit and a `Task.Supervisor` for the workers.
+  Terminal tasks are swept by the tasks janitor `:conduit_mcp` itself starts
+  (`config :conduit_mcp, :tasks_janitor`).
 
 ## Run
 

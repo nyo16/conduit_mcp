@@ -56,7 +56,10 @@ defmodule ConduitMcp.Session.EtsStore do
 
       {ConduitMcp.Transport.StreamableHTTP,
        server_module: MyServer,
-       session: [store: ConduitMcp.Session.EtsStore, ttl: :timer.minutes(60)]}
+       session: [store: ConduitMcp.Session.EtsStore]}
+
+  The session TTL is the janitor's:
+  `config :conduit_mcp, :session_janitor, ttl: :timer.minutes(60)`.
   """
 
   @behaviour ConduitMcp.Session.Store

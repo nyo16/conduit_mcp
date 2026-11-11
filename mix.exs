@@ -1,7 +1,7 @@
 defmodule ConduitMcp.MixProject do
   use Mix.Project
 
-  @version "0.11.0"
+  @version "0.11.1"
   @source_url "https://github.com/nyo16/conduit_mcp"
 
   def project do
@@ -62,19 +62,19 @@ defmodule ConduitMcp.MixProject do
       # CVE-2026-56813 and CVE-2026-56814. 1.20.3 is the first release clear
       # of all of them.
       {:plug, "~> 1.20 and >= 1.20.3"},
-      # 1.13.1 is a security floor. 1.12.5 carries EEF-CVE-2026-105659 (HIGH,
-      # an HTTP/2 blocked-send deadline that every WINDOW_UPDATE resets, so a
-      # trickling peer pins stream processes indefinitely) and
-      # EEF-CVE-2026-105660 (MEDIUM, an unvalidated HTTP/1 request-target
-      # authority lets the client choose `conn.host`/`conn.port`). Older
-      # releases also carry CVE-2026-74836 and CVE-2026-75484.
-      {:bandit, "~> 1.13 and >= 1.13.1"},
-      # Not used directly: Bandit's HTTP/2 stack depends on it. Declared only
-      # to put a security floor under it, since Bandit's own requirement still
-      # admits hpax 1.0.0-1.0.3 (CVE-2026-58226, unauthenticated HPACK decoding
-      # DoS). `optional: true` adds no dependency for consumers; Mix applies
-      # this requirement whenever Bandit brings hpax in.
-      {:hpax, "~> 1.0 and >= 1.0.4", optional: true},
+      # Called directly (`Plug.Crypto.secure_compare/2`). 2.2.1 is a security
+      # floor: earlier releases carry EEF-CVE-2026-105963 (a wrong-typed argument
+      # puts the secret in the stack trace). This library only passes binaries,
+      # but the consumer's own `Plug.Crypto`/`Phoenix.Token` calls share the package.
+      {:plug_crypto, "~> 2.2 and >= 2.2.1"},
+      # 1.14.1 is a security floor. 1.13.1 carries twelve advisories published
+      # 2026-10-26/28, ten of them HIGH and most reachable before authentication:
+      # EEF-CVE-2026-111101 and -116078 (1-byte chunks / DATA frames behind
+      # `Plug.Parsers`), -113436 (quadratic Content-Length parsing), -108525,
+      # -108529, -109584, -110499, -111103 and -115269 (HTTP/2 flow control, HPACK
+      # and SETTINGS), -114216 (chunk-extension request smuggling). 1.14.0 fixes
+      # eleven; 1.14.1 is the first release clear of -116078.
+      {:bandit, "~> 1.14 and >= 1.14.1"},
       {:nimble_options, "1.1.1"},
 
       # Optional: Rate limiting (only needed if using ConduitMcp.Plugs.RateLimit)
@@ -82,32 +82,45 @@ defmodule ConduitMcp.MixProject do
 
       # Optional: Prometheus metrics via PromEx
       {:prom_ex, "~> 1.11", optional: true},
+      # Not used directly: prom_ex -> octo_fetch declares it. Declared only to put
+      # a security floor under it: 1.1.0-1.1.7 carry EEF-CVE-2026-117666 (CRITICAL,
+      # a partial-label wildcard matches across a label boundary). `optional: true`
+      # adds nothing for consumers without prom_ex.
+      {:ssl_verify_fun, "~> 1.1 and >= 1.1.8", optional: true},
 
       # Optional: HTTP client for JWKS key fetching (only needed for JWKS key provider).
       # 0.6.1 is a security floor: earlier versions carry an unbounded-
-      # decompression advisory the JWKS provider can reach. Expressed as a
-      # union rather than `"~> 0.6 and >= 0.6.1"`, which resolves to `< 0.7.0`
-      # and would exclude the version this repo itself locks.
-      {:req, "~> 0.6.1 or ~> 0.7", optional: true},
+      # decompression advisory the JWKS provider can reach. `~> 0.6` admits
+      # every 0.x release from 0.6.0 on, 0.7.x included.
+      {:req, "~> 0.6 and >= 0.6.1", optional: true},
 
       # Optional: HTTP for ConduitMcp.Client (Streamable HTTP transport and the
       # OAuth client). Used directly rather than through Req: Req's
       # `into: :self` blocks in a bare `receive` with no timeout, and
       # `Req.Test` cannot model a streamed response.
       {:finch, "~> 0.21", optional: true},
-      # Not used directly: Finch's HTTP stack. Declared only to put a security
-      # floor under it: 1.10.x carries EEF-CVE-2026-91043 (HIGH, HPACK-indexed
-      # cookies bypass `max_header_list_size`), EEF-CVE-2026-92103 and
-      # EEF-CVE-2026-94194. `optional: true` adds nothing for consumers.
+      # Used directly by the OAuth client's pinned-address connection
+      # (`Mint.HTTP1`), and as Finch's stack. 1.11 is a security floor: 1.10.x
+      # carries EEF-CVE-2026-91043 (HIGH, HPACK-indexed cookies bypass
+      # `max_header_list_size`), EEF-CVE-2026-92103 and EEF-CVE-2026-94194.
+      # `optional: true` adds nothing for consumers without Finch.
       {:mint, "~> 1.11", optional: true},
 
       # Optional: JSON Schema 2020-12 validation for ConduitMcp.Client's opt-in
       # `validate:` option (tool arguments and structured results).
-      {:jsv, "~> 0.26", optional: true},
+      # 0.26.2 is a security floor: 0.26.0-0.26.1 carry EEF-CVE-2026-117680 (a
+      # regex that exhausts its match budget counts as a non-match, so data can
+      # skip `patternProperties` and `not`).
+      {:jsv, "~> 0.26 and >= 0.26.2", optional: true},
 
       # Optional: OAuth 2.1 JWT validation (only needed if using :oauth auth strategy)
       {:joken, "~> 2.6", optional: true},
-      {:jose, "~> 1.11", optional: true},
+      # 1.11.13 is a security floor: 1.11.0-1.11.12 carry EEF-CVE-2026-65625 to
+      # -65632. Two sit on the path this library uses: -65632 (ES256/384/512
+      # signatures of a non-canonical length verify) and -65631 (an RSA JWK with
+      # `d` but no CRT values is factored on parse; JWKS keys reach
+      # `JOSE.JWK.from_map/1`).
+      {:jose, "~> 1.11 and >= 1.11.13", optional: true},
 
       # Development
       {:ex_doc, "~> 0.39", only: :dev, runtime: false},

@@ -3,10 +3,17 @@ defmodule ConduitMcp.Tasks.Janitor do
   Periodically prunes terminal-state tasks from `ConduitMcp.Tasks`.
 
   `ConduitMcp.Tasks` stores task state in a named ETS table (`:conduit_mcp_tasks`)
-  that has no eviction loop of its own — tasks that reach `completed`, `failed`,
-  or `cancelled` linger in memory until the BEAM restarts. The janitor wakes on
-  an interval and calls `ConduitMcp.Tasks.cleanup/1` to drop terminal-state
-  entries older than the configured TTL.
+  that has no eviction loop of its own. The janitor wakes on an interval and
+  calls `ConduitMcp.Tasks.cleanup/1` to drop terminal-state entries older
+  than the configured TTL.
+
+  `ConduitMcp.Application` already starts one with this module's defaults
+  (registered as `ConduitMcp.Tasks.Janitor.Default`; configure or disable it
+  with `config :conduit_mcp, :tasks_janitor`). Start this module yourself
+  only for a second sweep with other settings. Both sweep the same tasks, so
+  the shortest `ttl` wins: to keep terminal tasks longer than one hour, set
+  `config :conduit_mcp, :tasks_janitor, ttl: ...` (or `false`); a longer
+  `ttl` here alone changes nothing.
 
   Tasks still in `working` or `input_required` are never evicted by the janitor
   regardless of age — long-running tasks remain available.
@@ -28,7 +35,7 @@ defmodule ConduitMcp.Tasks.Janitor do
   - `:name` — registered process name (default: module name).
 
   Emits `[:conduit_mcp, :tasks, :cleanup]` telemetry on each run with
-  measurements `%{removed: count}`.
+  measurements `%{removed: count}` and metadata `%{store: ConduitMcp.Tasks}`.
   """
 
   use GenServer
@@ -58,7 +65,7 @@ defmodule ConduitMcp.Tasks.Janitor do
     :telemetry.execute(
       [:conduit_mcp, :tasks, :cleanup],
       %{removed: removed},
-      %{}
+      %{store: ConduitMcp.Tasks}
     )
 
     if removed > 0 do

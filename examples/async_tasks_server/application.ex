@@ -5,8 +5,9 @@ defmodule Examples.AsyncTasks.Application do
   Includes:
 
   - `Task.Supervisor` for spawning background render workers
-  - `ConduitMcp.Tasks.Janitor` to prune terminal-state tasks
   - `Bandit` serving `Examples.AsyncTasksServer` on port 4040
+
+  Terminal tasks are swept by the tasks janitor `:conduit_mcp` starts.
 
   Run with:
 
@@ -19,7 +20,6 @@ defmodule Examples.AsyncTasks.Application do
   def start(_type, _args) do
     children = [
       {Task.Supervisor, name: Examples.AsyncTasks.Workers},
-      {ConduitMcp.Tasks.Janitor, ttl: :timer.hours(1), interval: :timer.minutes(5)},
       {Bandit,
        plug: {ConduitMcp.Transport.StreamableHTTP, server_module: Examples.AsyncTasksServer},
        port: 4040}

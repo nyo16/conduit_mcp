@@ -42,6 +42,8 @@ config :oban_tasks_server, Oban,
 # tasks/result, and tasks/list JSON-RPC routes pick this up
 # transparently — no handler changes needed.
 config :conduit_mcp, :tasks_store, Examples.ObanTasks.Store
+# ConduitMcp starts its tasks janitor for this store (terminal rows older than
+# one hour, first sweep after five minutes, by which time the Repo is up).
 
 # The modern (2026-07-28) path: the experimental tasks extension
 # (io.modelcontextprotocol/tasks, ConduitMcp.Ext.Tasks). Tools return

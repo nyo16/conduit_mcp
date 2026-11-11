@@ -299,30 +299,30 @@ defmodule ConduitMcp.EndpointTest do
   end
 
   describe "validation schema lookups" do
-    test "returns validation schema tuple for tool" do
-      {full_schema, clean_schema} = FullEndpoint.__validation_schema_for_tool__("echo_tool")
-      assert is_list(full_schema)
-      assert Keyword.has_key?(full_schema, :text)
-      assert is_list(clean_schema)
-      assert Keyword.has_key?(clean_schema, :text)
-    end
-
     test "returns nil for unknown tool" do
       assert is_nil(FullEndpoint.__validation_schema_for_tool__("nonexistent"))
     end
 
-    test "returns validation schema tuple for prompt" do
-      {full_schema, clean_schema} =
-        FullEndpoint.__validation_schema_for_prompt__("code_review_prompt")
-
-      assert is_list(full_schema)
-      assert Keyword.has_key?(full_schema, :code)
-      assert is_list(clean_schema)
-      assert Keyword.has_key?(clean_schema, :code)
-    end
-
     test "returns nil for unknown prompt" do
       assert is_nil(FullEndpoint.__validation_schema_for_prompt__("nonexistent"))
+    end
+
+    # The clean schema is precompiled at compile time, so a call does not
+    # rebuild it (a performance property no behavioural test can see).
+    test "a tool's schema is {full, %NimbleOptions{}}" do
+      assert {full, %NimbleOptions{schema: clean}} =
+               FullEndpoint.__validation_schema_for_tool__("echo_tool")
+
+      assert Keyword.keys(full) == [:text]
+      assert Keyword.keys(clean) == [:text]
+    end
+
+    test "a prompt's schema is {full, %NimbleOptions{}}" do
+      assert {full, %NimbleOptions{schema: clean}} =
+               FullEndpoint.__validation_schema_for_prompt__("code_review_prompt")
+
+      assert Enum.sort(Keyword.keys(full)) == [:code, :language]
+      assert Enum.sort(Keyword.keys(clean)) == [:code, :language]
     end
   end
 
@@ -563,7 +563,6 @@ defmodule ConduitMcp.EndpointTest do
 
       ConduitMcp.Validation.update_validation_config(
         runtime_validation: true,
-        strict_mode: true,
         type_coercion: true
       )
 

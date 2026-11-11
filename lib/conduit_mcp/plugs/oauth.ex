@@ -101,6 +101,9 @@ if Code.ensure_loaded?(Joken) do
     import Plug.Conn
     require Logger
 
+    alias ConduitMcp.OAuth.KeyProvider
+    alias ConduitMcp.Plugs.OAuth.Claims
+
     @behaviour Plug
 
     @default_algorithms ~w(RS256 RS384 RS512 ES256 ES384 ES512 PS256 PS384 PS512)
@@ -311,6 +314,7 @@ if Code.ensure_loaded?(Joken) do
       case result do
         {:error, :not_found} -> {:error, :not_found}
         {:error, reason} -> {:error, {:key_unavailable, reason}}
+        {:ok, key} when is_map(key) -> {:ok, KeyProvider.public_key(key)}
         ok -> ok
       end
     end
@@ -355,7 +359,7 @@ if Code.ensure_loaded?(Joken) do
 
         case Joken.verify_and_validate(token_config, token, signer) do
           {:ok, claims} ->
-            validate_claims(claims, opts)
+            Claims.validate(claims, opts.issuer, opts.audience)
 
           {:error, reason} ->
             normalize_joken_error(reason)
@@ -386,54 +390,6 @@ if Code.ensure_loaded?(Joken) do
     # Joken's error is `atom() | Keyword.t()`; any atom not named above is a
     # verification failure the token did not survive.
     defp normalize_joken_error(reason) when is_atom(reason), do: {:error, :invalid_signature}
-
-    defp validate_claims(claims, opts) do
-      with :ok <- validate_exp(claims),
-           :ok <- validate_nbf(claims),
-           :ok <- validate_issuer(claims, opts.issuer),
-           :ok <- validate_audience(claims, opts.audience) do
-        {:ok, claims}
-      end
-    end
-
-    # `Joken.Config.default_claims(default_exp: 3600)` only affects token
-    # *generation*. Validation folds over the claims the token actually
-    # carries, so a token with no `exp` was never checked against anything
-    # and was accepted forever. `exp` is mandatory here.
-    defp validate_exp(%{"exp" => exp}) when is_integer(exp) do
-      if exp > System.system_time(:second), do: :ok, else: {:error, :expired}
-    end
-
-    defp validate_exp(_claims), do: {:error, :expired}
-
-    # `nbf` is optional, but a present one must hold — and a malformed one
-    # must not be silently ignored.
-    defp validate_nbf(%{"nbf" => nbf}) when is_integer(nbf) do
-      if nbf <= System.system_time(:second), do: :ok, else: {:error, :not_yet_valid}
-    end
-
-    defp validate_nbf(%{"nbf" => _malformed}), do: {:error, :not_yet_valid}
-    defp validate_nbf(_claims), do: :ok
-
-    defp validate_issuer(claims, expected_issuer) do
-      case Map.get(claims, "iss") do
-        ^expected_issuer -> :ok
-        _ -> {:error, :invalid_issuer}
-      end
-    end
-
-    defp validate_audience(claims, expected_audience) do
-      case Map.get(claims, "aud") do
-        ^expected_audience ->
-          :ok
-
-        aud when is_list(aud) ->
-          if expected_audience in aud, do: :ok, else: {:error, :invalid_audience}
-
-        _ ->
-          {:error, :invalid_audience}
-      end
-    end
 
     # The claims map is issuer-controlled and `sub` is optional in a JWT, so a
     # verified token can carry no subject at all. Assigning `id: nil` in that

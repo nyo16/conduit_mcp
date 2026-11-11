@@ -11,6 +11,7 @@ defmodule ConduitMcp.Client.OAuth.FlowTest do
   alias ConduitMcp.Client.OAuth
   alias ConduitMcp.Client.OAuth.{Challenge, Config, Error, Pending, Tokens, TokenStore}
   alias ConduitMcp.Client.Secret
+  alias ConduitMcp.Client.Transport.StreamableHTTP
   alias ConduitMcp.Test.Client.OAuthFake
 
   @cimd "https://app.example.com/oauth/client.json"
@@ -470,7 +471,15 @@ defmodule ConduitMcp.Client.OAuth.FlowTest do
   # --- client credentials ------------------------------------------------------------
 
   defp cc_config(fake, credentials) do
-    config(fake, [grant: :client_credentials, client_id: "svc", scopes: ["read"]] ++ credentials)
+    config(
+      fake,
+      [
+        grant: :client_credentials,
+        client_id: "svc",
+        scopes: ["read"],
+        expected_issuers: [fake.issuer]
+      ] ++ credentials
+    )
   end
 
   describe "client credentials" do
@@ -560,6 +569,106 @@ defmodule ConduitMcp.Client.OAuth.FlowTest do
         )
       end
     end
+
+    test "configuration: :expected_issuers is required, and may not be empty" do
+      for issuers <- [nil, []] do
+        assert_raise ArgumentError, ~r/expected_issuers/, fn ->
+          Config.new!(
+            server_url: "https://mcp.example.com",
+            grant: :client_credentials,
+            client_id: "x",
+            client_secret: "s3cret",
+            expected_issuers: issuers
+          )
+        end
+      end
+
+      assert_raise ArgumentError, ~r/expected_issuers/, fn ->
+        Config.new!(
+          server_url: "https://mcp.example.com",
+          grant: :client_credentials,
+          client_id: "x",
+          client_secret: "s3cret"
+        )
+      end
+    end
+
+    test "configuration: a hand-built struct without :expected_issuers is rejected" do
+      valid =
+        Config.new!(
+          server_url: "https://mcp.example.com/mcp",
+          grant: :client_credentials,
+          client_id: "x",
+          client_secret: "s3cret",
+          expected_issuers: ["https://as.example.com"]
+        )
+
+      assert {:ok, ^valid} = Config.new(valid)
+
+      for issuers <- [nil, []] do
+        config = %{valid | expected_issuers: issuers}
+        assert {:error, message} = Config.new(config)
+        assert message =~ "expected_issuers"
+
+        assert_raise ArgumentError, ~r/expected_issuers/, fn ->
+          ConduitMcp.Client.child_spec(
+            name: :x,
+            transport:
+              {StreamableHTTP, url: "https://mcp.example.com/mcp", auth: {:oauth, config}}
+          )
+        end
+      end
+    end
+
+    test "configuration: Client and Hub child specs require :expected_issuers" do
+      transport =
+        {StreamableHTTP,
+         url: "https://mcp.example.com/mcp",
+         auth: {:client_credentials, client_id: "x", client_secret: "s3cret"}}
+
+      assert_raise ArgumentError, ~r/expected_issuers/, fn ->
+        ConduitMcp.Client.child_spec(name: :x, transport: transport)
+      end
+
+      assert_raise ArgumentError, ~r/expected_issuers/, fn ->
+        ConduitMcp.Client.Hub.child_spec(
+          name: :h,
+          policy: :allow_all,
+          servers: [{"a", [transport: transport]}]
+        )
+      end
+    end
+
+    test "an authorization server the MCP server names outside :expected_issuers gets nothing" do
+      jwk = JOSE.JWK.generate_key({:ec, "P-256"})
+      {_, private} = JOSE.JWK.to_map(jwk)
+
+      for credential <- [
+            [client_secret: "s3cret"],
+            [private_key: private, private_key_alg: "ES256"]
+          ] do
+        real = fake() |> OAuthFake.serve_as()
+        attacker = OAuthFake.start() |> OAuthFake.serve_as()
+
+        OAuthFake.serve_prm(real, @prm_inserted, resource(real),
+          authorization_servers: [attacker.issuer]
+        )
+
+        config =
+          config(
+            real,
+            [
+              grant: :client_credentials,
+              client_id: "svc",
+              scopes: ["read"],
+              expected_issuers: [real.issuer]
+            ] ++ credential
+          )
+
+        assert {:error, %Error{reason: :issuer_not_allowed}} = OAuth.token_for(config, nil)
+        assert OAuthFake.count(attacker, "POST", "/token") == 0
+      end
+    end
   end
 
   # --- loopback -------------------------------------------------------------------------
@@ -609,6 +718,34 @@ defmodule ConduitMcp.Client.OAuth.FlowTest do
         {:ok, {{_, 410, _}, _, _}} -> :ok
         {:error, _closed} -> :ok
       end
+    end
+
+    test "the callback plug answers the first callback only" do
+      ref = make_ref()
+      opts = %{path: "/cb", once: :atomics.new(1, []), owner: self(), ref: ref}
+      plug = OAuth.Loopback.Plug
+
+      first = plug.call(Plug.Test.conn(:get, "/cb?code=c&state=s"), opts)
+      second = plug.call(Plug.Test.conn(:get, "/cb?code=c2&state=s2"), opts)
+
+      assert first.status == 200
+      assert first.resp_body =~ "Authorization complete"
+      assert second.status == 410
+      assert_received {^ref, :callback, %{"code" => "c", "state" => "s"}}
+      refute_received {^ref, :callback, _}
+
+      assert plug.call(Plug.Test.conn(:get, "/other"), opts).status == 404
+    end
+
+    test "the callback plug's page says when authorization was not granted" do
+      ref = make_ref()
+      opts = %{path: "/cb", once: :atomics.new(1, []), owner: self(), ref: ref}
+
+      conn = OAuth.Loopback.Plug.call(Plug.Test.conn(:get, "/cb?error=access_denied"), opts)
+
+      assert conn.status == 200
+      assert conn.resp_body =~ "not granted"
+      assert_received {^ref, :callback, %{"error" => "access_denied"}}
     end
 
     test "await/2 times out and stops the server" do

@@ -182,6 +182,23 @@ defmodule ConduitMcp.Transport.StreamableHTTPTest do
       assert [session_id] = get_resp_header(conn, "mcp-session-id")
       assert {:ok, _} = ConduitMcp.Session.get(session_id, ConduitMcp.Session.EtsStore)
     end
+
+    test "session: [ttl: ...] is ignored, with a warning naming the key that works" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          StreamableHTTP.init(server_module: TestServer, allowed_origins: "*", session: [ttl: 1])
+        end)
+
+      assert log =~ "session: [ttl: ...] is ignored"
+      assert log =~ "config :conduit_mcp, :session_janitor, ttl:"
+
+      quiet =
+        ExUnit.CaptureLog.capture_log(fn ->
+          StreamableHTTP.init(server_module: TestServer, allowed_origins: "*", session: [])
+        end)
+
+      refute quiet =~ "is ignored"
+    end
   end
 
   describe "CORS headers" do

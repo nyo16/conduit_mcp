@@ -237,4 +237,79 @@ defmodule ConduitMcp.Transport.AuthIntegrationTest do
       assert result.status == 401
     end
   end
+
+  # The body is parsed after authentication: an unauthenticated request costs
+  # no body read, whatever its body is.
+  for {transport, path} <- [{StreamableHTTP, "/"}, {ConduitMcp.Transport.SSE, "/message"}] do
+    describe "#{inspect(transport)}: the body is parsed after authentication" do
+      setup do
+        opts =
+          unquote(transport).init(
+            server_module: TestServer,
+            auth: [strategy: :bearer_token, token: "test-secret-token"]
+          )
+
+        {:ok, opts: opts}
+      end
+
+      test "no credential and an invalid JSON body is 401", %{opts: opts} do
+        assert status(unquote(transport), opts, post(unquote(path), "not json")) == 401
+      end
+
+      test "no credential and a body over the limit is 401", %{opts: opts} do
+        body = JSON.encode!(%{"pad" => String.duplicate("a", 1_000_001)})
+        assert status(unquote(transport), opts, post(unquote(path), body)) == 401
+      end
+
+      test "authenticated, an invalid JSON body is 400", %{opts: opts} do
+        conn = post(unquote(path), "not json") |> authorized()
+        assert status(unquote(transport), opts, conn) == 400
+      end
+
+      test "authenticated, a valid body is handled", %{opts: opts} do
+        body = JSON.encode!(%{"jsonrpc" => "2.0", "id" => 1, "method" => "ping"})
+        conn = post(unquote(path), body) |> authorized()
+        assert status(unquote(transport), opts, conn) == 200
+      end
+
+      test ":max_body_bytes is enforced after authentication" do
+        opts =
+          unquote(transport).init(
+            server_module: TestServer,
+            auth: [strategy: :bearer_token, token: "test-secret-token"],
+            max_body_bytes: 10
+          )
+
+        eleven = ~s({"a":"123"})
+        assert byte_size(eleven) == 11
+
+        assert status(unquote(transport), opts, post(unquote(path), eleven)) == 401
+
+        assert status(unquote(transport), opts, post(unquote(path), eleven) |> authorized()) ==
+                 413
+      end
+
+      test ":max_body_bytes must be a positive integer" do
+        for bad <- [0, -1, "1", 1.5] do
+          assert_raise ArgumentError, ~r/:max_body_bytes/, fn ->
+            unquote(transport).init(server_module: TestServer, max_body_bytes: bad)
+          end
+        end
+      end
+    end
+  end
+
+  defp post(path, body) do
+    conn(:post, path, body) |> put_req_header("content-type", "application/json")
+  end
+
+  defp authorized(conn), do: put_req_header(conn, "authorization", "Bearer test-secret-token")
+
+  # The response status, or the status of the exception a plug raised
+  # (`Plug.Parsers` raises; Bandit answers with the exception's status).
+  defp status(transport, opts, conn) do
+    transport.call(conn, opts).status
+  rescue
+    exception -> Plug.Exception.status(exception)
+  end
 end

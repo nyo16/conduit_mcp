@@ -43,12 +43,12 @@ need before you configure the feature:
 
 | Feature | Dependency | Add to `deps` |
 |---|---|---|
-| `auth: [strategy: :oauth]` — JWT bearer validation ([guide](guides/authentication.md)) | `:joken`, `:jose` | `{:joken, "~> 2.6"}`<br>`{:jose, "~> 1.11"}` |
-| `ConduitMcp.OAuth.KeyProvider.JWKS` — fetch signing keys from a JWKS URI | `:req` | `{:req, "~> 0.6.1 or ~> 0.7"}` |
+| `auth: [strategy: :oauth]` — JWT bearer validation ([guide](guides/authentication.md)) | `:joken`, `:jose` | `{:joken, "~> 2.6"}`<br>`{:jose, "~> 1.11 and >= 1.11.13"}` |
+| `ConduitMcp.OAuth.KeyProvider.JWKS` — fetch signing keys from a JWKS URI | `:req` | `{:req, "~> 0.6 and >= 0.6.1"}` |
 | `ConduitMcp.Plugs.RateLimit` / `ConduitMcp.Plugs.MessageRateLimit` ([guide](guides/rate_limiting.md)) | `:hammer` | `{:hammer, "~> 7.2"}` |
 | `ConduitMcp.PromEx` — Prometheus metrics | `:prom_ex` | `{:prom_ex, "~> 1.11"}` |
 | Client Streamable HTTP transport and client OAuth ([guide](guides/client.md)) | `:finch` | `{:finch, "~> 0.21"}` |
-| Client JSON Schema validation (`validate:`) ([guide](guides/client_permissions_and_hooks.md)) | `:jsv` | `{:jsv, "~> 0.26"}` |
+| Client JSON Schema validation (`validate:`) ([guide](guides/client_permissions_and_hooks.md)) | `:jsv` | `{:jsv, "~> 0.26 and >= 0.26.2"}` |
 
 > **Adding one of these later requires a forced rebuild.** These modules are
 > guarded by `if Code.ensure_loaded?(Dep)`, which is evaluated once — when
@@ -287,14 +287,43 @@ end
 
 ### Phoenix Integration
 
+A Phoenix endpoint runs its own `Plug.Parsers` (8 MB by default) before the router, so under a router `forward` every MCP request body is read before the transport authenticates it, and the transport's `:max_body_bytes` has no effect. Mount the transport in the endpoint instead, **above** `plug Plug.Parsers`, with a small plug that forwards the MCP path prefix and halts:
+
 ```elixir
-# lib/my_app_web/router.ex
-scope "/mcp" do
-  forward "/", ConduitMcp.Transport.StreamableHTTP,
-    server_module: MyApp.MCPServer,
-    auth: [strategy: :bearer_token, token: System.get_env("MCP_AUTH_TOKEN")]
+# lib/my_app_web/mcp_forward.ex
+defmodule MyAppWeb.MCPForward do
+  @behaviour Plug
+
+  alias ConduitMcp.Transport.StreamableHTTP
+
+  @impl true
+  def init(opts) do
+    {at, opts} = Keyword.pop!(opts, :at)
+    {String.split(at, "/", trim: true), StreamableHTTP.init(opts)}
+  end
+
+  @impl true
+  def call(%Plug.Conn{path_info: path_info} = conn, {prefix, transport_opts}) do
+    case Enum.split(path_info, length(prefix)) do
+      {^prefix, rest} ->
+        conn
+        |> Plug.forward(rest, StreamableHTTP, transport_opts)
+        |> Plug.Conn.halt()
+
+      _other ->
+        conn
+    end
+  end
 end
+
+# lib/my_app_web/endpoint.ex, above `plug Plug.Parsers`
+plug MyAppWeb.MCPForward,
+  at: "/mcp",
+  server_module: MyApp.MCPServer,
+  auth: [strategy: :bearer_token, token: System.get_env("MCP_AUTH_TOKEN")]
 ```
+
+An unauthenticated request is then answered 401 with its body unread, and a body over `:max_body_bytes` is 413. A router `forward "/mcp", ConduitMcp.Transport.StreamableHTTP, ...` still works, with the endpoint's parser and limits in front of it.
 
 ### Transports
 
@@ -440,7 +469,6 @@ Enabled by default. Automatic conversion: `"25"` → `25`, `"true"` → `true`, 
 ```elixir
 config :conduit_mcp, :validation,
   runtime_validation: true,
-  strict_mode: true,
   type_coercion: true,
   log_validation_errors: false
 ```
@@ -481,7 +509,7 @@ defmodule MyApp.RateLimiter do
 end
 ```
 
-**HTTP rate limiting** — limits raw connections:
+**HTTP rate limiting** — limits HTTP requests per client, after authentication (add `before_auth: true` to count failed authentications too):
 
 ```elixir
 rate_limit: [backend: MyApp.RateLimiter, limit: 100, scale: 60_000]

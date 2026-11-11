@@ -60,6 +60,24 @@ defmodule ConduitMcp.Client.Hub.Manager do
     {:ok, state, {:continue, :reconcile}}
   end
 
+  # The hub config holds every server's client options, credentials
+  # included; an `{:add, id, client_config}` call carries one server's.
+  # Neither belongs in a crash report or `:sys.get_status/1`, nor does the
+  # `:sys` debug log, which records every message and the state after it.
+  @impl GenServer
+  def format_status(status) do
+    status
+    |> Map.update(:state, nil, fn
+      %{config: _} = state -> %{state | config: :redacted}
+      other -> other
+    end)
+    |> Map.update(:message, nil, fn
+      {:add, id, _client_config} -> {:add, id, :redacted}
+      other -> other
+    end)
+    |> Map.replace(:log, [])
+  end
+
   @impl GenServer
   def handle_continue(:reconcile, state) do
     state =

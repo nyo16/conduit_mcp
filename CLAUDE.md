@@ -11,7 +11,7 @@ ConduitMCP is an Elixir library implementing the [Model Context Protocol (MCP)](
 ```bash
 mix deps.get              # Install dependencies
 mix compile               # Compile
-mix test                  # Run all tests (~2,400: 2,304 tests, 61 doctests, 40 properties; includes :integration and :stdio)
+mix test                  # Run all tests (~2,450: 2,364 tests, 61 doctests, 40 properties; includes :integration and :stdio)
 mix test test/conduit_mcp/dsl_test.exs           # Run a single test file
 mix test test/conduit_mcp/dsl_test.exs:42        # Run a specific test line
 mix format                # Format code
@@ -26,25 +26,26 @@ MIX_ENV=test mix coveralls.html  # Coverage report
 
 Requires Elixir ~> 1.18. No config directory exists; validation config is set via `Application.put_env(:conduit_mcp, :validation, [...])` in tests or application config.
 
-CI runs on Elixir 1.18.3 / OTP 27.2 (`ELIXIR_VERSION`/`OTP_VERSION` in `.github/workflows/ci.yml`; Dialyzer with `MIX_ENV=dev`). A clean Dialyzer on a newer OTP proves nothing for CI: OTP 28+ changed opaque-type checking, so run it on the CI toolchain too, with its own build path, e.g. `MIX_BUILD_PATH=/tmp/cm_build_118_dev MIX_ENV=dev mix dialyzer` under Elixir 1.18.3/OTP 27.2. In particular, don't pass `Mint.HTTP.t()` or `Secret.t()` (both opaque) through `||`, guards or the `Mint.HTTP` union; use `Mint.HTTP1` and an explicit `nil` match.
+CI runs on Elixir 1.18.3 / OTP 27.2 (`ELIXIR_VERSION`/`OTP_VERSION` in `.github/workflows/ci.yml`; Dialyzer with `MIX_ENV=dev`). A clean Dialyzer on a newer OTP proves nothing for CI: OTP 28+ changed opaque-type checking, so run it on the CI toolchain too, with its own build path, e.g. `MIX_BUILD_PATH="$PWD/_build/ci_118_dev" MIX_ENV=dev mix dialyzer` under Elixir 1.18.3/OTP 27.2. Keep that path out of `/tmp`: on macOS `/tmp` is a symlink, and Mix's relative `priv` links (`abnf_parsec`'s) then dangle. In particular, don't pass `Mint.HTTP.t()` or `Secret.t()` (both opaque) through `||`, guards or the `Mint.HTTP` union; use `Mint.HTTP1` and an explicit `nil` match.
 
 ## Architecture
 
 MCP server modules are **stateless** — just compiled functions. Each HTTP request runs in its own Bandit process for maximum concurrency. Rate limiting uses a user-supplied Hammer module.
 
-The library itself does start a supervision tree (`ConduitMcp.Application`, `mod:` in `mix.exs`). It is deliberately small: it owns the long-lived ETS tables that must outlive short-lived request processes, plus the session janitor.
+The library itself does start a supervision tree (`ConduitMcp.Application`, `mod:` in `mix.exs`). It is deliberately small: it owns the long-lived ETS tables that must outlive short-lived request processes, plus the janitors that keep them bounded.
 
 - Always: `ConduitMcp.Cancellation.Owner`, `ConduitMcp.Cancellation.InFlightOwner` (requests in flight; `notifications/cancelled` is recorded only for those), `ConduitMcp.Session.EtsStore.Owner`, `ConduitMcp.Transport.SSE.Owner`, `ConduitMcp.Transport.SSEStream.Owner` (slot table for modern response streams), `ConduitMcp.Client.Registry` (a passive unique `Registry`; clients register in it, so names of any term need no atoms — the library starts **no** client processes), `ConduitMcp.Subscriptions` (a duplicate-key `Registry` of `subscriptions/listen` streams by topic), `ConduitMcp.Subscriptions.Admission` (the live `subscriptions/listen` streams of each principal behind `:max_listens_per_principal`; a GenServer streams call once per listen — admission must be serialized, unlike the ETS owners' hot paths), `ConduitMcp.Session.Janitor` (as `ConduitMcp.Session.Janitor.Default`; disable with `config :conduit_mcp, :session_janitor, false`), and a second `ConduitMcp.Session.Janitor` sweeping the cancellation table and dead processes' in-flight rows (as `ConduitMcp.Cancellation.Janitor`; disable with `config :conduit_mcp, :cancellation_janitor, false`).
 - Conditionally: `ConduitMcp.Tasks.EtsStore.Owner` (default tasks store only), `ConduitMcp.Ext.Tasks.EtsStore.Owner` (tasks extension enabled with its default store) and the `ConduitMcp.Ext.Tasks` janitor (tasks extension enabled; `config :conduit_mcp, :ext_tasks`), `ConduitMcp.OAuth.KeyProvider.JWKS.Owner` (only when `Req` is compiled in).
+- Also always (unless disabled): a third `ConduitMcp.Session.Janitor` over `ConduitMcp.Tasks`, sweeping terminal tasks older than an hour (as `ConduitMcp.Tasks.Janitor.Default`, so it cannot collide with a host's own `ConduitMcp.Tasks.Janitor`; disable with `config :conduit_mcp, :tasks_janitor, false`).
 
-Both janitor keys accept `true`, `false`, or a keyword list of `ConduitMcp.Session.Janitor` options; anything else raises at boot naming the key.
+The three janitor keys (`:session_janitor`, `:cancellation_janitor`, `:tasks_janitor`) accept `true`, `false`, or a keyword list of `ConduitMcp.Session.Janitor` options; anything else raises at boot naming the key.
 
 Every owner runs `ConduitMcp.EtsOwner`: a process that creates a `:public` table and then idles, retrying every second if the name was already taken. Reads and writes go straight to ETS from the calling process — **do not turn an owner into a `handle_call` gateway.**
 
 ### Request Flow
 
 ```
-HTTP Request → Transport (StreamableHTTP/SSE) → Auth Plug → Rate Limit Plug → classify_era (ConduitMcp.Era) → HeaderValidation (modern only) → Message Rate Limit → Handler.dispatch/3 → Server Module callbacks
+HTTP Request → Transport (StreamableHTTP/SSE) → [Rate Limit Plug if before_auth: true] → Auth Plug → Rate Limit Plug → Plug.Parsers (:max_body_bytes) → classify_era (ConduitMcp.Era) → HeaderValidation (modern only) → Message Rate Limit → Handler.dispatch/3 → Server Module callbacks
 ```
 
 Modern requests never create or look up a session (except the principal check on a supplied session id) and may answer with an SSE stream (`{:stream, StreamSpec}` from `Handler.dispatch/3`, served by `ConduitMcp.Transport.SSEStream`). Legacy requests keep JSON responses and sessions.

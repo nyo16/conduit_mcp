@@ -1,0 +1,39 @@
+name: Advisory audit
+
+# Advisories are published against versions already in the lock, so a lock
+# that passed CI can fail later with no commit in between. This runs the
+# audit daily, not only on push.
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  MIX_ENV: test
+  ELIXIR_VERSION: "1.18.3"
+  OTP_VERSION: "27.2"
+
+jobs:
+  audit:
+    name: Advisories and retired packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+
+      - run: mix deps.get
+
+      # `mix hex.audit` reports the Hex advisories; `mix deps.audit` checks
+      # the mix_audit database, which does not carry all of them.
+      - name: Check for advisories and retired packages
+        run: mix hex.audit
+
+      - name: Check for vulnerable dependencies
+        run: mix deps.audit

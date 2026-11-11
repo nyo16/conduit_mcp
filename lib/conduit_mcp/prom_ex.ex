@@ -637,7 +637,9 @@ if Code.ensure_loaded?(PromEx) do
             metric_prefix ++ [:tasks, :cleanup, :removed, :total],
             event_name: [:conduit_mcp, :tasks, :cleanup],
             description: "Terminal MCP tasks evicted",
-            measurement: :removed
+            measurement: :removed,
+            tags: [:store],
+            tag_values: &extract_store_tag/1
           ),
           sum(
             metric_prefix ++ [:ext_tasks, :cleanup, :removed, :total],

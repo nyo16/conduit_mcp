@@ -5,6 +5,143 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-11-10
+
+A security release. 0.11.0's dependency requirements admit 23 published
+advisories, and a `client_credentials` client sent its credentials to
+whichever authorization server the MCP server named. Consumers resolve
+against the published package, so upgrading is the fix.
+
+### Security
+
+- **Dependency floors.** Each is the first release clear of the advisories
+  listed; the requirements in `README.md`, the guides and
+  `ConduitMcp.OptionalDependencyError` messages say the same.
+  - `bandit` `~> 1.14 and >= 1.14.1` (was `>= 1.13.1`): 1.13.1 carries twelve
+    advisories, ten HIGH and most reachable before authentication —
+    EEF-CVE-2026-111101 and -116078 (1-byte chunks / DATA frames), -113436
+    (quadratic Content-Length parsing), -108525, -108529, -109584, -110499,
+    -111103 and -115269 (HTTP/2 flow control, HPACK, SETTINGS), -114216
+    (chunk-extension request smuggling), -114213 and -110314 (WebSocket).
+  - `jose` `~> 1.11 and >= 1.11.13` (optional): EEF-CVE-2026-65625 to -65632,
+    two on the JWT verification path (-65632 non-canonical ECDSA signature
+    lengths verify; -65631 an RSA JWK with `d` but no CRT values is factored
+    on parse).
+  - `jsv` `~> 0.26 and >= 0.26.2` (optional): EEF-CVE-2026-117680 (a regex
+    that exhausts its match budget counts as a non-match, skipping
+    `patternProperties` and `not`).
+  - `plug_crypto` `~> 2.2 and >= 2.2.1`, now a declared dependency (the
+    library calls `Plug.Crypto.secure_compare/2`): EEF-CVE-2026-105963.
+  - `ssl_verify_fun` `~> 1.1 and >= 1.1.8` (optional, floor only; reached
+    through `prom_ex`): EEF-CVE-2026-117666 (CRITICAL, partial-label wildcard
+    certificates match across a label boundary).
+  - The `hpax` floor is removed: Bandit 1.14 and Mint 1.11 both require
+    `hpax ~> 1.1`, so it could no longer bind.
+- **`auth: {:client_credentials, ...}` requires `:expected_issuers`**
+  (SEC-H1, HIGH). A malicious MCP server could name its own authorization
+  server in its Protected Resource Metadata, and the client then sent its
+  `client_secret` (or a `private_key_jwt` assertion) to that server's token
+  endpoint. A hand-built `%ConduitMcp.Client.OAuth.Config{}` (passed as
+  `auth: {:oauth, config}` or to `ConduitMcp.Client.OAuth.Config.new/1`) is
+  held to the same rule.
+  See Breaking changes.
+- **Plain-string `env:` and `headers:` values are held as
+  `ConduitMcp.Client.Secret`s** (SEC-M1). Before, a plain value printed in
+  the `ConduitMcp.Client.Hub` manager's crash report and `:sys.get_status/1`,
+  and in configuration error messages, which printed the whole option term.
+  The hub manager now redacts its config in `format_status/1`, and its
+  `:sys` debug log there too; configuration errors describe the shape they
+  received instead of printing it (`ConduitMcp.Client.OAuth.Config.new/1`
+  included); `inspect/1` of a `ConduitMcp.Client.Config` omits `:transport`
+  and `:assigns`, and of a hub config omits `:servers`.
+- **JWT verification keys lose their private members** (`d p q dp dq qi
+  oth` for RSA, EC and OKP keys) before `ConduitMcp.Plugs.OAuth` builds a
+  signer, whatever the key provider, and before
+  `ConduitMcp.OAuth.KeyProvider.JWKS` caches them. A verifier never needs
+  them, and an RSA key with `d` alone is what jose factors on parse; a
+  malformed private member used to crash the request.
+
+### Breaking changes
+
+- **`auth: {:client_credentials, ...}` without `:expected_issuers` (or with
+  `[]`) raises at configuration.** No opt-out: accepting any issuer is the
+  vulnerability. Add `expected_issuers: ["https://your-auth-server"]`.
+- **The request body is parsed after authentication and `:rate_limit`.** The
+  transports used to read and decode up to 1 MB before authenticating, so a
+  rejected request with a 734 KB body cost about 28× a small one (about 520×
+  on the audit's toolchain); it now costs the same (8.0 µs against 8.3 µs).
+  A rejected request with an invalid or oversized body is now answered 401 or
+  429, not 400 or 413, and when it had a body the response closes the
+  connection, so the server never reads that body (on HTTP/1.1 keep-alive
+  Bandit would otherwise read up to 8 MB of it). A `:rate_limit` `key_func`
+  now runs before `Plug.Parsers`: `conn.body_params` and `conn.query_params`
+  are `%Plug.Conn.Unfetched{}`, and `conn.params` is `%{}` (it used to merge
+  the query and body params). Key on the body in `:message_rate_limit`, which
+  still runs after parsing; call `Plug.Conn.fetch_query_params/1` for the
+  query string. No opt-out.
+- **The application starts a tasks janitor.** Terminal `ConduitMcp.Tasks`
+  tasks older than one hour are removed every five minutes; they used to stay
+  until the node restarted, and counted against the default store's cap.
+  Opt out: `config :conduit_mcp, :tasks_janitor, false`. **The shortest sweep
+  wins:** a host that already runs its own `ConduitMcp.Tasks.Janitor` with a
+  longer `ttl` must set `config :conduit_mcp, :tasks_janitor, ttl: ...` (or
+  `false`), or terminal tasks now go after one hour.
+
+### Added
+
+- `:max_body_bytes` on both HTTP transports (default `1_000_000`): the
+  largest request body read; larger is 413. A positive integer, checked at
+  `init/1`.
+- `rate_limit: [before_auth: true]`: runs the HTTP rate limiter before
+  authentication, so failed authentications are counted and throttled. No
+  principal is assigned yet, so per-user limits then belong in
+  `:message_rate_limit`. Default `false`.
+- `config :conduit_mcp, :tasks_janitor` (`true`, `false` or a keyword list of
+  `ConduitMcp.Session.Janitor` options), like the session and cancellation
+  janitor keys.
+
+### Changed
+
+- DSL and Endpoint servers embed each tool's and prompt's validation schema
+  precompiled (`%NimbleOptions{}`), so a `tools/call` no longer compiles it
+  per call: 20 parameters 20.1 → 10.2 µs and 45 → 21 KB, 5 parameters
+  4.6 → 2.5 µs. The second element of the (undocumented)
+  `__validation_schema_for_tool__/1` tuple is now that struct, except for a
+  schema NimbleOptions rejects (a param type it does not know), which stays a
+  keyword list as before so the server still compiles.
+- `ConduitMcp.Ext.Tasks.EtsStore` updates look their row up instead of
+  scanning the table (245 µs → 0.6 µs per update at 10 000 tasks), and the
+  table has `write_concurrency`.
+- `[:conduit_mcp, :tasks, :cleanup]` carries `%{store: ConduitMcp.Tasks}`,
+  like the other cleanup events; `ConduitMcp.PromEx` tags it by store.
+- Under HTTP/2, Bandit 1.14 resets a stream with `ENHANCE_YOUR_CALM` once 100
+  client messages wait on it. A client that answers every DATA frame with a
+  `WINDOW_UPDATE` can lose a streamed response during a long burst of
+  notifications (about 600 in a test); Mint and Finch are not affected. See
+  [Protocol eras](guides/protocol_eras.md), "Under HTTP/2".
+- `ConduitMcp.Session.Janitor` (and so the session, cancellation and tasks
+  janitors) survives a store whose `cleanup/1` raises or exits: it logs a
+  warning naming the store and the failure's kind, emits no event, and
+  retries at the next interval. It used to crash and restart.
+- `scripts/release.sh` stops after pushing the tag; CI's `publish` job is the
+  only publisher. It used to read `@version` from three lines of `mix.exs`,
+  and it no longer prints credentials embedded in the `origin` URL.
+- CI: every action is pinned to a commit SHA (Dependabot moves the pins); a
+  daily workflow runs `mix hex.audit` and `mix deps.audit`; the `publish` job
+  runs in the `hex-release` environment and fails when the tag differs from
+  `@version`, instead of rewriting `mix.exs` from the tag, or when the tagged
+  commit is not on `master`; its checkout keeps no credentials.
+  `HEX_API_KEY` must be a secret of the `hex-release` environment, not of the
+  repository, and the environment restricted to `v*` tags with required
+  reviewers.
+
+### Removed
+
+- `:strict_mode` from the validation config docs, and `session: [ttl: ...]`
+  from the session docs. Neither was ever read. A `:ttl` under `:session`
+  now logs a warning at boot; the session TTL is
+  `config :conduit_mcp, :session_janitor, ttl: ...`.
+
 ## [0.11.0] - 2026-10-17
 
 Three things ship together in 0.11.0:
@@ -1558,7 +1695,8 @@ None - This release is fully backward compatible.
 - Basic authentication
 - Phoenix integration example
 
-[Unreleased]: https://github.com/nyo16/conduit_mcp/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/nyo16/conduit_mcp/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/nyo16/conduit_mcp/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/nyo16/conduit_mcp/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/nyo16/conduit_mcp/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/nyo16/conduit_mcp/compare/v0.9.7...v0.10.0

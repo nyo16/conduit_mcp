@@ -72,7 +72,8 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
               default: [],
               doc: """
               Extra headers for every request, as `{name, value}` pairs; a
-              value may be a `ConduitMcp.Client.Secret`. Headers the
+              value may be a `ConduitMcp.Client.Secret`, and a plain string is
+              wrapped in one, so no value is ever printed. Headers the
               transport sets itself (`accept`, `authorization`,
               `content-type`, `mcp-*`, `last-event-id`, hop-by-hop ones) are
               refused: use `:auth` for credentials.
@@ -315,8 +316,11 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
   # modules need Finch too; asking now fails at boot, never per request.
   defp oauth_config(opts) do
     case opts[:auth] do
-      {:oauth, %OAuth.Config{}} ->
-        {:ok, opts}
+      {:oauth, %OAuth.Config{} = config} ->
+        case OAuth.Config.new(config) do
+          {:ok, _config} -> {:ok, opts}
+          {:error, message} -> {:error, "invalid value for :auth option: " <> message}
+        end
 
       {grant, oauth_opts} when grant in [:oauth, :client_credentials] ->
         _session = OptionalDeps.oauth_client!()
@@ -1071,7 +1075,9 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
 
   @doc false
   # Names may appear in messages; values never do (they may be secrets).
-  @spec validate_headers(term()) :: {:ok, [{String.t(), term()}]} | {:error, String.t()}
+  # Plain-string values are wrapped in a `Secret`, so a validated option list
+  # never prints one; `ConduitMcp.Client.HTTP` exposes them at the wire.
+  @spec validate_headers(term()) :: {:ok, [{String.t(), Secret.t()}]} | {:error, String.t()}
   def validate_headers(headers) when is_list(headers) or is_map(headers) do
     Enum.reduce_while(headers, {:ok, []}, fn
       {name, value}, {:ok, acc} when is_binary(name) ->
@@ -1092,7 +1098,7 @@ defmodule ConduitMcp.Client.Transport.StreamableHTTP do
                 "spaces and tabs"}}
 
           true ->
-            {:cont, {:ok, [{name, value} | acc]}}
+            {:cont, {:ok, [{name, Secret.new(value)} | acc]}}
         end
 
       _entry, _acc ->
