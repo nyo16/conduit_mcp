@@ -348,8 +348,11 @@ Supervision tree (`Examples.ObanTasks.Application.start/2`):
 2. `Examples.ObanTasks.Migrator` — one-shot, runs Oban schema + `mcp_tasks` migration
 3. `Examples.ObanTasks.Rescuer` — one-shot, resets `executing` jobs to `available`
 4. `Oban` — engine `Oban.Engines.Lite`, one `mcp_tasks` queue
-5. `ConduitMcp.Tasks.Janitor` — prunes terminal-state `mcp_tasks` rows
-6. `Bandit` — Streamable HTTP transport on port 4041
+5. `Bandit` — Streamable HTTP transport on port 4041
+
+Terminal `mcp_tasks` rows are pruned by the tasks janitor `:conduit_mcp`
+itself starts (`config :conduit_mcp, :tasks_janitor`), through this store's
+`cleanup/1`.
 
 The Telemetry hook (`Examples.ObanTasks.Telemetry.attach/0`) is attached
 *before* the supervision tree starts so failed jobs always end up mirrored

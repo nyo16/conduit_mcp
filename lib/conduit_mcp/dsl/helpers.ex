@@ -244,9 +244,14 @@ defmodule ConduitMcp.DSL.Helpers do
         task_support :supported
         param :script, :string, "Script", required: true
 
-        handle fn _conn, params ->
+        handle fn conn, params ->
           task_id = ConduitMcp.Tasks.generate_id()
-          {:ok, _} = ConduitMcp.Tasks.create(task_id, %{"tool" => "render_video"})
+
+          # The owner scopes tasks/get, tasks/result and tasks/cancel to the
+          # caller; an unowned task is visible to every caller.
+          {:ok, _} =
+            ConduitMcp.Tasks.create(task_id, %{"tool" => "render_video"},
+              ConduitMcp.Tasks.owner(conn))
 
           Task.Supervisor.start_child(MyApp.Workers, fn ->
             result = MyRenderer.render(params)
@@ -257,6 +262,10 @@ defmodule ConduitMcp.DSL.Helpers do
           task(task_id, "Rendering started")
         end
       end
+
+  Once every task is created with an owner, also set
+  `config :conduit_mcp, :tasks_require_owner, true`, so an unowned task is
+  visible to no caller.
   """
   defmacro task(task_id, message \\ "Task started") do
     quote do

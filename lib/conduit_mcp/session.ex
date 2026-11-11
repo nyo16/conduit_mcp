@@ -12,12 +12,12 @@ defmodule ConduitMcp.Session do
 
       {ConduitMcp.Transport.StreamableHTTP,
         server_module: MyServer,
-        session: [
-          store: ConduitMcp.Session.EtsStore,  # default
-          ttl: :timer.minutes(30)              # default
-        ]}
+        session: [store: ConduitMcp.Session.EtsStore]}  # the default store
 
-  Set `session: false` to disable session management entirely.
+  Set `session: false` to disable session management entirely. How long an
+  idle session lives is set on the session janitor, not here:
+  `config :conduit_mcp, :session_janitor, ttl: :timer.minutes(60)` (default
+  30 minutes).
   """
 
   @default_store ConduitMcp.Session.EtsStore

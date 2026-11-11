@@ -11,6 +11,7 @@ defmodule ConduitMcp.Transport.SSETest do
   use ExUnit.Case, async: true
   import Plug.Test
   import Plug.Conn
+  import ConduitMcp.Test.Client.Harness, only: [eventually: 2]
 
   alias ConduitMcp.TestServer
   alias ConduitMcp.Transport.SSE
@@ -183,11 +184,12 @@ defmodule ConduitMcp.Transport.SSETest do
       send(sse_pid, {:DOWN, make_ref(), :process, self(), :normal})
       send(sse_pid, {:system, {self(), make_ref()}, :get_state})
 
-      # Polled to a deadline rather than one `Process.sleep/1`: under
-      # `mix coveralls` a single sleep is exactly the wall-clock race T-M7 was
-      # written to remove, and the tempting fix is a longer sleep.
-      assert drained?(sse_pid, System.monotonic_time(:millisecond) + 5_000),
-             "mailbox never drained: #{inspect(Process.info(sse_pid, :message_queue_len))}"
+      # Polled to a deadline rather than one sleep: under `mix coveralls` a
+      # single sleep is exactly the wall-clock race T-M7 was written to remove.
+      eventually(
+        fn -> Process.info(sse_pid, :message_queue_len) == {:message_queue_len, 0} end,
+        5_000
+      )
 
       conn = Task.await(task, 5_000)
       assert conn.resp_body =~ ":\r\n"
@@ -228,10 +230,11 @@ defmodule ConduitMcp.Transport.SSETest do
       for i <- 1..20, do: send(sse_pid, {:junk, i})
 
       # The junk drains; the two Bandit messages must not. Plug.Test's adapter
-      # never consumes them, so they stay queued for the whole stream.
-      assert queue_settles_at(sse_pid, 2, System.monotonic_time(:millisecond) + 5_000),
-             "expected exactly the 2 Bandit messages to remain, found " <>
-               "#{inspect(Process.info(sse_pid, :message_queue_len))}"
+      # never consumes them, so they stay queued for the whole stream. The
+      # mailbox is FIFO: had the drain taken them too, the last two messages
+      # left would be junk, so this never holds.
+      bandit = [{:bandit, {:send_window_update, 65_535}}, {:bandit, {:rst_stream, 8}}]
+      eventually(fn -> Process.info(sse_pid, :messages) == {:messages, bandit} end, 5_000)
 
       Task.await(task, 5_000)
     end
@@ -274,8 +277,7 @@ defmodule ConduitMcp.Transport.SSETest do
           |> SSE.call(opts)
         end)
 
-      assert slots_reach?(before + 1, System.monotonic_time(:millisecond) + 5_000),
-             "the spawned stream never acquired its slot"
+      eventually(fn -> SSE.active_connections() == before + 1 end, 5_000)
 
       Process.exit(pid, {:shutdown, :peer_closed})
       assert_receive {:DOWN, ^ref, :process, ^pid, {:shutdown, :peer_closed}}, 1_000
@@ -901,57 +903,6 @@ defmodule ConduitMcp.Transport.SSETest do
 
       assert {ConduitMcp.Plugs.Auth, %{strategy: :bearer_token, token: "t"}} =
                Keyword.fetch!(opts, :auth_plug)
-    end
-  end
-
-  # Polls to a deadline instead of sleeping once. Returns true as soon as the
-  # loop has drained everything it is allowed to drain.
-  defp drained?(pid, deadline) do
-    case Process.info(pid, :message_queue_len) do
-      {:message_queue_len, 0} ->
-        true
-
-      _ ->
-        if System.monotonic_time(:millisecond) >= deadline do
-          false
-        else
-          Process.sleep(10)
-          drained?(pid, deadline)
-        end
-    end
-  end
-
-  # Waits for the queue to reach `expected` and stay there, so a slow drain
-  # cannot pass by happening to be at `expected` on the way down.
-  defp queue_settles_at(pid, expected, deadline) do
-    case Process.info(pid, :message_queue_len) do
-      {:message_queue_len, ^expected} ->
-        Process.sleep(60)
-        Process.info(pid, :message_queue_len) == {:message_queue_len, expected}
-
-      _ ->
-        if System.monotonic_time(:millisecond) >= deadline do
-          false
-        else
-          Process.sleep(10)
-          queue_settles_at(pid, expected, deadline)
-        end
-    end
-  end
-
-  # Polls `SSE.active_connections/0` until it reaches `expected`: the stream
-  # acquires its slot inside `SSE.call/2`, which gives the caller no signal.
-  defp slots_reach?(expected, deadline) do
-    cond do
-      SSE.active_connections() == expected ->
-        true
-
-      System.monotonic_time(:millisecond) >= deadline ->
-        false
-
-      true ->
-        Process.sleep(10)
-        slots_reach?(expected, deadline)
     end
   end
 

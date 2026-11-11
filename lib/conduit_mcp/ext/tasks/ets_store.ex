@@ -114,11 +114,13 @@ defmodule ConduitMcp.Ext.Tasks.EtsStore do
   defp authorize(_record, _caller), do: {:error, :not_found}
 
   # Replaces the row only while it still holds exactly `old` (`=:=`, a deep
-  # term comparison; a map *pattern* would also match supersets).
-  defp swap(task_id, old, new) do
+  # term comparison; a map *pattern* would also match supersets). The key is
+  # bound in the match head, not compared in a guard, so ETS looks the row up
+  # instead of scanning the table. Task ids are strings, never match-spec
+  # variables.
+  defp swap(task_id, old, new) when is_binary(task_id) do
     spec = [
-      {{:"$1", :"$2"}, [{:"=:=", :"$1", {:const, task_id}}, {:"=:=", :"$2", {:const, old}}],
-       [{{:"$1", {:const, new}}}]}
+      {{task_id, :"$2"}, [{:"=:=", :"$2", {:const, old}}], [{{{:const, task_id}, {:const, new}}}]}
     ]
 
     :ets.select_replace(@table, spec) == 1
@@ -128,7 +130,11 @@ defmodule ConduitMcp.Ext.Tasks.EtsStore do
 
   @doc false
   @spec table_opts() :: [atom() | tuple()]
-  def table_opts, do: [:named_table, :public, :set, read_concurrency: true]
+  # `write_concurrency: true`, not `:auto`: `:auto` also turns on
+  # decentralized counters, which slow the `:ets.info(@table, :size)` cap
+  # check.
+  def table_opts,
+    do: [:named_table, :public, :set, read_concurrency: true, write_concurrency: true]
 
   defp ensure_table do
     if :ets.whereis(@table) == :undefined do

@@ -414,6 +414,22 @@ How the stream behaves:
 These options must be positive integers, or `init/1` raises
 `ArgumentError`.
 
+### Under HTTP/2 (Bandit 1.14)
+
+- **Per connection.** `:max_streams` counts every stream the server holds, on
+  all connections. Bandit separately allows at most 500 concurrent streams on
+  one HTTP/2 connection (its `max_concurrent_streams` default, set through
+  Bandit's `http_2_options`), `subscriptions/listen` streams included.
+- **Bursts and window updates.** Bandit resets a stream with
+  `ENHANCE_YOUR_CALM` once 100 messages from the client are waiting on it, and
+  a stream that is sending reads at most one of them per write. A client that
+  answers every DATA frame with a `WINDOW_UPDATE` can therefore have a stream
+  reset during a long burst of notifications (in a test, after about 600 back to
+  back). Mint and Finch refill their window by threshold rather than per
+  frame, and a 1 000-notification burst completes over them. This is Bandit's
+  behaviour for any plug that streams; a client that floods a stream with
+  frames only resets its own stream.
+
 ## What the modern era leaves out
 
 | Legacy | Modern |

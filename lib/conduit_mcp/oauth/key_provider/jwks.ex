@@ -430,7 +430,7 @@ if Code.ensure_loaded?(Req) do
     defp decode_jwks(body, jwks_uri) do
       case JSON.decode(body) do
         {:ok, %{"keys" => keys}} when is_list(keys) ->
-          {:ok, keys}
+          {:ok, Enum.map(keys, &ConduitMcp.OAuth.KeyProvider.public_key/1)}
 
         _ ->
           Logger.error("JWKS response from #{jwks_uri} is not a valid key set")

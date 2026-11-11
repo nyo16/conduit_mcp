@@ -82,15 +82,19 @@ defmodule Examples.AsyncTasksServer do
       "required" => ["frames", "script"]
     })
 
-    handle(fn _conn, %{"script" => script} = params ->
+    handle(fn conn, %{"script" => script} = params ->
       duration = Map.get(params, "duration_ms", 2_000)
       task_id = Tasks.generate_id()
 
+      # The owner scopes tasks/get, tasks/result and tasks/cancel to the
+      # caller; an unowned task is visible to every caller. With every task
+      # owned, also set `config :conduit_mcp, :tasks_require_owner, true`.
       {:ok, _} =
-        Tasks.create(task_id, %{
-          "tool" => "slow_render",
-          "args" => params
-        })
+        Tasks.create(
+          task_id,
+          %{"tool" => "slow_render", "args" => params},
+          Tasks.owner(conn)
+        )
 
       Task.Supervisor.start_child(Examples.AsyncTasks.Workers, fn ->
         do_render(task_id, script, duration)

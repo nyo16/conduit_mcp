@@ -482,12 +482,14 @@ extension): no user and no browser.
       {:client_credentials,
        client_id: "reporting-service",
        client_secret: {:system, "MCP_CLIENT_SECRET"},
-       scopes: ["reports:read"]}}}
+       scopes: ["reports:read"],
+       expected_issuers: ["https://auth.example.com"]}}}
 ```
 
 | Option | Default | Meaning |
 |---|---|---|
 | `:client_id` | required | The client id |
+| `:expected_issuers` | required | The authorization servers this client's credentials may be sent to (exact issuer match). The MCP server names its authorization server, so without this list any server could collect the credentials. `nil` or `[]` raises at config time |
 | `:client_secret` | `nil` | A string, a `ConduitMcp.Client.Secret`, or `{:system, "VAR"}`: read from the environment on every token request and never kept. An unset variable fails the request with `:client_secret_unavailable` |
 | `:private_key` | `nil` | A private JWK (map) or PEM string for `private_key_jwt` (RFC 7523). Needs `:jose` |
 | `:private_key_alg` | `"RS256"` | The JWS algorithm of the client assertion |
@@ -503,15 +505,18 @@ auth:
    client_id: "reporting-service",
    private_key: File.read!("/run/secrets/mcp_client_key.pem"),
    private_key_alg: "ES256",
-   private_key_kid: "2026-10"}
+   private_key_kid: "2026-10",
+   expected_issuers: ["https://auth.example.com"]}
 ```
 
 Discovery is the same as for the interactive flow, except that `S256` and an
-`authorization_endpoint` are not required. The token request carries
+`authorization_endpoint` are not required, and the issuer the server names
+must be in `:expected_issuers` (`:issuer_not_allowed` otherwise, before any
+token request). The token request carries
 `resource` and `scope` (the configured `:scopes`, else the server's
 `scopes_supported`). Tokens are stored like any other and replaced by a new
 token request when they expire, single-flight. The other OAuth options
-(`:store`, `:principal`, `:expected_issuers`, `:refresh_skew`,
+(`:store`, `:principal`, `:refresh_skew`,
 `:max_step_up_attempts`, and the development options) apply as well.
 
 ## Token stores
@@ -768,7 +773,7 @@ Run one hub per user, as for any per-user credential (see
 | `state` | 32 random bytes, bound to the principal, 10 minute lifetime, compared in constant time. Single use is the host's job (see "Storing the pending authorization") |
 | Authorization response | RFC 9207 `iss` checked by exact comparison before any token request; required when the authorization server advertises it. On a `state`, principal or `iss` failure nothing from the response is surfaced |
 | Resource | The canonical server URI is sent as `resource` (RFC 8707) in authorization and token requests. Protected Resource Metadata must name exactly that resource (`:resource_mismatch`) |
-| Issuer | Authorization-server metadata must name exactly the issuer its URL was built from (`:issuer_mismatch`); `expected_issuers` limits which issuers are accepted; credentials are bound to their issuer (`:authorization_server_changed`) |
+| Issuer | Authorization-server metadata must name exactly the issuer its URL was built from (`:issuer_mismatch`); `expected_issuers` limits which issuers are accepted. Credentials are bound to an issuer: a `pre_registered` client by its key (`:authorization_server_changed`), a `client_credentials` client by its required `expected_issuers` (`:issuer_not_allowed`) |
 | Endpoints | Every endpoint in the metadata must be `https` (`:insecure_endpoint`), which also refuses `javascript:`, `file:` and `data:` |
 | Metadata and token fetches | Every URL passes `ConduitMcp.Client.URLPolicy` `:public_only`: the host is resolved once and refused if any address is internal (`:url_blocked`), then the request connects to exactly that address, so DNS rebinding cannot redirect it. No redirects, no compressed bodies, 256 KiB body cap, `:request_timeout` per request |
 | Bearer token | Sent only to the MCP server's URL, never to metadata, registration or token endpoints, never across a redirect to another origin, never over plain `http` to a non-loopback host |

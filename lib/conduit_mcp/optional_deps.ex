@@ -28,9 +28,9 @@ defmodule ConduitMcp.OptionalDeps do
   @oauth_session ConduitMcp.Client.OAuth.Session
   @client_assertion ConduitMcp.Client.OAuth.ClientAssertion
 
-  @joken_deps [{:joken, "~> 2.6"}, {:jose, "~> 1.11"}]
-  @req_deps [{:req, "~> 0.6.1 or ~> 0.7"}]
-  @jsv_deps [{:jsv, "~> 0.26"}]
+  @joken_deps [{:joken, "~> 2.6"}, {:jose, "~> 1.11 and >= 1.11.13"}]
+  @req_deps [{:req, "~> 0.6 and >= 0.6.1"}]
+  @jsv_deps [{:jsv, "~> 0.26 and >= 0.26.2"}]
   @finch_deps [{:finch, "~> 0.21"}]
 
   @doc """
@@ -141,7 +141,7 @@ defmodule ConduitMcp.OptionalDeps do
   @doc """
   Returns the `private_key_jwt` client-assertion signer (compiled only with
   `:jose`), raising `ConduitMcp.OptionalDependencyError` naming
-  `{:jose, "~> 1.11"}` when it was not compiled in. Called when an OAuth
+  `{:jose, "~> 1.11 and >= 1.11.13"}` when it was not compiled in. Called when an OAuth
   configuration with a `:private_key` is validated.
   """
   @spec client_assertion!() :: module()
@@ -159,7 +159,7 @@ defmodule ConduitMcp.OptionalDeps do
       raise OptionalDependencyError,
         feature: "OAuth private_key_jwt client authentication (the :private_key option)",
         module: module,
-        deps: [{:jose, "~> 1.11"}]
+        deps: [{:jose, "~> 1.11 and >= 1.11.13"}]
     end
   end
 

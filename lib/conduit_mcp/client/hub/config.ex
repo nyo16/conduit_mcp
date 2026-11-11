@@ -147,6 +147,8 @@ defmodule ConduitMcp.Client.Hub.Config do
     :telemetry
   ]
 
+  # `:servers` holds every server's client config.
+  @derive {Inspect, except: [:servers]}
   @enforce_keys [:name, :servers, :governance, :prefix, :restart_backoff]
   defstruct [
     :name,
@@ -205,7 +207,7 @@ defmodule ConduitMcp.Client.Hub.Config do
 
   def new!(other) do
     raise ArgumentError,
-          "ConduitMcp.Client.Hub options must be a keyword list, got: #{inspect(other)}"
+          "ConduitMcp.Client.Hub options must be a keyword list, got #{Config.describe(other)}"
   end
 
   defp default_backoff(attempt), do: Backoff.full_jitter(attempt, base: 1_000, cap: 30_000)
@@ -277,7 +279,7 @@ defmodule ConduitMcp.Client.Hub.Config do
   def server_config!(_hub, server_id, opts) do
     raise ArgumentError,
           "options for hub server #{inspect(server_id)} must be a keyword list, " <>
-            "got: #{inspect(opts)}"
+            "got #{Config.describe(opts)}"
   end
 
   @doc """
@@ -382,9 +384,10 @@ defmodule ConduitMcp.Client.Hub.Config do
   rescue
     error in ArgumentError -> {:error, Exception.message(error)}
   catch
-    {:invalid, entry} -> {:error, "expected {server_id, client_opts}, got: #{inspect(entry)}"}
+    {:invalid, entry} ->
+      {:error, "expected {server_id, client_opts}, got #{Config.describe(entry)}"}
   end
 
   def validate_servers(other),
-    do: {:error, "expected a list of {server_id, client_opts}, got: #{inspect(other)}"}
+    do: {:error, "expected a list of {server_id, client_opts}, got #{Config.describe(other)}"}
 end

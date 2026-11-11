@@ -52,6 +52,7 @@ defmodule Examples.ObanTasksServer do
         modern_task(job_args, "Render queued; the task will ask for a script.")
       else
         legacy_task(
+          conn,
           job_args,
           params,
           "Render queued; the task will land in `input_required` — call `provide_render_input` to resume."
@@ -107,6 +108,7 @@ defmodule Examples.ObanTasksServer do
         modern_task(job_args, "Render queued.")
       else
         legacy_task(
+          conn,
           job_args,
           params,
           "Render queued; poll tasks/get for progress, then tasks/result for the final payload."
@@ -134,12 +136,19 @@ defmodule Examples.ObanTasksServer do
   end
 
   # Frozen 2025-11-25 flow: create the ConduitMcp.Tasks row, enqueue, return
-  # the id in `_meta.task`.
-  defp legacy_task(job_args, params, message) do
+  # the id in `_meta.task`. The owner scopes tasks/get, tasks/result and
+  # tasks/cancel to the caller; an unowned task is visible to every caller.
+  # With every task owned, also set
+  # `config :conduit_mcp, :tasks_require_owner, true`.
+  defp legacy_task(conn, job_args, params, message) do
     task_id = ConduitMcp.Tasks.generate_id()
 
     {:ok, _} =
-      ConduitMcp.Tasks.create(task_id, %{"tool" => job_args["tool"], "args" => params})
+      ConduitMcp.Tasks.create(
+        task_id,
+        %{"tool" => job_args["tool"], "args" => params},
+        ConduitMcp.Tasks.owner(conn)
+      )
 
     {:ok, _job} = job_args |> Map.put("task_id", task_id) |> Worker.new() |> Oban.insert()
 

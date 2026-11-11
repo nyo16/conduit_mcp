@@ -33,9 +33,9 @@ defmodule ConduitMcp.Client.Transport.Stdio do
               default: [],
               doc: """
               Variables to set in the server's environment, as a map or a
-              list of `{name, value}` string pairs. A value may be a
-              `ConduitMcp.Client.Secret` (exposed only when the process is
-              spawned). The server inherits **only** the allowlisted
+              list of `{name, value}` string pairs. Every value is held as a
+              `ConduitMcp.Client.Secret` (a plain string is wrapped in one)
+              and exposed only when the process is spawned. The server inherits **only** the allowlisted
               variables of this VM's environment (`HOME LOGNAME PATH SHELL
               TERM USER`; on Windows `APPDATA HOMEDRIVE HOMEPATH LOCALAPPDATA
               PATH PATHEXT PROCESSOR_ARCHITECTURE SYSTEMDRIVE SYSTEMROOT TEMP
@@ -406,8 +406,9 @@ defmodule ConduitMcp.Client.Transport.Stdio do
 
   @doc false
   # Names may appear in messages; values never do (they may be secrets).
-  @spec validate_env(term()) ::
-          {:ok, [{String.t(), String.t() | Secret.t()}]} | {:error, String.t()}
+  # Plain-string values are wrapped in a `Secret`, so a validated option list
+  # never prints one; `child_env/3` exposes them at the spawn.
+  @spec validate_env(term()) :: {:ok, [{String.t(), Secret.t()}]} | {:error, String.t()}
   def validate_env(env) when is_map(env), do: validate_env(Map.to_list(env))
 
   def validate_env(env) when is_list(env) do
@@ -426,7 +427,7 @@ defmodule ConduitMcp.Client.Transport.Stdio do
                 "ConduitMcp.Client.Secret wrapping one) without NUL bytes"}}
 
           true ->
-            {:cont, {:ok, [{name, value} | acc]}}
+            {:cont, {:ok, [{name, Secret.new(value)} | acc]}}
         end
 
       _entry, _acc ->

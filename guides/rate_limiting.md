@@ -43,7 +43,7 @@ children = [
 
 ## HTTP Rate Limiting
 
-Limits raw HTTP connections — prevents DDoS and connection flooding.
+Limits HTTP requests per client. By default it runs after authentication, so a request that fails authentication is answered 401 without being counted; set `before_auth: true` to count those too.
 
 ```elixir
 rate_limit: [
@@ -59,7 +59,29 @@ rate_limit: [
 | `:enabled` | `true` | Toggle on/off |
 | `:scale` | `60_000` | Time window in ms |
 | `:limit` | `60` | Max requests per window |
-| `:key_func` | client bucket | `(Plug.Conn.t()) -> String.t()`; default is the IPv4 address or IPv6 `/64` (see [Anonymous clients](#anonymous-clients)) |
+| `:key_func` | client bucket | `(Plug.Conn.t()) -> String.t()`; default is the IPv4 address or IPv6 `/64` (see [Anonymous clients](#anonymous-clients)). It runs before the body is parsed: `conn.body_params` is `%Plug.Conn.Unfetched{}` here, so key on the body in `:message_rate_limit` instead |
+| `:before_auth` | `false` | Run this limiter before authentication instead of after, so failed authentications (credential guessing) are counted and throttled. No principal is assigned yet, so `&ConduitMcp.Principal.rate_limit_key/1` falls back to the client bucket: per-user limits then belong in `:message_rate_limit`. Nothing about the caller is verified at that point, so a custom `:key_func` must not key on a value the caller asserts (a header, a claimed user id): anyone could fill a victim's bucket. Key on the client address (the default). Anything but a boolean raises at `init/1` |
+
+### Request order
+
+Both HTTP transports run, in order:
+
+1. authentication (`:auth`), or the HTTP rate limiter first with `before_auth: true`;
+2. the HTTP rate limiter (`:rate_limit`);
+3. the body parser, which reads at most `:max_body_bytes` (default `1_000_000`; a larger body is **413**, invalid JSON is **400**);
+4. era classification (a modern request's `_meta` and `Mcp-*` headers, **400** on a mismatch);
+5. the message rate limiter (`:message_rate_limit`).
+
+A request rejected by authentication or the HTTP rate limiter is answered before its body is read, so an oversized or malformed body costs nothing there: the response carries `connection: close`, so the server closes the connection instead of reading the rest of the body to keep it alive. `:max_body_bytes` is a transport option and must be a positive integer:
+
+```elixir
+{ConduitMcp.Transport.StreamableHTTP,
+ server_module: MyApp.MCPServer,
+ max_body_bytes: 256_000,
+ rate_limit: [backend: MyApp.RateLimiter, before_auth: true]}
+```
+
+Under Phoenix this order holds only if the transport runs before the endpoint's own `Plug.Parsers` (8 MB by default). Mounted with a router `forward`, the endpoint has already read and parsed the body before authentication, and `:max_body_bytes` has no effect. Forward the MCP path from a plug placed **above** `plug Plug.Parsers` in the endpoint instead; the README's "Phoenix Integration" shows one.
 
 ## Message Rate Limiting
 
@@ -100,9 +122,10 @@ The message rate limiter already does this out of the box: its default key is
 `"msg:" <>` the client bucket otherwise. Two OAuth subjects behind the same
 proxy therefore get distinct buckets with no configuration.
 
-The HTTP rate limiter keys on the client bucket by default, because it runs to
-bound raw connections — including unauthenticated ones. Key it on the
-principal when you want per-user HTTP limits:
+The HTTP rate limiter keys on the client bucket by default. It runs after
+authentication (unless `before_auth: true`), so a request that reaches it has
+passed authentication. Key it on the principal when you want per-user HTTP
+limits:
 
 ```elixir
 rate_limit: [

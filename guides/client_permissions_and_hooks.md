@@ -384,7 +384,7 @@ the arguments or result.
 
 ```elixir
 # mix.exs
-{:jsv, "~> 0.26"}
+{:jsv, "~> 0.26 and >= 0.26.2"}
 ```
 
 ```elixir

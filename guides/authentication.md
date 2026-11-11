@@ -10,8 +10,8 @@ dependencies were present when `:conduit_mcp` was built:
 
 | You configure | You need |
 |---|---|
-| `strategy: :oauth` | `{:joken, "~> 2.6"}` and `{:jose, "~> 1.11"}` |
-| `key_provider: {ConduitMcp.OAuth.KeyProvider.JWKS, ...}` | additionally `{:req, "~> 0.6.1 or ~> 0.7"}` |
+| `strategy: :oauth` | `{:joken, "~> 2.6"}` and `{:jose, "~> 1.11 and >= 1.11.13"}` |
+| `key_provider: {ConduitMcp.OAuth.KeyProvider.JWKS, ...}` | additionally `{:req, "~> 0.6 and >= 0.6.1"}` |
 
 After adding them, **force a rebuild of `:conduit_mcp`**:
 

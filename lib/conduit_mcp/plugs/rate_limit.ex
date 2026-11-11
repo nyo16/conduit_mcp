@@ -33,7 +33,13 @@ defmodule ConduitMcp.Plugs.RateLimit do
     Signature: `(Plug.Conn.t()) -> String.t()`.
     Pass a remote capture (`&MyApp.RateKeys.http/1`), not an anonymous `fn`:
     `Plug.Router.forward/2` escapes transport init opts at compile time, and
-    anonymous functions cannot be escaped.
+    anonymous functions cannot be escaped. The transports run this plug
+    before the body is parsed, so `conn.body_params` is
+    `%Plug.Conn.Unfetched{}`; key on the body in
+    `ConduitMcp.Plugs.MessageRateLimit` instead.
+  - `:before_auth` - read by the HTTP transports, not by this plug: `true`
+    runs this plug before authentication instead of after it (default:
+    `false`). See "Failed authentications" below.
 
   ## Setup
 
@@ -63,13 +69,29 @@ defmodule ConduitMcp.Plugs.RateLimit do
 
   ## Default key
 
-  The default key is `ConduitMcp.Principal.client_bucket/1`, because this plug
-  bounds raw connections including unauthenticated ones: the address for an
+  The default key is `ConduitMcp.Principal.client_bucket/1`: the address for an
   IPv4 client, and the `/64` prefix (`"2001:db8:1:2::/64"`) for an IPv6 one.
   One host is typically allocated a whole `/64` and picks the low 64 bits
   itself, so a per-address key would let it rotate addresses for a fresh
   bucket on every request. IPv4-mapped IPv6 addresses (`::ffff:192.0.2.1`)
   count as the embedded IPv4 address.
+
+  ## Failed authentications
+
+  The transports run this plug **after** authentication by default, so a
+  request that fails authentication is answered 401 and never counted: by
+  default this plug does not throttle credential guessing. With
+  `rate_limit: [backend: ..., before_auth: true]` it runs before
+  authentication instead, and every request is counted, failed or not. No
+  principal is assigned at that point, so
+  `&ConduitMcp.Principal.rate_limit_key/1` falls back to the client bucket;
+  per-user limits then belong in `ConduitMcp.Plugs.MessageRateLimit`, which
+  always runs after authentication.
+
+  Before authentication nothing about the caller is verified, so a
+  `:key_func` must not key on a value the caller asserts (a header, a
+  claimed user id): anyone could fill a victim's bucket and lock them out.
+  Key on the client address (the default).
 
   To key on the precise address instead — for example when every client
   behind one `/64` is a distinct tenant you trust — pass

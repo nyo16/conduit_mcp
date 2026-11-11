@@ -15,11 +15,15 @@ if Code.ensure_loaded?(Finch) do
               {:client_credentials,
                client_id: "reporting-service",
                client_secret: {:system, "MCP_CLIENT_SECRET"},
-               scopes: ["reports:read"]}}}
+               scopes: ["reports:read"],
+               expected_issuers: ["https://auth.example.com"]}}}
 
     Discovery is the same as for the authorization-code flow (Protected
     Resource Metadata, then the authorization server's metadata; `S256` and
-    an `authorization_endpoint` are not required). The token request
+    an `authorization_endpoint` are not required), with one difference:
+    `:expected_issuers` is required, and the issuer the MCP server names must
+    be in it, because the MCP server chooses the authorization server the
+    client's credentials are sent to. The token request
     carries `resource` (RFC 8707) and `scope` (the configured `:scopes`,
     else the server's `scopes_supported`), and authenticates the client
     with:

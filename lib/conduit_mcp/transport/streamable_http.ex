@@ -80,6 +80,17 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   - `:auth` — authentication plug configuration. See `ConduitMcp.Plugs.Auth`
     and `ConduitMcp.Plugs.OAuth`. Resolved once, in `init/1`.
   - `:rate_limit` — HTTP-level rate limit configuration. See `ConduitMcp.Plugs.RateLimit`.
+    Runs after `:auth`, or before it with `rate_limit: [before_auth: true]`
+    (a boolean; anything else raises `ArgumentError` at `init/1`).
+  - `:max_body_bytes` — the largest request body read, in bytes (default:
+    1 000 000); a larger one is answered 413. The body is read after `:auth`
+    and `:rate_limit`, so a rejected request costs no body read (its response
+    closes the connection instead of draining the body). Must be a
+    positive integer, or `init/1` raises `ArgumentError`. Under Phoenix, a
+    router `forward` runs after the endpoint's own `Plug.Parsers` (8 MB by
+    default), which has then read the body before authentication and makes
+    this limit moot; forward from a plug above `plug Plug.Parsers` in the
+    endpoint instead (see the README's "Phoenix Integration").
   - `:message_rate_limit` — per-message rate limit configuration. See
     `ConduitMcp.Plugs.MessageRateLimit`.
   - `:keep_alive_interval` — milliseconds between `:\\r\\n` keep-alive
@@ -199,10 +210,25 @@ defmodule ConduitMcp.Transport.StreamableHTTP do
   defp validate_session_config!(config) when config in [nil, false], do: config
 
   defp validate_session_config!(config) when is_list(config) do
-    if Keyword.keyword?(config), do: config, else: raise_session_config!(config)
+    if Keyword.keyword?(config), do: warn_session_ttl(config), else: raise_session_config!(config)
   end
 
   defp validate_session_config!(config), do: raise_session_config!(config)
+
+  # `session: [ttl: ...]` appeared in this library's own docs but was never
+  # read: the session janitor's TTL is what expires sessions. Warned once, at
+  # `init/1` (boot, or compile time under `Plug.Router.forward/2`), rather
+  # than raised, because the key was copied from those docs.
+  defp warn_session_ttl(config) do
+    if Keyword.has_key?(config, :ttl) do
+      Logger.warning(
+        "ConduitMcp.Transport.StreamableHTTP: session: [ttl: ...] is ignored; " <>
+          "set the session TTL with config :conduit_mcp, :session_janitor, ttl: ..."
+      )
+    end
+
+    config
+  end
 
   defp raise_session_config!(config) do
     raise ArgumentError,

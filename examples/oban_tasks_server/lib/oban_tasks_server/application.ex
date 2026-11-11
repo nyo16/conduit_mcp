@@ -26,9 +26,8 @@ defmodule Examples.ObanTasks.Application do
       # 4. Oban supervisor — pulls config from :oban_tasks_server app env.
       {Oban, Application.fetch_env!(:oban_tasks_server, Oban)},
 
-      # 4. Periodically prune terminal-state task rows. The Oban pruner
-      #    above handles the oban_jobs table; this one handles ours.
-      {ConduitMcp.Tasks.Janitor, ttl: :timer.hours(1), interval: :timer.minutes(5)},
+      # Terminal task rows are pruned by the tasks janitor :conduit_mcp
+      # starts (config/config.exs); the Oban pruner handles oban_jobs.
 
       # 5. HTTP transport — serves the MCP wire protocol.
       {Bandit,

@@ -138,7 +138,10 @@ defmodule ConduitMcp.Client.OAuth.Config do
               default: nil,
               doc: """
               When a list, the authorization server the server names must be
-              one of these issuers (exact match). `nil` accepts any.
+              one of these issuers (exact match). `nil` accepts any, except
+              under `:client_credentials`, where a non-empty list is required:
+              the client's credentials go to the authorization server the MCP
+              server names, so `nil` would hand them to any server that asks.
               """
             ],
             principal: [
@@ -325,6 +328,10 @@ defmodule ConduitMcp.Client.OAuth.Config do
   invalid option.
   """
   @spec new(keyword() | t()) :: {:ok, t()} | {:error, String.t()}
+  def new(%__MODULE__{grant: :client_credentials, expected_issuers: issuers})
+      when issuers in [nil, []],
+      do: {:error, missing_issuers()}
+
   def new(%__MODULE__{} = config), do: {:ok, config}
 
   def new(opts) when is_list(opts) do
@@ -336,7 +343,10 @@ defmodule ConduitMcp.Client.OAuth.Config do
     end
   end
 
-  def new(other), do: {:error, "expected OAuth options as a keyword list, got: #{inspect(other)}"}
+  def new(other) do
+    {:error,
+     "expected OAuth options as a keyword list, got #{ConduitMcp.Client.Config.describe(other)}"}
+  end
 
   @doc "Like `new/1`, raising `ArgumentError`."
   @spec new!(keyword() | t()) :: t()
@@ -382,14 +392,25 @@ defmodule ConduitMcp.Client.OAuth.Config do
       {:client_credentials, _id} ->
         client = client(Keyword.take(valid, @credential_keys))
 
-        if client.auth_method == :none,
-          do:
-            {:error, "auth: {:client_credentials, ...} needs a :client_secret or a :private_key"},
-          else: {:ok, client}
+        cond do
+          client.auth_method == :none ->
+            {:error, "auth: {:client_credentials, ...} needs a :client_secret or a :private_key"}
+
+          valid[:expected_issuers] in [nil, []] ->
+            {:error, missing_issuers()}
+
+          true ->
+            {:ok, client}
+        end
 
       {_grant, _id} ->
         {:ok, nil}
     end
+  end
+
+  defp missing_issuers do
+    "auth: {:client_credentials, ...} needs :expected_issuers: the client's " <>
+      "credentials are sent to the authorization server the MCP server names"
   end
 
   # An internal client identity from validated client options.

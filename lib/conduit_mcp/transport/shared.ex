@@ -12,18 +12,29 @@ defmodule ConduitMcp.Transport.Shared do
 
     * the `Plug.Router` pipeline up to the transport-specific plugs,
     * `init/1` and `call/2`,
-    * the shared plug functions (`add_cors_headers`, `authenticate`,
-      `rate_limit`, `classify_era`, `message_rate_limit`),
+    * the shared plug functions (`add_cors_headers`, `rate_limit_before_auth`,
+      `authenticate`, `rate_limit`, `parse_body`, `classify_era`,
+      `message_rate_limit`),
 
   and `shared_routes/0` generates the shared routes (`options _`,
   `get "/health"`, `get "/.well-known/oauth-protected-resource"`, `match _`).
   No function body exists in both transports.
 
+  ## Pipeline order
+
+  Authenticate, rate limit, parse the body, classify the era, then
+  `message_rate_limit`. The body is read only once a request has passed
+  authentication and `:rate_limit`, so a rejected request costs no body read
+  and no JSON decoding: its response closes the connection rather than let
+  Bandit drain the unread body. With `rate_limit: [before_auth: true]` the same
+  limiter runs before authentication instead, so failed authentications are
+  counted too.
+
   ## Protocol eras
 
-  `classify_era` runs on POST and DELETE after `authenticate` and
-  `rate_limit`, and before `message_rate_limit`, so a request it rejects is
-  never counted against the client. It runs
+  `classify_era` runs on POST and DELETE after `authenticate`, `rate_limit`
+  and the body parser, and before `message_rate_limit`, so a request it
+  rejects is never counted against the client. It runs
   `ConduitMcp.Plugs.HeaderValidation`, which classifies the body
   (`ConduitMcp.Era.classify/2`): a modern request has its
   `ConduitMcp.Ctx` stored and its request-metadata headers validated (any
@@ -34,10 +45,12 @@ defmodule ConduitMcp.Transport.Shared do
   ## Plugs are resolved once
 
   `init/1` resolves `:auth`, `:rate_limit` and `:message_rate_limit` into
-  `{module, initialised_opts}` pairs, so `call/2` is `mod.call(conn, opts)`
-  and no plug's `init/1` runs per request. It also validates the shape of
-  `:cors_origin` and `:allowed_origins`, so a misconfiguration raises
-  `ArgumentError` at boot rather than failing on every request.
+  `{module, initialised_opts}` pairs, and builds the body parser's options
+  from `:max_body_bytes`, so `call/2` is `mod.call(conn, opts)` and no plug's
+  `init/1` runs per request. It also validates the shape of `:cors_origin`,
+  `:allowed_origins`, `:max_body_bytes` and `rate_limit: [before_auth: ...]`,
+  so a misconfiguration raises `ArgumentError` at boot rather than failing on
+  every request.
   `ConduitMcp.Plugs.OAuth`'s `init/1` in particular is where an unusable OAuth
   configuration is reported as a configuration error rather than a 401.
 
@@ -97,9 +110,15 @@ defmodule ConduitMcp.Transport.Shared do
       plug(ConduitMcp.Plugs.OriginValidation)
       plug(:add_cors_headers)
       plug(:match)
-      plug(Plug.Parsers, parsers: [:json], json_decoder: JSON, length: 1_000_000)
+      # Exactly one of `:rate_limit_before_auth` and `:rate_limit` is set
+      # (`rate_limit: [before_auth: true]` picks the first).
+      plug(:rate_limit_before_auth)
       plug(:authenticate)
       plug(:rate_limit)
+      # After authentication and rate limiting, so a rejected request costs no
+      # body read; before `:classify_era`, `:message_rate_limit` and the
+      # handlers, which read `conn.body_params`.
+      plug(:parse_body)
       # Before `:message_rate_limit`, so a request rejected for its era
       # metadata or headers is never counted against the client.
       plug(:classify_era)
@@ -118,6 +137,7 @@ defmodule ConduitMcp.Transport.Shared do
       def call(conn, opts) do
         conn
         |> Shared.put_private(opts)
+        |> Shared.close_if_body_left_unread()
         |> super(opts)
       end
 
@@ -131,8 +151,13 @@ defmodule ConduitMcp.Transport.Shared do
       defoverridable __transport_private__: 1
 
       defp add_cors_headers(conn, _opts), do: Shared.add_cors_headers(conn)
+
+      defp rate_limit_before_auth(conn, _opts),
+        do: Shared.run_plug(conn, :rate_limit_before_auth_plug)
+
       defp authenticate(conn, _opts), do: Shared.authenticate(conn)
       defp rate_limit(conn, _opts), do: Shared.run_plug(conn, :rate_limit_plug)
+      defp parse_body(conn, _opts), do: Shared.parse_body(conn)
       defp classify_era(conn, _opts), do: Shared.classify_era(conn)
 
       defp message_rate_limit(conn, _opts),
@@ -178,8 +203,9 @@ defmodule ConduitMcp.Transport.Shared do
   Validates and resolves transport options once, at `init/1`.
 
   Returns the options with `:auth_config`, `:auth_plug`, `:rate_limit_plug`,
-  `:message_rate_limit_plug` and `:shared_private` added. `:shared_private`
-  also carries the transport's own `__transport_private__/1` entries, so an
+  `:rate_limit_before_auth_plug`, `:message_rate_limit_plug` and
+  `:shared_private` added. `:shared_private` also carries the body parser's
+  options and the transport's own `__transport_private__/1` entries, so an
   invalid transport-specific option raises here too.
   """
   @spec init(keyword(), module()) :: keyword()
@@ -205,15 +231,37 @@ defmodule ConduitMcp.Transport.Shared do
       Keyword.get(opts, :message_rate_limit) ||
         Keyword.get(endpoint_config, :message_rate_limit)
 
+    {rate_limit_plug, rate_limit_before_auth_plug} = resolve_rate_limit(rate_limit_config)
+
     opts
     |> Keyword.put(:auth_config, auth_config)
     |> Keyword.put(:auth_plug, resolve_auth_plug(auth_config))
-    |> Keyword.put(:rate_limit_plug, resolve_plug(Plugs.RateLimit, rate_limit_config))
+    |> Keyword.put(:rate_limit_plug, rate_limit_plug)
+    |> Keyword.put(:rate_limit_before_auth_plug, rate_limit_before_auth_plug)
     |> Keyword.put(
       :message_rate_limit_plug,
       resolve_plug(Plugs.MessageRateLimit, message_rate_limit_config)
     )
     |> then(&Keyword.put(&1, :shared_private, shared_private(&1, endpoint_config, transport)))
+  end
+
+  # `rate_limit: [before_auth: true]` runs the same limiter before
+  # `:authenticate` instead of after it. `ConduitMcp.Plugs.RateLimit.init/1`
+  # ignores the key.
+  defp resolve_rate_limit(nil), do: {nil, nil}
+
+  defp resolve_rate_limit(config) do
+    case Keyword.get(config, :before_auth, false) do
+      false ->
+        {resolve_plug(Plugs.RateLimit, config), nil}
+
+      true ->
+        {nil, resolve_plug(Plugs.RateLimit, config)}
+
+      other ->
+        raise ArgumentError,
+              ":before_auth (under :rate_limit) must be a boolean; got #{inspect(other)}"
+    end
   end
 
   # `:allowed_origins` accepts a *list* and is documented two bullets above
@@ -352,6 +400,8 @@ defmodule ConduitMcp.Transport.Shared do
   # id it has to echo, and the version the server answered with.
   @cors_expose_headers "mcp-session-id, mcp-protocol-version"
 
+  @default_max_body_bytes 1_000_000
+
   defp shared_private(opts, endpoint_config, transport) do
     shared = %{
       server_module: Keyword.get(opts, :server_module),
@@ -362,7 +412,9 @@ defmodule ConduitMcp.Transport.Shared do
       auth_config: Keyword.get(opts, :auth_config),
       auth_plug: Keyword.get(opts, :auth_plug),
       rate_limit_plug: Keyword.get(opts, :rate_limit_plug),
+      rate_limit_before_auth_plug: Keyword.get(opts, :rate_limit_before_auth_plug),
       message_rate_limit_plug: Keyword.get(opts, :message_rate_limit_plug),
+      body_parsers: body_parsers(Keyword.get(opts, :max_body_bytes, @default_max_body_bytes)),
       server_name: Keyword.get(opts, :server_name) || Keyword.get(endpoint_config, :name),
       server_version:
         Keyword.get(opts, :server_version) || Keyword.get(endpoint_config, :version),
@@ -376,6 +428,15 @@ defmodule ConduitMcp.Transport.Shared do
     |> Map.merge(stream_private(opts))
     |> Map.merge(transport.__transport_private__(opts))
   end
+
+  # `Plug.Parsers`' options, built once. A tuple of atoms, integers and
+  # MFAs, so it survives the `Macro.escape/1` that `Plug.Router.forward/2`
+  # applies to init options.
+  defp body_parsers(max) when is_integer(max) and max > 0,
+    do: Plug.Parsers.init(parsers: [:json], json_decoder: JSON, length: max)
+
+  defp body_parsers(max),
+    do: raise(ArgumentError, ":max_body_bytes must be a positive integer; got #{inspect(max)}")
 
   @stream_defaults [
     keep_alive_interval: 15_000,
@@ -446,6 +507,37 @@ defmodule ConduitMcp.Transport.Shared do
       {mod, plug_opts} -> mod.call(conn, plug_opts)
     end
   end
+
+  @doc false
+  # A request answered before `:parse_body` (a 401, a 429, an Origin 403)
+  # leaves its body unread, and on an HTTP/1.1 keep-alive connection Bandit
+  # then reads that body to its end (up to 8 MB by default) before the next
+  # request. Such a response closes the connection instead, so a rejected
+  # request never costs a body read. Requests without a body keep theirs.
+  @spec close_if_body_left_unread(Plug.Conn.t()) :: Plug.Conn.t()
+  def close_if_body_left_unread(conn) do
+    if body?(conn), do: register_before_send(conn, &close_unread/1), else: conn
+  end
+
+  defp body?(conn) do
+    case get_req_header(conn, "content-length") do
+      ["0"] -> false
+      [] -> get_req_header(conn, "transfer-encoding") != []
+      _length -> true
+    end
+  end
+
+  defp close_unread(%Plug.Conn{body_params: %Plug.Conn.Unfetched{}} = conn),
+    do: put_resp_header(conn, "connection", "close")
+
+  defp close_unread(conn), do: conn
+
+  @doc false
+  # The `:parse_body` plug: `Plug.Parsers` with the options built at
+  # `init/1`. Raises `Plug.Parsers.RequestTooLargeError` (413) over
+  # `:max_body_bytes` and `Plug.Parsers.ParseError` (400) on invalid JSON.
+  @spec parse_body(Plug.Conn.t()) :: Plug.Conn.t()
+  def parse_body(conn), do: Plug.Parsers.call(conn, conn.private[:body_parsers])
 
   @metadata_path [".well-known", "oauth-protected-resource"]
 

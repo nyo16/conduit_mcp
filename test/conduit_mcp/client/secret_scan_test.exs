@@ -178,6 +178,125 @@ defmodule ConduitMcp.Client.SecretScanTest do
     assert found == []
   end
 
+  @plain_env "PLAIN-ENV-c0nduit-0e7d2a91"
+  @plain_header "PLAIN-HEADER-c0nduit-6b4f8c13"
+
+  # SEC-M1: `env:` and `headers:` values given as plain strings, not
+  # `Secret`s. They may be credentials all the same.
+  test "plain-string env and header values stay out of logs, statuses and config errors" do
+    url = HTTPServers.serve_mcp(Server)
+    headers = [{"x-tenant-token", @plain_header}]
+    http_transport = {StreamableHTTP, url: url, headers: headers}
+
+    {statuses, log} =
+      with_log([level: :debug], fn ->
+        http = start_ready(http_transport, protocol: :modern)
+        stdio_transport = StdioFixture.server("normal", env: %{"CONDUIT_PLAIN" => @plain_env})
+        stdio = start_ready(stdio_transport, protocol: :modern)
+
+        hub = {__MODULE__, make_ref()}
+
+        start_supervised!(
+          {ConduitMcp.Client.Hub,
+           name: hub,
+           policy: :allow_all,
+           servers: [
+             {"http", [transport: http_transport]},
+             {"stdio", [transport: stdio_transport]}
+           ],
+           restart_backoff: fn _ -> 60_000 end}
+        )
+
+        ConduitMcp.Test.Client.Harness.await_hub_ready(hub, ["http", "stdio"])
+        manager = GenServer.whereis(ConduitMcp.Client.Hub.Manager.via(hub))
+        # The debug log records each call's message and the state after it.
+        # It stays on through the crash below, so the crash report formats it.
+        :ok = :sys.log(manager, true)
+        :ok = ConduitMcp.Client.Hub.add_server(hub, "http2", transport: http_transport)
+        # `:sys.get_status/1` returns the caller's own debug options (the raw
+        # log) verbatim; `format_status/1` governs the formatted part.
+        {:status, _pid, _module, [_pdict, _sys_state, _parent, _debug, formatted]} =
+          :sys.get_status(manager)
+
+        statuses = [{"hub manager", formatted}]
+
+        statuses =
+          for {label, client} <- [{"http connection", http}, {"stdio connection", stdio}],
+              reduce: statuses do
+            acc ->
+              conn = connection(client)
+              status = :sys.get_status(conn)
+              ref = Process.monitor(conn)
+              :ok = :sys.terminate(conn, :scan_crash)
+              assert_receive {:DOWN, ^ref, :process, ^conn, _reason}
+              # The client's supervisor restarts it; wait for the new one.
+              eventually(fn -> match?({:ok, new, _} when new != conn, lookup(client)) end)
+              [{label, status} | acc]
+          end
+
+        :ok = :sys.terminate(manager, :scan_crash)
+
+        # Crash reports are written by the dying processes; waiting for their
+        # replacements keeps the capture open until those reports are in.
+        eventually(fn ->
+          new = GenServer.whereis(ConduitMcp.Client.Hub.Manager.via(hub))
+          is_pid(new) and new != manager
+        end)
+
+        assert :ok = Client.await_ready(http, 5_000)
+        assert :ok = Client.await_ready(stdio, 5_000)
+        statuses
+      end)
+
+    assert log =~ "terminating"
+
+    errors =
+      for opts <- [
+            # Not a keyword list.
+            %{name: :x, transport: http_transport},
+            # Transport options that are not a keyword list.
+            [name: :x, transport: {StreamableHTTP, Map.new(elem(http_transport, 1))}],
+            # Not `{module, opts}`.
+            [name: :x, transport: {StreamableHTTP, elem(http_transport, 1), :extra}]
+          ] do
+        assert_raise ArgumentError, fn -> ConduitMcp.Client.child_spec(opts) end
+      end
+
+    hub_errors =
+      for opts <- [
+            %{name: :h, policy: :allow_all, servers: [{"a", [transport: http_transport]}]},
+            [name: :h, policy: :allow_all, servers: [{"a", Map.new(transport: http_transport)}]],
+            [name: :h, policy: :allow_all, servers: [{"a", [transport: http_transport], :x}]],
+            [name: :h, policy: :allow_all, servers: %{"a" => [transport: http_transport]}]
+          ] do
+        assert_raise ArgumentError, fn -> ConduitMcp.Client.Hub.child_spec(opts) end
+      end
+
+    # An OAuth option term that is not a keyword list.
+    {:error, oauth_error} = OAuth.Config.new(%{client_secret: @plain_header})
+
+    # Host data in `:assigns`.
+    config =
+      ConduitMcp.Client.Config.new!(
+        name: :x,
+        transport: http_transport,
+        assigns: %{tenant: @plain_header}
+      )
+
+    haystacks =
+      [{"logs", log}, {"oauth config error", oauth_error}, {"inspect config", inspect(config)}] ++
+        Enum.map(statuses, fn {label, status} -> {label, deep(status)} end) ++
+        Enum.map(errors ++ hub_errors, &{"config error", Exception.message(&1)})
+
+    found =
+      for {label, haystack} <- haystacks,
+          secret <- [@plain_env, @plain_header],
+          String.contains?(haystack, secret),
+          do: {label, secret}
+
+    assert found == []
+  end
+
   # Every flow, with its known secret values and the process statuses
   # (`:sys.get_status/1`, what a crash report formats) it collected.
   defp run_flows do
@@ -350,6 +469,7 @@ defmodule ConduitMcp.Client.SecretScanTest do
              client_id: "svc",
              client_secret: @client_secret,
              scopes: ["read"],
+             expected_issuers: [fake.issuer],
              allow_insecure_oauth: true}},
        backoff: fn _ -> 60_000 end},
       id: name
@@ -377,9 +497,11 @@ defmodule ConduitMcp.Client.SecretScanTest do
   end
 
   defp connection(name) do
-    {:ok, conn, _view} = Registry.lookup({:client, name})
+    {:ok, conn, _view} = lookup(name)
     conn
   end
+
+  defp lookup(name), do: Registry.lookup({:client, name})
 
   defp connection_data(name) do
     {_state, data} = :sys.get_state(connection(name))

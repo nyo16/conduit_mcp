@@ -1,0 +1,7 @@
+version: 2
+updates:
+  # The workflows pin every action to a commit SHA; this moves the pins.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

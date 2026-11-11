@@ -4,6 +4,7 @@ defmodule ConduitMcp.OAuth.KeyProvider.JWKSTest do
   use ExUnit.Case, async: false
 
   import ExUnit.CaptureLog
+  import ConduitMcp.Test.Client.Harness, only: [eventually: 1]
 
   alias ConduitMcp.OAuth.KeyProvider.JWKS
 
@@ -52,6 +53,26 @@ defmodule ConduitMcp.OAuth.KeyProvider.JWKSTest do
     # Second call served from cache — break the stub to prove no refetch
     Req.Test.stub(__MODULE__, fn _conn -> raise "must not refetch" end)
     assert {:ok, @keys} = JWKS.fetch_keys(config)
+  end
+
+  test "private members of a published key are dropped before it is cached" do
+    jwk = JOSE.JWK.generate_key({:rsa, 2048})
+    {_, private} = JOSE.JWK.to_map(jwk)
+    # `d` without the CRT values: the shape jose would factor on parse.
+    published = private |> Map.drop(~w(p q dp dq qi)) |> Map.put("kid", "leaky")
+    assert Map.has_key?(published, "d")
+    stub_json(200, %{"keys" => [published]})
+
+    config = [jwks_uri: "https://auth.example.com/jwks-private-members"]
+    assert {:ok, cached} = JWKS.fetch_key("leaky", config)
+
+    assert cached == Map.take(published, ~w(kty kid n e))
+
+    {_, token} =
+      JOSE.JWT.sign(jwk, %{"alg" => "RS256"}, %{"sub" => "u1"}) |> JOSE.JWS.compact()
+
+    assert {true, %JOSE.JWT{fields: %{"sub" => "u1"}}, _jws} =
+             JOSE.JWT.verify_strict(JOSE.JWK.from_map(cached), ["RS256"], token)
   end
 
   test "rejects http:// URIs unless allow_insecure_jwks is set" do
@@ -247,11 +268,13 @@ defmodule ConduitMcp.OAuth.KeyProvider.JWKSTest do
     :ets.delete(@table, {:last_refresh, uri})
 
     parent = self()
+    first = :atomics.new(1, [])
 
+    # The first fetch holds the lock until the test publishes; any later
+    # fetch answers at once, so it cannot hang, only trip `refute_received`.
     Req.Test.stub(__MODULE__, fn conn ->
-      send(parent, :outbound_fetch)
-      # Hold the lock so the second task is a genuine waiter.
-      Process.sleep(80)
+      send(parent, {:fetching, self()})
+      if :atomics.add_get(first, 1, 1) == 1, do: receive(do: (:publish -> :ok))
       Req.Test.transport_error(conn, :econnrefused)
     end)
 
@@ -260,18 +283,16 @@ defmodule ConduitMcp.OAuth.KeyProvider.JWKSTest do
     # the assertion proves the other tasks were waiters, not serialised.
     config = [jwks_uri: uri, cache_ttl: 1, stale_max_age: 1_000, refresh_cooldown: 0]
 
-    results =
-      1..4
-      |> Task.async_stream(fn _ -> JWKS.fetch_keys(config) end,
-        max_concurrency: 4,
-        ordered: false,
-        timeout: 30_000
-      )
-      |> Enum.map(fn {:ok, result} -> result end)
+    winner = Task.async(fn -> JWKS.fetch_keys(config) end)
+    assert_receive {:fetching, fetcher}
 
-    assert_receive :outbound_fetch
-    # The other three waited on the lock rather than fetching themselves.
-    refute_received :outbound_fetch
+    # Lock held: the others wait on it rather than fetching themselves.
+    waiters = for _ <- 1..3, do: Task.async(fn -> JWKS.fetch_keys(config) end)
+    await_blocked_on_lock(waiters)
+
+    send(fetcher, :publish)
+    results = Enum.map([winner | waiters], &Task.await/1)
+    refute_received {:fetching, _}
 
     # Winner and waiters must agree: nobody gets the over-age keys.
     refute Enum.any?(results, &match?({:ok, _}, &1)),
@@ -477,30 +498,24 @@ defmodule ConduitMcp.OAuth.KeyProvider.JWKSTest do
     uri = "https://auth.example.com/jwks-single-flight"
     parent = self()
 
+    # The fetch holds the lock until the test publishes, so every other task
+    # is genuinely racing, not merely arriving after the winner finished.
     Req.Test.stub(__MODULE__, fn conn ->
-      send(parent, :outbound_fetch)
-      # Hold the connection long enough that every other task is genuinely
-      # racing, not merely arriving after the winner finished.
-      Process.sleep(50)
+      send(parent, {:fetching, self()})
+      receive do: (:publish -> :ok)
 
       conn
       |> Plug.Conn.put_resp_content_type("application/json")
       |> Plug.Conn.send_resp(200, JSON.encode!(%{"keys" => @keys}))
     end)
 
-    results =
-      1..25
-      |> Task.async_stream(fn _ -> JWKS.fetch_keys(jwks_uri: uri) end,
-        max_concurrency: 25,
-        ordered: false,
-        timeout: 10_000
-      )
-      |> Enum.map(fn {:ok, result} -> result end)
+    tasks = for _ <- 1..25, do: Task.async(fn -> JWKS.fetch_keys(jwks_uri: uri) end)
+    assert_receive {:fetching, fetcher}
+    await_blocked_on_lock(Enum.reject(tasks, &(&1.pid == fetcher)))
 
-    assert Enum.all?(results, &match?({:ok, @keys}, &1))
-
-    assert_receive :outbound_fetch
-    refute_receive :outbound_fetch, 100
+    send(fetcher, :publish)
+    assert Enum.all?(tasks, &match?({:ok, @keys}, Task.await(&1)))
+    refute_received {:fetching, _}
   end
 
   test "a stale refresh lock is reclaimed rather than wedging refreshes" do
@@ -546,5 +561,21 @@ defmodule ConduitMcp.OAuth.KeyProvider.JWKSTest do
     assert Enum.all?(results, &match?({:ok, @keys}, &1))
     # All writers converged on exactly one cached row for the URI.
     assert [{^uri, @keys, _cached_at}] = :ets.lookup(@table, uri)
+  end
+
+  # Each task is inside `JWKS.await_refresh/3`, polling the lock, so it is
+  # proven to be a waiter before the test lets the fetch finish.
+  defp await_blocked_on_lock(tasks) do
+    eventually(fn -> Enum.all?(tasks, &awaiting_refresh?(&1.pid)) end)
+  end
+
+  defp awaiting_refresh?(pid) do
+    case Process.info(pid, :current_stacktrace) do
+      {:current_stacktrace, frames} ->
+        Enum.any?(frames, &match?({JWKS, :await_refresh, _, _}, &1))
+
+      nil ->
+        false
+    end
   end
 end

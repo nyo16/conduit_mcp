@@ -4,7 +4,7 @@ if Code.ensure_loaded?(JSV) do
     The default `ConduitMcp.Client.SchemaValidator`, built on
     [JSV](https://hex.pm/packages/jsv) (JSON Schema 2020-12 and draft 7).
 
-    Only compiled when the optional `{:jsv, "~> 0.26"}` dependency is
+    Only compiled when the optional `{:jsv, "~> 0.26 and >= 0.26.2"}` dependency is
     present; `ConduitMcp.OptionalDeps.jsv!/0` checks for it when a client's
     options ask for validation.
 

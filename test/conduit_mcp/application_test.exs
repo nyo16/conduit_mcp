@@ -130,6 +130,57 @@ defmodule ConduitMcp.ApplicationTest do
       assert Session.EtsStore.get(id) == {:error, :not_found}
     end
 
+    test "a tasks janitor sweeps terminal tasks by default" do
+      pid = Process.whereis(ConduitMcp.Tasks.Janitor.Default)
+      assert is_pid(pid), "the tasks janitor is not running"
+
+      attach_forwarder([[:conduit_mcp, :tasks, :cleanup]])
+
+      id = "application-test-#{System.unique_integer([:positive])}"
+      # Past the janitor's one-hour TTL, whatever the comparison's edge.
+      old = System.system_time(:millisecond) - 2 * @stale_by
+
+      :ets.insert(
+        :conduit_mcp_tasks,
+        {id, %{"task_id" => id, "status" => "completed", "created_at" => old}}
+      )
+
+      send(pid, :cleanup)
+      :sys.get_state(pid)
+
+      assert_received {:telemetry, [:conduit_mcp, :tasks, :cleanup], %{removed: removed},
+                       %{store: ConduitMcp.Tasks}}
+
+      assert removed >= 1
+      assert {:error, :not_found} = ConduitMcp.Tasks.get(id)
+    end
+
+    test ":tasks_janitor false omits the janitor, and a bad value names the key" do
+      previous = Application.fetch_env(:conduit_mcp, :tasks_janitor)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:conduit_mcp, :tasks_janitor, value)
+          :error -> Application.delete_env(:conduit_mcp, :tasks_janitor)
+        end
+      end)
+
+      Application.put_env(:conduit_mcp, :tasks_janitor, false)
+      assert App.tasks_children() == [ConduitMcp.Tasks.EtsStore.Owner]
+
+      Application.put_env(:conduit_mcp, :tasks_janitor, interval: 10)
+
+      assert [_owner, %{id: ConduitMcp.Tasks.Janitor.Default, start: {_, _, [opts]}}] =
+               App.tasks_children()
+
+      assert opts[:interval] == 10
+      assert opts[:store] == ConduitMcp.Tasks
+
+      Application.put_env(:conduit_mcp, :tasks_janitor, :sometimes)
+      error = assert_raise ArgumentError, fn -> App.tasks_children() end
+      assert error.message =~ ":tasks_janitor"
+    end
+
     test "the client registry is running, unique, and holds no client of its own" do
       registry = ConduitMcp.Client.Registry
       assert is_pid(Process.whereis(registry))

@@ -490,16 +490,15 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
     tool_schemas = compile_tool_validation_schemas(tools)
     prompt_schemas = compile_prompt_validation_schemas(prompts)
 
-    # Pre-compute clean schemas (markers stripped) at compile time
+    # Pre-compute clean schemas (markers stripped) at compile time, compiled
+    # to `%NimbleOptions{}` so `NimbleOptions.validate/2` does not compile and
+    # meta-validate them on every call. `nimble_options` is pinned to one
+    # version, so the struct embedded here matches the library reading it.
     tool_dual =
-      Map.new(tool_schemas, fn {name, schema} ->
-        {name, {schema, SchemaConverter.strip_markers(schema)}}
-      end)
+      Map.new(tool_schemas, fn {name, schema} -> {name, dual(schema)} end)
 
     prompt_dual =
-      Map.new(prompt_schemas, fn {name, schema} ->
-        {name, {schema, SchemaConverter.strip_markers(schema)}}
-      end)
+      Map.new(prompt_schemas, fn {name, schema} -> {name, dual(schema)} end)
 
     quote do
       @doc false
@@ -526,6 +525,28 @@ defmodule ConduitMcp.DSL.SchemaBuilder do
         }
       end
     end
+  end
+
+  @doc false
+  # `{full_schema, clean_schema}`: the tuple both generators emit for
+  # `__validation_schema_for_tool__/1` and `__validation_schema_for_prompt__/1`.
+  # The clean schema is compiled to `%NimbleOptions{}` once, here, so
+  # `NimbleOptions.validate/2` does not compile it on every call. A schema
+  # NimbleOptions rejects (a param type it does not know) stays a keyword
+  # list: the DSL only warns about it at compile time
+  # (`validate_all_schemas/2`), and such a server must keep compiling.
+  @spec dual(keyword()) :: {keyword(), NimbleOptions.t() | keyword()}
+  def dual(schema) do
+    clean = SchemaConverter.strip_markers(schema)
+
+    compiled =
+      try do
+        NimbleOptions.new!(clean)
+      rescue
+        ArgumentError -> clean
+      end
+
+    {schema, compiled}
   end
 
   @doc """

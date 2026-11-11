@@ -57,7 +57,7 @@ defmodule ConduitMcp.Endpoint do
   existing `ConduitMcp.Handler` and all transports without modification.
   """
 
-  alias ConduitMcp.Validation.SchemaConverter
+  alias ConduitMcp.DSL.SchemaBuilder
 
   @doc """
   Registers a component module with the endpoint.
@@ -454,12 +454,11 @@ defmodule ConduitMcp.Endpoint do
   defp generate_tool_validation_clauses(tools) do
     Enum.map(tools, fn mod ->
       name = mod.__component_name__()
-      schema = mod.__validation_schema__()
-      clean_schema = SchemaConverter.strip_markers(schema)
+      dual = SchemaBuilder.dual(mod.__validation_schema__())
 
       quote do
         def __validation_schema_for_tool__(unquote(name)) do
-          {unquote(Macro.escape(schema)), unquote(Macro.escape(clean_schema))}
+          unquote(Macro.escape(dual))
         end
       end
     end)
@@ -468,12 +467,11 @@ defmodule ConduitMcp.Endpoint do
   defp generate_prompt_validation_clauses(prompts) do
     Enum.map(prompts, fn mod ->
       name = mod.__component_name__()
-      schema = mod.__validation_schema__()
-      clean_schema = SchemaConverter.strip_markers(schema)
+      dual = SchemaBuilder.dual(mod.__validation_schema__())
 
       quote do
         def __validation_schema_for_prompt__(unquote(name)) do
-          {unquote(Macro.escape(schema)), unquote(Macro.escape(clean_schema))}
+          unquote(Macro.escape(dual))
         end
       end
     end)

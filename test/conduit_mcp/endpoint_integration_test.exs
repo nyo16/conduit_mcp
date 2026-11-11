@@ -243,7 +243,6 @@ defmodule ConduitMcp.EndpointIntegrationTest do
 
       ConduitMcp.Validation.update_validation_config(
         runtime_validation: true,
-        strict_mode: true,
         type_coercion: true
       )
 

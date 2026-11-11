@@ -42,6 +42,11 @@ defmodule ConduitMcp.Session.Janitor do
   `[:conduit_mcp, :session, :cleanup]` handler would receive cancellation
   evictions as session evictions once a minute, and the same count would be
   published under two event names - one of them wrong.
+
+  A `cleanup/1` that raises or exits (a store behind a GenServer or a Repo
+  timing out) is logged as a warning naming the store and the failure's kind,
+  never its term, emits no event, and is retried at the next interval; the
+  janitor keeps running.
   """
 
   use GenServer
@@ -93,18 +98,39 @@ defmodule ConduitMcp.Session.Janitor do
     %{store: store, ttl: ttl, event: event, noun: noun} = state
 
     if cleanup_exported?(store) do
-      removed = store.cleanup(ttl)
-      count = if is_integer(removed), do: removed, else: 0
+      case run_cleanup(store, ttl) do
+        {:ok, removed} ->
+          count = if is_integer(removed), do: removed, else: 0
 
-      :telemetry.execute(event, %{removed: count}, %{store: store})
+          :telemetry.execute(event, %{removed: count}, %{store: store})
 
-      if count > 0 do
-        Logger.debug("session janitor removed #{count} #{noun}", store: inspect(store))
+          if count > 0 do
+            Logger.debug("session janitor removed #{count} #{noun}", store: inspect(store))
+          end
+
+        {:error, failure} ->
+          Logger.warning(
+            "ConduitMcp.Session.Janitor: #{inspect(store)}.cleanup/1 #{failure}; " <>
+              "retrying in #{state.interval} ms"
+          )
       end
     end
 
     schedule_cleanup(state.interval)
     {:noreply, state}
+  end
+
+  # A store backed by a GenServer or a Repo can raise or exit (a timeout).
+  # That must not take the janitor down and restart it in a loop, nor stop
+  # the sweep for good. Only the failure's kind is logged: its term may carry
+  # the store's connection details or credentials. The janitor's own bugs,
+  # outside this call, still crash it.
+  defp run_cleanup(store, ttl) do
+    {:ok, store.cleanup(ttl)}
+  rescue
+    exception -> {:error, "raised #{inspect(exception.__struct__)}"}
+  catch
+    :exit, _reason -> {:error, "exited"}
   end
 
   defp cleanup_exported?(store) do

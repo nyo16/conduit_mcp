@@ -65,7 +65,7 @@ defmodule ConduitMcp.Session.Store do
       # Custom store with TTL
       {ConduitMcp.Transport.StreamableHTTP,
         server_module: MyServer,
-        session: [store: MyApp.RedisSessionStore, ttl: :timer.minutes(60)]}
+        session: [store: MyApp.RedisSessionStore]}
 
       # Disable sessions entirely
       {ConduitMcp.Transport.StreamableHTTP,

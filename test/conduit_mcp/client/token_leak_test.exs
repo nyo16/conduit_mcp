@@ -199,6 +199,7 @@ defmodule ConduitMcp.Client.TokenLeakTest do
           client_id: "svc",
           client_secret: "s3cret",
           scopes: ["read"],
+          expected_issuers: [fake.issuer],
           allow_insecure_oauth: true,
           store: store
         )

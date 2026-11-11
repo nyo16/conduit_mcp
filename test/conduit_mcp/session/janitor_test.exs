@@ -116,6 +116,75 @@ defmodule ConduitMcp.Session.JanitorTest do
     end
   end
 
+  describe "a store whose cleanup/1 fails" do
+    defmodule FlakyStore do
+      # First call raises, second exits (a GenServer- or Repo-backed store
+      # timing out), third succeeds. The call count lives in a public table
+      # the test owns.
+      @behaviour ConduitMcp.Session.Store
+      def create(_, _), do: :ok
+      def get(_), do: {:error, :not_found}
+      def delete(_), do: :ok
+      def update(_, _), do: :ok
+
+      def cleanup(_ttl) do
+        case :ets.update_counter(__MODULE__, :calls, 1) do
+          1 -> raise "store error carrying SECRET-c0nduit-janitor"
+          2 -> exit({:timeout, {GenServer, :call, [:store, :cleanup, "SECRET-c0nduit-janitor"]}})
+          _ -> 1
+        end
+      end
+    end
+
+    test "the janitor logs, skips the event, keeps its pid and runs the next tick" do
+      :ets.new(FlakyStore, [:named_table, :public])
+      :ets.insert(FlakyStore, {:calls, 0})
+      event = [:conduit_mcp, :janitor_test, :"flaky#{System.unique_integer([:positive])}"]
+      handler_id = "janitor-flaky-#{System.unique_integer([:positive])}"
+      parent = self()
+
+      :telemetry.attach(
+        handler_id,
+        event,
+        fn _name, measurements, _metadata, _ -> send(parent, {:cleanup_event, measurements}) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      {:ok, pid} =
+        Janitor.start_link(
+          store: FlakyStore,
+          ttl: 1_000,
+          # Never fires on its own; the ticks below are the only ones.
+          interval: 60_000,
+          telemetry_event: event,
+          name: :"janitor_flaky_#{System.unique_integer([:positive])}"
+        )
+
+      log =
+        ExUnit.CaptureLog.capture_log([level: :warning], fn ->
+          for _failure <- 1..2 do
+            send(pid, :cleanup)
+            :sys.get_state(pid)
+            refute_received {:cleanup_event, _}
+          end
+        end)
+
+      assert log =~ "ConduitMcp.Session.JanitorTest.FlakyStore"
+      assert log =~ "RuntimeError"
+      assert log =~ "exit"
+      refute log =~ "SECRET-c0nduit-janitor"
+
+      send(pid, :cleanup)
+      :sys.get_state(pid)
+      assert_received {:cleanup_event, %{removed: 1}}
+      assert Process.alive?(pid)
+
+      GenServer.stop(pid)
+    end
+  end
+
   describe ":telemetry_event and :noun" do
     test "the configured event is emitted instead of the session default" do
       # ConduitMcp.Application reuses this janitor for the cancellation table.

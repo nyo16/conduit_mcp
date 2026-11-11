@@ -56,6 +56,12 @@ defmodule ConduitMcp.Transport.SSE do
     emitted too.
   - `:auth` - Authentication plug configuration (optional). Supports every
     strategy `ConduitMcp.Plugs.Auth` does, plus `:oauth`.
+  - `:rate_limit`, `:message_rate_limit`, `:max_body_bytes` - as for
+    `ConduitMcp.Transport.StreamableHTTP`: the body is read after `:auth` and
+    `:rate_limit` (default limit 1 000 000 bytes, 413 above it), and
+    `rate_limit: [before_auth: true]` moves the HTTP rate limiter ahead of
+    `:auth`. The same Phoenix caveat applies: mount the transport above the
+    endpoint's `Plug.Parsers`, not with a router `forward`.
   - `:instructions` - instructions returned by `initialize` and
     `server/discover`; overrides the server module's own (`use
     ConduitMcp.Server, instructions:` or the Endpoint's `:instructions`)

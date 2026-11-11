@@ -61,4 +61,18 @@ defmodule ConduitMcp.OAuth.KeyProvider do
   """
   @callback fetch_key(kid :: String.t(), config :: keyword()) ::
               {:ok, map()} | {:error, :not_found | term()}
+
+  # A verifier needs only the public members. A key that carries private ones
+  # comes from a misconfigured authorization server or provider, and an RSA
+  # key with `d` but no CRT values is what jose factors on parse
+  # (EEF-CVE-2026-65631), so they are dropped before any signer is built.
+  # An `oct` key is untouched: its `k` is the secret the HS signer needs.
+  @private_members ~w(d p q dp dq qi oth)
+
+  @doc false
+  @spec public_key(map()) :: map()
+  def public_key(%{"kty" => kty} = key) when kty in ["RSA", "EC", "OKP"],
+    do: Map.drop(key, @private_members)
+
+  def public_key(key), do: key
 end

@@ -21,7 +21,6 @@ defmodule ConduitMcp.Validation do
 
       config :conduit_mcp, :validation,
         runtime_validation: true,           # Enable/disable validation
-        strict_mode: true,                  # Fail on errors vs. log and continue
         type_coercion: true,                # Automatic type conversion
         log_validation_errors: false        # Log validation failures
 
@@ -229,7 +228,9 @@ defmodule ConduitMcp.Validation do
         {:error, formatted_errors}
 
       {:ok, checked_params} ->
-        # Use pre-computed clean schema if available, otherwise strip at runtime
+        # The generators precompile the clean schema (`%NimbleOptions{}`); a
+        # manual server's bare keyword schema is stripped and compiled here,
+        # per call.
         clean_schema = precomputed_clean || SchemaConverter.strip_markers(full_schema)
         keyword_params = Map.to_list(checked_params)
 
