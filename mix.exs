@@ -1,7 +1,7 @@
 defmodule ConduitMcp.MixProject do
   use Mix.Project
 
-  @version "0.11.1"
+  @version "0.11.2"
   @source_url "https://github.com/nyo16/conduit_mcp"
 
   def project do
@@ -55,13 +55,16 @@ defmodule ConduitMcp.MixProject do
   defp deps do
     [
       # Core dependencies
-      # 1.20.3 is a security floor. `Plug.Parsers` runs before
+      # 1.20.4 is a security floor. `Plug.Parsers` runs before
       # authentication and always decodes the query string, so an older plug
       # hands unauthenticated callers CVE-2026-54892 (quadratic decoding of
       # nested params, 1.19.0-1.19.2); 1.19.x and 1.20.0-1.20.2 also carry
-      # CVE-2026-56813 and CVE-2026-56814. 1.20.3 is the first release clear
-      # of all of them.
-      {:plug, "~> 1.20 and >= 1.20.3"},
+      # CVE-2026-56813 and CVE-2026-56814. 1.13.0-1.20.3 carry
+      # EEF-CVE-2026-120287 (`Plug.Parsers.MULTIPART` does not charge part and
+      # header framing to `:length`): this library parses only JSON, but the
+      # consumer's own parsers share the package. 1.20.4 is the first release
+      # clear of all of them.
+      {:plug, "~> 1.20 and >= 1.20.4"},
       # Called directly (`Plug.Crypto.secure_compare/2`). 2.2.1 is a security
       # floor: earlier releases carry EEF-CVE-2026-105963 (a wrong-typed argument
       # puts the secret in the stack trace). This library only passes binaries,
@@ -108,10 +111,16 @@ defmodule ConduitMcp.MixProject do
 
       # Optional: JSON Schema 2020-12 validation for ConduitMcp.Client's opt-in
       # `validate:` option (tool arguments and structured results).
-      # 0.26.2 is a security floor: 0.26.0-0.26.1 carry EEF-CVE-2026-117680 (a
+      # 0.28.0 is a security floor: 0.26.0-0.26.1 carry EEF-CVE-2026-117680 (a
       # regex that exhausts its match budget counts as a non-match, so data can
-      # skip `patternProperties` and `not`).
-      {:jsv, "~> 0.26 and >= 0.26.2", optional: true},
+      # skip `patternProperties` and `not`), and 0.28.0 is the first release
+      # that admits idna 8 (see `:idna` below).
+      {:jsv, "~> 0.28", optional: true},
+      # Not used directly: jsv declares it. Declared only to put a security floor
+      # under it: 0.5.0-7.1.0 carry EEF-CVE-2026-117678 (punycode labels are
+      # decoded before the 63-octet length check, so a long `xn--` label costs
+      # super-linear CPU). `optional: true` adds nothing for consumers without jsv.
+      {:idna, "~> 8.0", optional: true},
 
       # Optional: OAuth 2.1 JWT validation (only needed if using :oauth auth strategy)
       {:joken, "~> 2.6", optional: true},

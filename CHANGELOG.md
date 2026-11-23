@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2] - 2026-11-23
+
+A security and dependency release. 0.11.1 was merged but never published to
+Hex, so 0.11.2 is the first published release with its fixes: upgrading from
+0.11.0, read the 0.11.1 entry below too, its Breaking changes included.
+
+### Security
+
+- **Dependency floors.** Each is the first release clear of the advisory
+  listed; `README.md`, the client permissions guide and
+  `ConduitMcp.OptionalDependencyError` messages say the same.
+  - `plug` `~> 1.20 and >= 1.20.4` (was `>= 1.20.3`): EEF-CVE-2026-120287
+    (MEDIUM, `Plug.Parsers.MULTIPART` does not charge part and header framing
+    to its `:length` limit). This library parses only JSON, but a consumer's
+    own multipart parser shares the package.
+  - `jsv` `~> 0.28` (optional, was `>= 0.26.2`): 0.28.0 is the first release
+    that admits idna 8.
+  - `idna` `~> 8.0` (optional, floor only; reached through `jsv`):
+    EEF-CVE-2026-117678 (MEDIUM, punycode labels are decoded before the
+    63-octet length check, so a long `xn--` label costs super-linear CPU).
+
+### Changed
+
+- **Dependencies updated** within their requirements: `bandit` 1.15.0,
+  `finch` 0.25.0, `hammer` 7.6.0, `joken` 2.8.0, `jsv` 0.28.1, `req` 0.7.5,
+  `nimble_pool` 1.2.0, `telemetry` 1.4.3, `castore` 1.0.22; dev and test:
+  `ex_doc` 0.40.5, `dialyxir` 1.4.9, `sobelow` 0.19.0, `makeup` 1.2.3.
+  - Hammer 7.6.0 returns the real wait from `{:deny, ms}` instead of a flat
+    1000 ms. `ConduitMcp.Plugs.RateLimit` and
+    `ConduitMcp.Plugs.MessageRateLimit` already round it up to whole seconds
+    with a floor of 1, so `retry-after` can now exceed 1 s.
+  - JSV 0.28 changes the errors that `validate:` returns: a property or item
+    rejected by a `false` subschema (such as `additionalProperties: false`)
+    now gets its own `:boolean_schema` entry at its instance location
+    (`#/b`), and the parent's entry at `#` carries only a summary.
+
 ## [0.11.1] - 2026-11-10
 
 A security release. 0.11.0's dependency requirements admit 23 published
@@ -1695,8 +1731,9 @@ None - This release is fully backward compatible.
 - Basic authentication
 - Phoenix integration example
 
-[Unreleased]: https://github.com/nyo16/conduit_mcp/compare/v0.11.1...HEAD
-[0.11.1]: https://github.com/nyo16/conduit_mcp/compare/v0.11.0...v0.11.1
+[Unreleased]: https://github.com/nyo16/conduit_mcp/compare/v0.11.2...HEAD
+[0.11.2]: https://github.com/nyo16/conduit_mcp/compare/v0.11.0...v0.11.2
+[0.11.1]: https://github.com/nyo16/conduit_mcp/pull/23
 [0.11.0]: https://github.com/nyo16/conduit_mcp/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/nyo16/conduit_mcp/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/nyo16/conduit_mcp/compare/v0.9.7...v0.10.0

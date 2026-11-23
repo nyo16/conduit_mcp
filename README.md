@@ -48,7 +48,7 @@ need before you configure the feature:
 | `ConduitMcp.Plugs.RateLimit` / `ConduitMcp.Plugs.MessageRateLimit` ([guide](guides/rate_limiting.md)) | `:hammer` | `{:hammer, "~> 7.2"}` |
 | `ConduitMcp.PromEx` — Prometheus metrics | `:prom_ex` | `{:prom_ex, "~> 1.11"}` |
 | Client Streamable HTTP transport and client OAuth ([guide](guides/client.md)) | `:finch` | `{:finch, "~> 0.21"}` |
-| Client JSON Schema validation (`validate:`) ([guide](guides/client_permissions_and_hooks.md)) | `:jsv` | `{:jsv, "~> 0.26 and >= 0.26.2"}` |
+| Client JSON Schema validation (`validate:`) ([guide](guides/client_permissions_and_hooks.md)) | `:jsv` | `{:jsv, "~> 0.28"}` |
 
 > **Adding one of these later requires a forced rebuild.** These modules are
 > guarded by `if Code.ensure_loaded?(Dep)`, which is evaluated once — when
