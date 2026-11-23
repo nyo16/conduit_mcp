@@ -2224,6 +2224,10 @@ defmodule ConduitMcp.DSL do
   `extract_uri_params_compiled/3`. Call this at compile time and store
   the result to avoid re-compiling the regex on every request.
   """
+  # sobelow_skip ["DOS.Regex"]
+  # `template` is the developer's resource URI template literal, never request
+  # input. The pattern is `Regex.escape/1` output plus a fixed `([^/]+)` per
+  # param, anchored, with no nested quantifier.
   def compile_uri_template(template) do
     param_names =
       Regex.scan(~r/\{([^}]+)\}/, template)

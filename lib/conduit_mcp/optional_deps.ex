@@ -30,7 +30,7 @@ defmodule ConduitMcp.OptionalDeps do
 
   @joken_deps [{:joken, "~> 2.6"}, {:jose, "~> 1.11 and >= 1.11.13"}]
   @req_deps [{:req, "~> 0.6 and >= 0.6.1"}]
-  @jsv_deps [{:jsv, "~> 0.26 and >= 0.26.2"}]
+  @jsv_deps [{:jsv, "~> 0.28"}]
   @finch_deps [{:finch, "~> 0.21"}]
 
   @doc """
