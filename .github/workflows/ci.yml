@@ -258,12 +258,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: [compile, format, credo, test, dialyzer, sobelow, audit, bare_consumer]
     if: startsWith(github.ref, 'refs/tags/v')
-    # HEX_API_KEY lives in the `hex` environment, not in repository secrets, so
-    # only this job can read it. The environment admits `v*` tags only and
-    # waits for a required reviewer, so nothing reaches Hex without an
+    # HEX_API_KEY lives in the `hex-release` environment, not in repository
+    # secrets, so only this job can read it. The environment admits `v*` tags
+    # only and waits for a required reviewer, so nothing reaches Hex without an
     # approval. Both are repository settings; without them this line protects
     # nothing.
-    environment: hex
+    environment: hex-release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
