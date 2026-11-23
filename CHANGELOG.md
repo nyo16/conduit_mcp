@@ -40,9 +40,6 @@ Hex, so 0.11.2 is the first published release with its fixes: upgrading from
     rejected by a `false` subschema (such as `additionalProperties: false`)
     now gets its own `:boolean_schema` entry at its instance location
     (`#/b`), and the parent's entry at `#` carries only a summary.
-- CI: the `publish` job runs in the `hex` environment (was `hex-release`),
-  which holds `HEX_API_KEY`, admits `v*` tags only and has a required
-  reviewer.
 
 ## [0.11.1] - 2026-11-10
 
